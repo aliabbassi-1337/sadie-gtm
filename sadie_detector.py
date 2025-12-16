@@ -61,6 +61,10 @@ ENGINE_PATTERNS = {
     "SiteMinder": ["thebookingbutton.com", "siteminder.com", "direct-book"],
     "Sabre / CRS": ["sabre.com", "crs.sabre.com"],
     "eZee": ["ezeeabsolute.com", "ezeereservation.com", "ezeetechnosys.com"],
+    "RezTrip": ["reztrip.com"],
+    "IHG": ["ihg.com"],
+    "Marriott": ["marriott.com"],
+    "Hilton": ["hilton.com"],
 }
 
 # Keywords to identify booking buttons
@@ -294,25 +298,52 @@ class BookingButtonFinder:
     
     async def _dismiss_popups(self, page):
         """Try to dismiss cookie consent and other popups."""
+        log("    [COOKIES] Trying to dismiss popups...")
+        
         dismiss_selectors = [
-            "button:has-text('accept')",
+            # Common cookie consent buttons
+            "button:has-text('Accept All')",
+            "button:has-text('Accept all')",
+            "button:has-text('accept all')",
             "button:has-text('Accept')",
-            "button:has-text('agree')",
+            "button:has-text('accept')",
+            "button:has-text('I agree')",
+            "button:has-text('Agree')",
+            "button:has-text('Got it')",
             "button:has-text('OK')",
-            "button:has-text('Close')",
+            "button:has-text('Allow')",
+            "button:has-text('Continue')",
+            "a:has-text('Accept')",
+            "a:has-text('accept')",
+            # By class/id
             "[class*='cookie'] button",
+            "[class*='Cookie'] button",
             "[id*='cookie'] button",
             "[class*='consent'] button",
+            "[class*='gdpr'] button",
+            "[class*='privacy'] button:has-text('accept')",
+            # Close buttons
+            "[class*='cookie'] [class*='close']",
+            "[class*='popup'] [class*='close']",
+            "[class*='modal'] [class*='close']",
+            "button[aria-label='Close']",
+            "button[aria-label='close']",
         ]
+        
         for selector in dismiss_selectors:
             try:
                 btn = page.locator(selector).first
-                if await btn.count() > 0 and await btn.is_visible():
-                    await btn.click(timeout=500)
-                    await asyncio.sleep(0.3)
-                    break
+                if await btn.count() > 0:
+                    visible = await btn.is_visible()
+                    if visible:
+                        log(f"    [COOKIES] Clicking: {selector}")
+                        await btn.click(timeout=1000)
+                        await asyncio.sleep(0.5)
+                        return
             except Exception:
                 continue
+        
+        log("    [COOKIES] No popup found to dismiss")
     
     async def find_candidates(self, page, max_candidates: int = 3) -> list:
         """Find elements that look like booking buttons."""
@@ -323,11 +354,18 @@ class BookingButtonFinder:
         # Filter out social media links with :not()
         selectors = [
             "button:has-text('book')",
-            "a:has-text('book'):not([href*='facebook']):not([href*='twitter']):not([href*='instagram'])",
-            "a:has-text('reserve'):not([href*='facebook'])",
+            "a:has-text('book'):not([href*='facebook']):not([href*='twitter']):not([href*='instagram']):not([href*='spa']):not([href*='conference'])",
+            "a:has-text('reserve'):not([href*='facebook']):not([href*='spa']):not([href*='conference'])",
             "a:has-text('availability'):not([href*='facebook'])",
             "button:has-text('reserve')",
             "button:has-text('availability')",
+            # Additional patterns for hotels that use different text
+            "a:has-text('check rates')",
+            "a:has-text('find rooms')",
+            "a:has-text('rooms')",
+            "button:has-text('find')",
+            "a[href*='reservations']",
+            "a[href*='booking']",
         ]
         
         for selector in selectors:
@@ -353,29 +391,80 @@ class BookingButtonFinder:
         
         candidates = await self.find_candidates(page)
         
+        # Sort candidates: prioritize those with real hrefs over hash/no-href
+        async def get_href_score(el):
+            try:
+                href = await el.get_attribute("href") or ""
+                if href.startswith("http"):
+                    return 0  # Best: full URL
+                elif href.startswith("/") and len(href) > 1:
+                    return 1  # OK: relative path
+                elif href == "#" or href.startswith("#") or not href:
+                    return 2  # Worst: hash or no href
+                return 1
+            except:
+                return 2
+        
+        # Sort by href quality
+        scored = [(await get_href_score(c), i, c) for i, c in enumerate(candidates)]
+        scored.sort(key=lambda x: (x[0], x[1]))
+        candidates = [c for _, _, c in scored]
+        
+        log(f"    [CLICK] Found {len(candidates)} candidates")
+        
         if not candidates:
+            # Debug: show what buttons/links ARE on the page
+            await self._debug_page_elements(page)
             return (None, None, "no_booking_button_found")
         
         original_url = page.url
         
-        for el in candidates:
+        import time
+        
+        for i, el in enumerate(candidates):
             try:
-                # Try popup detection (short timeout)
+                # Get element info
+                el_text = await el.text_content() or ""
+                el_href = await el.get_attribute("href") or ""
+                log(f"    [CLICK] Candidate {i}: '{el_text[:30].strip()}' -> {el_href[:60] if el_href else 'no-href'}")
+                
+                # If it's a link with an external URL, just grab it!
+                # Skip: internal paths, hash links, social media, clearly non-booking pages, mailto/tel
+                if el_href:
+                    href_lower = el_href.lower()
+                    is_internal = el_href.startswith("/") or el_href.startswith("#")
+                    is_protocol_link = el_href.startswith("mailto:") or el_href.startswith("tel:")
+                    is_social = any(s in href_lower for s in ["facebook", "twitter", "instagram", "youtube", "linkedin"])
+                    is_bad_page = any(s in href_lower for s in ["/spa", "/conference", "/restaurant", "/dining", "/event", "/wedding", "/careers", "/contact", "/getaway", "/offer"])
+                    is_external_booking = not is_internal and not is_protocol_link and not is_social and not is_bad_page
+                
+                if el_href and is_external_booking:
+                    log(f"    [CLICK] Found booking URL in href, skipping click")
+                    return (None, el_href, "href_extraction")
+                
+                # Otherwise try clicking
+                click_start = time.time()
                 try:
                     async with context.expect_page(timeout=1000) as p_info:
-                        await el.click()
+                        await el.click(force=True, no_wait_after=True)
                     new_page = await p_info.value
+                    log(f"    [CLICK] Got popup in {time.time() - click_start:.1f}s")
                     return (new_page, new_page.url, "popup_page")
                 except PWTimeoutError:
-                    pass
+                    log(f"    [CLICK] No popup after {time.time() - click_start:.1f}s, checking URL...")
+                except Exception as click_err:
+                    log(f"    [CLICK] Click failed: {str(click_err)[:80]}")
+                    continue  # Try next candidate
                 
                 # No popup - wait for sidebar/modal to appear
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.5)
                 
                 # Check if URL changed
                 if page.url != original_url:
+                    log(f"    [CLICK] URL changed to: {page.url[:60]}")
                     return (page, page.url, "same_page_navigation")
                 
+                log("    [CLICK] URL unchanged, trying 2nd stage...")
                 # Try second-stage click (sidebar might have appeared)
                 second_stage = await self._try_second_stage_click(context, page)
                 if second_stage:
@@ -384,38 +473,79 @@ class BookingButtonFinder:
                 # Return page for iframe scanning
                 return (page, None, "clicked_no_navigation")
                     
-            except Exception:
+            except Exception as e:
+                log(f"    [CLICK] Error getting element info: {e}")
                 continue
         
         return (None, None, "no_booking_button_found")
     
+    async def _debug_page_elements(self, page):
+        """Log all buttons and prominent links on the page for debugging."""
+        try:
+            # Get all buttons
+            buttons = await page.locator("button").all()
+            button_texts = []
+            for b in buttons[:10]:  # Limit to first 10
+                try:
+                    txt = await b.text_content()
+                    if txt and txt.strip():
+                        button_texts.append(txt.strip()[:30])
+                except Exception:
+                    pass
+            if button_texts:
+                log(f"    [DEBUG] Buttons on page: {button_texts}")
+            
+            # Get all links with text
+            links = await page.locator("a").all()
+            link_info = []
+            for a in links[:15]:  # Limit to first 15
+                try:
+                    txt = await a.text_content()
+                    href = await a.get_attribute("href") or ""
+                    if txt and txt.strip() and len(txt.strip()) < 40:
+                        link_info.append(f"'{txt.strip()[:20]}' -> {href[:30] if href else 'no-href'}")
+                except Exception:
+                    pass
+            if link_info:
+                log(f"    [DEBUG] Links on page: {link_info[:8]}")
+        except Exception as e:
+            log(f"    [DEBUG] Error getting page elements: {e}")
+    
     async def _try_second_stage_click(self, context, page) -> tuple:
         """Try to find and click a second booking button (in sidebar/modal)."""
-        # Look for booking buttons in newly appeared elements
+        log("    [2ND STAGE] Looking for second button...")
+        
+        # Look for booking buttons that might have appeared
         second_selectors = [
             "button:has-text('book now')",
+            "button:has-text('check rates')",
             "button:has-text('check availability')",
             "button:has-text('search')",
+            "button:has-text('view rates')",
             "a:has-text('book now')",
-            "[class*='sidebar'] button:has-text('book')",
-            "[class*='modal'] button:has-text('book')",
-            "[class*='drawer'] button:has-text('book')",
+            "a:has-text('check rates')",
+            "input[type='submit']",
+            "button[type='submit']",
         ]
         
         for selector in second_selectors:
             try:
                 btn = page.locator(selector).first
-                if await btn.count() > 0 and await btn.is_visible():
+                count = await btn.count()
+                visible = await btn.is_visible() if count > 0 else False
+                log(f"    [2ND STAGE] {selector}: count={count}, visible={visible}")
+                
+                if count > 0 and visible:
                     try:
                         async with context.expect_page(timeout=1500) as p_info:
-                            await btn.click()
+                            await btn.click(force=True, no_wait_after=True)
                         new_page = await p_info.value
+                        log(f"    [2ND STAGE] Got popup: {new_page.url[:60]}")
                         return (new_page, new_page.url, "two_stage_popup")
                     except PWTimeoutError:
-                        await asyncio.sleep(0.3)
-                        if page.url != page.url:  # URL changed
-                            return (page, page.url, "two_stage_navigation")
-            except Exception:
+                        log("    [2ND STAGE] No popup from click")
+            except Exception as e:
+                log(f"    [2ND STAGE] Error: {e}")
                 continue
         
         return None
@@ -713,6 +843,7 @@ class HotelProcessor:
             ("roomraccoon", "RoomRaccoon"),
             ("ezee", "eZee"),
             ("rmscloud", "RMS Cloud"),
+            ("reztrip", "RezTrip"),
         ]
         
         for keyword, engine in keywords:

@@ -1,29 +1,4 @@
-[2025-12-16 23:35:32] Sadie Detector - Booking Engine Detection
-[2025-12-16 23:35:32] Loaded 1 hotels from hotels_manual.csv
-[2025-12-16 23:35:32] 1 hotels remaining to process
-[2025-12-16 23:35:32] [1/1] The Setai Miami Beach | https://www.thesetaihotel.com
-[2025-12-16 23:35:35]   [TIME] goto: 2.0s
-[2025-12-16 23:35:36]   [TIME] sleep: 1.0s
-[2025-12-16 23:35:36]   Loaded: thesetaihotel.com
-[2025-12-16 23:35:36]   [TIME] contacts: 0.0s
-[2025-12-16 23:35:36]     [FIND] button:has-text('book'): 0.0s (count=0)
-[2025-12-16 23:35:36]     [FIND] a:has-text('book'):not([href*='facebook']):not([href*='twitter']):not([href*='instagram']): 0.0s (count=0)
-[2025-12-16 23:35:36]     [FIND] a:has-text('reserve'):not([href*='facebook']): 0.0s (count=0)
-[2025-12-16 23:35:36]     [FIND] a:has-text('availability'):not([href*='facebook']): 0.0s (count=0)
-[2025-12-16 23:35:36]     [FIND] button:has-text('reserve'): 0.0s (count=1)
-[2025-12-16 23:35:36]     [FIND] button:has-text('availability'): 0.0s (count=0)
-[2025-12-16 23:35:37]   [TIME] button_find: 1.3s
-[2025-12-16 23:35:37]   [TIME] network_fallback: 0.0s
-[2025-12-16 23:35:37]   [TIME] frame_scan: 0.0s
-[2025-12-16 23:35:37]   [TIME] html_detect: 0.0s
-[2025-12-16 23:35:37]   Screenshot: The_Setai_Miami_Beach_homepage_20251216_233537.png
-[2025-12-16 23:35:37]   Engine: SynXis / TravelClick (n/a)
-[2025-12-16 23:35:38] 
-============================================================
-[2025-12-16 23:35:38] COMPLETE!
-[2025-12-16 23:35:38] Processed: 1 hotels
-[2025-12-16 23:35:38] Known booking engines: 1
-[2025-12-16 23:35:38] Errors: 0
-[2025-12-16 23:35:38] Output: sadie_leads.csv
-[2025-12-16 23:35:38] Screenshots: screenshots/
-[2025-12-16 23:35:38] ============================================================
+[2025-12-17 00:04:29] Sadie Detector - Booking Engine Detection
+[2025-12-17 00:04:29] Loaded 20 hotels from hotels_manual.csv
+[2025-12-17 00:04:29] Found 20 already processed, will skip them
+[2025-12-17 00:04:29] All hotels already processed. Nothing to do.
