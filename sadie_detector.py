@@ -421,22 +421,31 @@ class BookingButtonFinder:
         
         import time
         
+        booking_words = ["book", "reserve", "availability", "rates", "rooms"]
+        
         for i, el in enumerate(candidates):
             try:
                 # Get element info
-                el_text = await el.text_content() or ""
+                el_text = (await el.text_content() or "").strip().lower()
                 el_href = await el.get_attribute("href") or ""
-                log(f"    [CLICK] Candidate {i}: '{el_text[:30].strip()}' -> {el_href[:60] if el_href else 'no-href'}")
+                log(f"    [CLICK] Candidate {i}: '{el_text[:30]}' -> {el_href[:60] if el_href else 'no-href'}")
+                
+                # Skip if element text doesn't contain any booking keywords
+                if not any(word in el_text for word in booking_words):
+                    log(f"    [CLICK] Skipping - no booking text in element")
+                    continue
                 
                 # If it's a link with an external URL, just grab it!
-                # Skip: internal paths, hash links, social media, clearly non-booking pages, mailto/tel
+                # Skip: internal paths, hash links, social media, clearly non-booking pages, mailto/tel, images, CDNs
                 if el_href:
                     href_lower = el_href.lower()
                     is_internal = el_href.startswith("/") or el_href.startswith("#")
                     is_protocol_link = el_href.startswith("mailto:") or el_href.startswith("tel:")
                     is_social = any(s in href_lower for s in ["facebook", "twitter", "instagram", "youtube", "linkedin"])
-                    is_bad_page = any(s in href_lower for s in ["/spa", "/conference", "/restaurant", "/dining", "/event", "/wedding", "/careers", "/contact", "/getaway", "/offer"])
-                    is_external_booking = not is_internal and not is_protocol_link and not is_social and not is_bad_page
+                    is_bad_page = any(s in href_lower for s in ["/spa", "/conference", "/restaurant", "/dining", "/event", "/wedding", "/careers", "/contact", "/getaway", "/offer", "/group-booking"])
+                    is_image = any(href_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".pdf"])
+                    is_cdn = any(cdn in href_lower for cdn in ["cdn.", "cloudfront", "cloudinary", "crowdriff", "imgix", "fastly"])
+                    is_external_booking = not is_internal and not is_protocol_link and not is_social and not is_bad_page and not is_image and not is_cdn
                 
                 if el_href and is_external_booking:
                     log(f"    [CLICK] Found booking URL in href, skipping click")
@@ -515,6 +524,8 @@ class BookingButtonFinder:
         """Try to find and click a second booking button (in sidebar/modal)."""
         log("    [2ND STAGE] Looking for second button...")
         
+        original_url = page.url
+        
         # Look for booking buttons that might have appeared
         second_selectors = [
             "button:has-text('book now')",
@@ -536,6 +547,12 @@ class BookingButtonFinder:
                 log(f"    [2ND STAGE] {selector}: count={count}, visible={visible}")
                 
                 if count > 0 and visible:
+                    # Try to get href first (if it's a link)
+                    href = await btn.get_attribute("href") or ""
+                    if href and href.startswith("http"):
+                        log(f"    [2ND STAGE] Found href: {href[:60]}")
+                        return (None, href, "two_stage_href")
+                    
                     try:
                         async with context.expect_page(timeout=1500) as p_info:
                             await btn.click(force=True, no_wait_after=True)
@@ -544,6 +561,12 @@ class BookingButtonFinder:
                         return (new_page, new_page.url, "two_stage_popup")
                     except PWTimeoutError:
                         log("    [2ND STAGE] No popup from click")
+                        
+                        # Check if URL changed (form submission)
+                        await asyncio.sleep(0.5)
+                        if page.url != original_url:
+                            log(f"    [2ND STAGE] URL changed: {page.url[:60]}")
+                            return (page, page.url, "two_stage_navigation")
             except Exception as e:
                 log(f"    [2ND STAGE] Error: {e}")
                 continue

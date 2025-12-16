@@ -1,4 +1,39 @@
-[2025-12-17 00:04:29] Sadie Detector - Booking Engine Detection
-[2025-12-17 00:04:29] Loaded 20 hotels from hotels_manual.csv
-[2025-12-17 00:04:29] Found 20 already processed, will skip them
-[2025-12-17 00:04:29] All hotels already processed. Nothing to do.
+[2025-12-17 00:20:54] Sadie Detector - Booking Engine Detection
+[2025-12-17 00:20:54] Loaded 24 hotels from hotels_manual.csv
+[2025-12-17 00:20:54] Found 24 already processed, will skip them
+[2025-12-17 00:20:54] 1 hotels remaining to process
+[2025-12-17 00:20:55] [1/1] EAST Miami | https://www.easthotels.com/en/miami
+[2025-12-17 00:20:58]   [TIME] goto: 2.5s
+[2025-12-17 00:20:59]   [TIME] sleep: 1.0s
+[2025-12-17 00:20:59]   Loaded: easthotels.com
+[2025-12-17 00:20:59]   [TIME] contacts: 0.0s
+[2025-12-17 00:20:59]     [COOKIES] Trying to dismiss popups...
+[2025-12-17 00:20:59]     [COOKIES] No popup found to dismiss
+[2025-12-17 00:20:59]     [FIND] button:has-text('book'): 0.0s (count=0)
+[2025-12-17 00:20:59]     [FIND] a:has-text('book'):not([href*='facebook']):not([href*='twitter']):not([href*='instagram']):not([href*='spa']):not([href*='conference']): 0.0s (count=1)
+[2025-12-17 00:20:59]     [FIND] a:has-text('reserve'):not([href*='facebook']):not([href*='spa']):not([href*='conference']): 0.0s (count=0)
+[2025-12-17 00:20:59]     [FIND] a:has-text('availability'):not([href*='facebook']): 0.0s (count=0)
+[2025-12-17 00:20:59]     [FIND] button:has-text('reserve'): 0.0s (count=0)
+[2025-12-17 00:20:59]     [FIND] button:has-text('availability'): 0.0s (count=0)
+[2025-12-17 00:20:59]     [FIND] a:has-text('check rates'): 0.0s (count=0)
+[2025-12-17 00:20:59]     [FIND] a:has-text('find rooms'): 0.0s (count=0)
+[2025-12-17 00:20:59]     [FIND] a:has-text('rooms'): 0.0s (count=1)
+[2025-12-17 00:20:59]     [FIND] button:has-text('find'): 0.0s (count=0)
+[2025-12-17 00:20:59]     [FIND] a[href*='reservations']: 0.0s (count=1)
+[2025-12-17 00:20:59]     [CLICK] Found 3 candidates
+[2025-12-17 00:20:59]     [CLICK] Candidate 0: 'book nowbook now' -> https://reservations.easthotels.com/?adult=1&arrive=2025-12-
+[2025-12-17 00:20:59]     [CLICK] Found booking URL in href, skipping click
+[2025-12-17 00:20:59]   [TIME] button_find: 0.1s
+[2025-12-17 00:20:59]   Booking URL: https://reservations.easthotels.com/?adult=1&arrive=2025-12-16&child=0&depart=20...
+[2025-12-17 00:21:10]   Screenshot: EAST_Miami_20251217_002110.png
+[2025-12-17 00:21:10]   [TIME] analyze_booking: 11.0s
+[2025-12-17 00:21:10]   Engine: SynXis / TravelClick (be-cms-api.synxis.com)
+[2025-12-17 00:21:10] 
+============================================================
+[2025-12-17 00:21:10] COMPLETE!
+[2025-12-17 00:21:10] Processed: 1 hotels
+[2025-12-17 00:21:10] Known booking engines: 1
+[2025-12-17 00:21:10] Errors: 0
+[2025-12-17 00:21:10] Output: sadie_leads.csv
+[2025-12-17 00:21:10] Screenshots: screenshots/
+[2025-12-17 00:21:10] ============================================================
