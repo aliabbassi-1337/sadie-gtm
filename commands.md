@@ -3,16 +3,16 @@
 ## Setup
 
 ```bash
-# Install python3 dependencies
+# Install Python dependencies
 pip install -r requirements.txt
 
 # Install Playwright browser
-playwright install chromium
+python3 -m playwright install chromium
 ```
 
 ## Environment
 
-Create a `.env` file with your Google Places API key:
+Create a `.env` file with your Google Places API key (only needed for scraper):
 
 ```
 GOOGLE_PLACES_API_KEY=your_api_key_here
@@ -20,52 +20,68 @@ GOOGLE_PLACES_API_KEY=your_api_key_here
 
 ---
 
-## Full Pipeline (Scrape + Detect)
+## Option 1: Separate Scripts (Recommended)
 
-### Miami (default)
+### Scraper (Google Places API)
+
 ```bash
+# Scrape hotels in Miami
+python3 sadie_scraper.py
+
+# Custom location
+python3 sadie_scraper.py --center-lat 34.0522 --center-lng -118.2437 --overall-radius-km 40
+
+# Limit results
+python3 sadie_scraper.py --max-results 50
+```
+
+Output: `hotels_scraped.csv`
+
+### Detector (Booking Engine Detection)
+
+```bash
+# Detect booking engines from scraped hotels
+python3 sadie_detector.py --input hotels_scraped.csv
+
+# Use manual hotel list
+python3 sadie_detector.py --input hotels_manual.csv
+
+# Show browser for debugging
+python3 sadie_detector.py --input hotels_manual.csv --headed
+
+# Custom output
+python3 sadie_detector.py --input hotels_manual.csv --output my_leads.csv
+```
+
+Output: `sadie_leads.csv` + `screenshots/`
+
+---
+
+## Option 2: Unified Script
+
+### Full Pipeline (Scrape + Detect)
+
+```bash
+# Miami (default)
 python3 sadie_lead_gen.py
+
+# Custom location
+python3 sadie_lead_gen.py --center-lat 34.0522 --center-lng -118.2437 --overall-radius-km 40
 ```
 
-### Custom location (e.g., Los Angeles)
-```bash
-python3 sadie_lead_gen.py \
-  --center-lat 34.0522 \
-  --center-lng -118.2437 \
-  --overall-radius-km 40
-```
+### Detection Only (Skip Scraping)
 
-### Quick test (10 hotels, show browser)
 ```bash
-python3 sadie_lead_gen.py --max-results 10 --headed
-```
+# Use existing CSV
+python3 sadie_lead_gen.py --skip-scrape --input hotels_manual.csv
 
-### Larger grid for dense areas
-```bash
-python3 sadie_lead_gen.py \
-  --grid-rows 7 \
-  --grid-cols 7 \
-  --overall-radius-km 50
+# With browser visible
+python3 sadie_lead_gen.py --skip-scrape --input hotels_manual.csv --headed
 ```
 
 ---
 
-## Detection Only (Skip Scraping)
-
-Use existing CSV instead of calling Google Places API (no billing required):
-
-```bash
-# Use manual hotel list
-python3 sadie_lead_gen.py --skip-scrape --input hotels_manual.csv
-
-# With browser visible for debugging
-python3 sadie_lead_gen.py --skip-scrape --input hotels_manual.csv --headed
-
-# Custom output file
-python3 sadie_lead_gen.py --skip-scrape --input hotels_manual.csv --output my_leads.csv
-```
-
-### CSV Format (minimum required)
+## CSV Format (minimum required)
 
 ```csv
 name,website
@@ -73,21 +89,21 @@ The Setai Miami Beach,https://www.thesetaihotel.com
 Fontainebleau Miami Beach,https://www.fontainebleau.com
 ```
 
-Optional columns (will be used if present): `latitude`, `longitude`, `phone`, `address`, `rating`, `review_count`, `place_id`
+Optional columns: `latitude`, `longitude`, `phone`, `address`, `rating`, `review_count`, `place_id`
 
 ---
 
 ## Performance Tuning
 
 ```bash
-# More parallel browsers (faster, but uses more RAM)
-python3 sadie_lead_gen.py --concurrency 10
+# More parallel browsers (faster)
+python3 sadie_detector.py --input hotels.csv --concurrency 10
 
-# Slower, more polite (fewer blocks/CAPTCHAs)
-python3 sadie_lead_gen.py --concurrency 3 --pause 1.5
+# Slower, more polite
+python3 sadie_detector.py --input hotels.csv --concurrency 3 --pause 1.5
 
-# Debug mode - see the browser
-python3 sadie_lead_gen.py --headed --concurrency 1
+# Debug mode
+python3 sadie_detector.py --input hotels.csv --headed --concurrency 1
 ```
 
 ---
@@ -96,8 +112,11 @@ python3 sadie_lead_gen.py --headed --concurrency 1
 
 | File | Description |
 |------|-------------|
-| `sadie_leads.csv` | Main output with all lead data |
-| `screenshots/` | Booking page screenshots (evidence) |
+| `hotels_scraped.csv` | Hotels from Google Places scraper |
+| `sadie_leads.csv` | Final output with booking engine data |
+| `screenshots/` | Booking page screenshots |
+| `sadie_scraper.log` | Scraper log |
+| `sadie_detector.log` | Detector log |
 
 ---
 
@@ -115,23 +134,3 @@ python3 sadie_lead_gen.py --headed --concurrency 1
 | Austin | 30.2672 | -97.7431 |
 | Denver | 39.7392 | -104.9903 |
 | Seattle | 47.6062 | -122.3321 |
-
-### Example: Austin with 30km radius
-```bash
-python3 sadie_lead_gen.py --center-lat 30.2672 --center-lng -97.7431 --overall-radius-km 30
-```
-
----
-
-## Legacy Scripts
-
-The old separate scripts are still available:
-
-```bash
-# Hotel scraper only (Google Places)
-python3 "hotel_scraper_beefed_up 1.py" --max-results 100
-
-# Booking engine detector only
-python3 booking_engine_detector_parallel.py --input hotels_filtered.csv --output results.csv
-```
-
