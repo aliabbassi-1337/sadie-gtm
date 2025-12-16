@@ -30,9 +30,9 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeoutErro
 class Config:
     """Central configuration for the detector."""
     # Timeouts (milliseconds)
-    timeout_page_load: int = 20000      # 20s
-    timeout_booking_click: int = 10000  # 10s
-    timeout_popup_detect: int = 3000    # 3s
+    timeout_page_load: int = 15000      # 15s
+    timeout_booking_click: int = 3000   # 3s (was 10s!)
+    timeout_popup_detect: int = 1500    # 1.5s
     
     # Output
     output_csv: str = "sadie_leads.csv"
@@ -41,7 +41,8 @@ class Config:
     
     # Processing
     concurrency: int = 5
-    pause_between_hotels: float = 0.5
+    pause_between_hotels: float = 0.2
+    headless: bool = True
 
 
 # Booking engine URL patterns
@@ -68,26 +69,6 @@ BOOKING_BUTTON_KEYWORDS = [
     "reservation", "reservations", "check availability", 
     "check rates", "availability", "book online", "book a room",
 ]
-
-# HTML keywords for engine detection (when URL doesn't reveal engine)
-ENGINE_HTML_KEYWORDS = [
-    ("cloudbeds", "Cloudbeds"),
-    ("synxis", "SynXis / TravelClick"),
-    ("travelclick", "SynXis / TravelClick"),
-    ("mews.com", "Mews"),
-    ("littlehotelier", "Little Hotelier"),
-    ("siteminder", "SiteMinder"),
-    ("thebookingbutton", "SiteMinder"),
-    ("direct-book", "SiteMinder"),
-    ("webrezpro", "WebRezPro"),
-    ("innroad", "InnRoad"),
-    ("resnexus", "ResNexus"),
-    ("newbook", "Newbook"),
-    ("roomraccoon", "RoomRaccoon"),
-    ("ezee", "eZee"),
-    ("rmscloud", "RMS Cloud"),
-]
-
 
 # ============================================================================
 # DATA MODELS
@@ -234,19 +215,6 @@ class EngineDetector:
         return ("proprietary_or_same_domain", domain, "same_domain")
     
     @staticmethod
-    def from_html(html: str) -> tuple[str, str]:
-        """Detect engine from HTML keywords. Returns (engine_name, method)."""
-        if not html:
-            return ("", "")
-        
-        low = html.lower()
-        for keyword, engine_name in ENGINE_HTML_KEYWORDS:
-            if keyword in low:
-                return (engine_name, "html_keyword")
-        
-        return ("", "")
-    
-    @staticmethod
     def from_network(network_urls: dict, hotel_domain: str) -> tuple[str, str, str, str]:
         """Check network requests for engine domains. Returns (engine, domain, method, full_url)."""
         for host, full_url in network_urls.items():
@@ -313,110 +281,144 @@ class ContactExtractor:
 class BookingButtonFinder:
     """Finds and clicks booking buttons on hotel websites."""
     
+    # Domains to skip (social media, etc.)
+    SKIP_DOMAINS = [
+        "facebook.com", "twitter.com", "instagram.com", "linkedin.com",
+        "youtube.com", "tiktok.com", "pinterest.com", "yelp.com",
+        "tripadvisor.com", "google.com", "maps.google.com",
+        "mailto:", "tel:", "javascript:"
+    ]
+    
     def __init__(self, config: Config):
         self.config = config
     
-    async def find_candidates(self, page, max_candidates: int = 5) -> list:
-        """Find elements that look like booking buttons."""
-        candidates = []
-        loc = page.locator("a, button")
-        count = await loc.count()
-        
-        for i in range(count):
-            el = loc.nth(i)
+    async def _dismiss_popups(self, page):
+        """Try to dismiss cookie consent and other popups."""
+        dismiss_selectors = [
+            "button:has-text('accept')",
+            "button:has-text('Accept')",
+            "button:has-text('agree')",
+            "button:has-text('OK')",
+            "button:has-text('Close')",
+            "[class*='cookie'] button",
+            "[id*='cookie'] button",
+            "[class*='consent'] button",
+        ]
+        for selector in dismiss_selectors:
             try:
-                text = (await el.inner_text() or "").strip().lower()
+                btn = page.locator(selector).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    await btn.click(timeout=500)
+                    await asyncio.sleep(0.3)
+                    break
             except Exception:
                 continue
-            
-            if not text:
+    
+    async def find_candidates(self, page, max_candidates: int = 3) -> list:
+        """Find elements that look like booking buttons."""
+        import time
+        candidates = []
+        
+        # Use Playwright's text selector - try common booking button texts
+        # Filter out social media links with :not()
+        selectors = [
+            "button:has-text('book')",
+            "a:has-text('book'):not([href*='facebook']):not([href*='twitter']):not([href*='instagram'])",
+            "a:has-text('reserve'):not([href*='facebook'])",
+            "a:has-text('availability'):not([href*='facebook'])",
+            "button:has-text('reserve')",
+            "button:has-text('availability')",
+        ]
+        
+        for selector in selectors:
+            try:
+                t0 = time.time()
+                loc = page.locator(selector).first
+                count = await loc.count()
+                log(f"    [FIND] {selector}: {time.time()-t0:.1f}s (count={count})")
+                if count > 0:
+                    candidates.append(loc)
+                    if len(candidates) >= max_candidates:
+                        break
+            except Exception as e:
+                log(f"    [FIND] {selector}: error {e}")
                 continue
-            
-            for kw in BOOKING_BUTTON_KEYWORDS:
-                if kw in text:
-                    candidates.append(el)
-                    break
-            
-            if len(candidates) >= max_candidates:
-                break
         
         return candidates
     
     async def click_and_navigate(self, context, page) -> tuple:
         """Click booking button and return (page, url, method)."""
+        # Try to dismiss cookie consent banners first
+        await self._dismiss_popups(page)
+        
         candidates = await self.find_candidates(page)
         
         if not candidates:
             return (None, None, "no_booking_button_found")
         
         original_url = page.url
-        last_booking_url = None
-        last_booking_page = None
         
         for el in candidates:
-            # Try to detect popup/new tab
             try:
-                async with context.expect_page(timeout=self.config.timeout_popup_detect) as p_info:
-                    await el.click()
-                new_page = await p_info.value
+                # Try popup detection (short timeout)
                 try:
-                    await new_page.wait_for_load_state("domcontentloaded", timeout=self.config.timeout_booking_click)
-                except PWTimeoutError:
-                    pass
-                return (new_page, new_page.url, "popup_page")
-            except PWTimeoutError:
-                # Try same-page navigation
-                try:
-                    await el.click()
-                except Exception:
-                    continue
-                try:
-                    await page.wait_for_load_state("domcontentloaded", timeout=self.config.timeout_booking_click)
+                    async with context.expect_page(timeout=1000) as p_info:
+                        await el.click()
+                    new_page = await p_info.value
+                    return (new_page, new_page.url, "popup_page")
                 except PWTimeoutError:
                     pass
                 
+                # No popup - wait for sidebar/modal to appear
+                await asyncio.sleep(0.8)
+                
+                # Check if URL changed
                 if page.url != original_url:
-                    last_booking_page = page
-                    last_booking_url = page.url
+                    return (page, page.url, "same_page_navigation")
+                
+                # Try second-stage click (sidebar might have appeared)
+                second_stage = await self._try_second_stage_click(context, page)
+                if second_stage:
+                    return second_stage
+                
+                # Return page for iframe scanning
+                return (page, None, "clicked_no_navigation")
+                    
+            except Exception:
+                continue
         
-        if last_booking_url:
-            return (last_booking_page, last_booking_url, "same_page_navigation")
-        
-        return (None, None, "no_booking_button_effective")
-
-
-class FrameScanner:
-    """Scans iframes for booking engine signatures."""
+        return (None, None, "no_booking_button_found")
     
-    @staticmethod
-    async def scan(page) -> tuple[str, str, str, str]:
-        """Scan frames for engine. Returns (engine, domain, method, frame_url)."""
-        for frame in page.frames:
-            try:
-                frame_url = frame.url
-            except Exception:
-                continue
-            
-            if not frame_url or frame_url.startswith("about:"):
-                continue
-            
-            # Check frame URL for engine patterns
-            for engine_name, patterns in ENGINE_PATTERNS.items():
-                for pat in patterns:
-                    if pat in frame_url.lower():
-                        return (engine_name, pat, "frame_url_match", frame_url)
-            
-            # Check frame HTML
-            try:
-                html = await frame.content()
-            except Exception:
-                html = ""
-            
-            engine, method = EngineDetector.from_html(html)
-            if engine:
-                return (engine, "", f"frame_{method}", frame_url)
+    async def _try_second_stage_click(self, context, page) -> tuple:
+        """Try to find and click a second booking button (in sidebar/modal)."""
+        # Look for booking buttons in newly appeared elements
+        second_selectors = [
+            "button:has-text('book now')",
+            "button:has-text('check availability')",
+            "button:has-text('search')",
+            "a:has-text('book now')",
+            "[class*='sidebar'] button:has-text('book')",
+            "[class*='modal'] button:has-text('book')",
+            "[class*='drawer'] button:has-text('book')",
+        ]
         
-        return ("", "", "", "")
+        for selector in second_selectors:
+            try:
+                btn = page.locator(selector).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    try:
+                        async with context.expect_page(timeout=1500) as p_info:
+                            await btn.click()
+                        new_page = await p_info.value
+                        return (new_page, new_page.url, "two_stage_popup")
+                    except PWTimeoutError:
+                        await asyncio.sleep(0.3)
+                        if page.url != page.url:  # URL changed
+                            return (page, page.url, "two_stage_navigation")
+            except Exception:
+                continue
+        
+        return None
 
 
 # ============================================================================
@@ -468,34 +470,95 @@ class HotelProcessor:
         )
         page = await context.new_page()
         
-        # Capture network requests
-        network_urls = {}
-        def capture_request(request):
+        # Capture homepage network requests (for fallback detection)
+        homepage_network = {}
+        def capture_homepage_request(request):
             try:
                 url = request.url
                 host = extract_domain(url)
-                if host and host not in network_urls:
-                    network_urls[host] = url
+                if host and host not in homepage_network:
+                    homepage_network[host] = url
             except Exception:
                 pass
-        page.on("request", capture_request)
+        page.on("request", capture_homepage_request)
         
         try:
-            # Load page
+            import time
+            
+            # 1. Load homepage
+            t0 = time.time()
             await page.goto(result.website, timeout=self.config.timeout_page_load, wait_until="domcontentloaded")
-            await asyncio.sleep(2)  # Let JS render
+            log(f"  [TIME] goto: {time.time()-t0:.1f}s")
+            
+            t0 = time.time()
+            await asyncio.sleep(1)
+            log(f"  [TIME] sleep: {time.time()-t0:.1f}s")
             
             hotel_domain = extract_domain(page.url)
             log(f"  Loaded: {hotel_domain}")
             
-            # Extract contacts
-            result = await self._extract_contacts(page, result)
+            # 2. Extract contacts
+            t0 = time.time()
+            result = await self._extract_contacts_fast(page, result)
+            log(f"  [TIME] contacts: {time.time()-t0:.1f}s")
             
-            # Find booking engine
-            result = await self._detect_engine(context, page, hotel_domain, network_urls, result)
+            # 3. Find and click booking button
+            t0 = time.time()
+            booking_url, click_method = await self._find_booking_url(context, page)
+            log(f"  [TIME] button_find: {time.time()-t0:.1f}s")
+            result.booking_url = booking_url or ""
+            result.detection_method = click_method
             
-            # Take screenshot
-            result = await self._take_screenshot(page, result)
+            engine_name = ""
+            engine_domain = ""
+            
+            # 4. PRIMARY: Navigate to booking URL
+            if booking_url:
+                t0 = time.time()
+                engine_name, engine_domain, result = await self._analyze_booking_page(
+                    context, booking_url, hotel_domain, click_method, result
+                )
+                log(f"  [TIME] analyze_booking: {time.time()-t0:.1f}s")
+            
+            # 5. FALLBACK: Check homepage network
+            if self._needs_fallback(engine_name):
+                t0 = time.time()
+                net_engine, net_domain, _, net_url = EngineDetector.from_network(homepage_network, hotel_domain)
+                log(f"  [TIME] network_fallback: {time.time()-t0:.1f}s")
+                if net_engine and net_engine not in ("unknown_third_party",):
+                    engine_name = net_engine
+                    engine_domain = net_domain
+                    result.detection_method += "+homepage_network"
+                    if net_url and not result.booking_url:
+                        result.booking_url = net_url
+            
+            # 6. FALLBACK: Scan iframes
+            if self._needs_fallback(engine_name):
+                t0 = time.time()
+                frame_engine, frame_domain, frame_url = await self._scan_frames(page)
+                log(f"  [TIME] frame_scan: {time.time()-t0:.1f}s")
+                if frame_engine:
+                    engine_name = frame_engine
+                    engine_domain = frame_domain
+                    result.detection_method += "+frame_scan"
+                    if frame_url and not result.booking_url:
+                        result.booking_url = frame_url
+            
+            # 7. FALLBACK: HTML keyword
+            if self._needs_fallback(engine_name):
+                t0 = time.time()
+                html_engine = await self._detect_from_html(page)
+                log(f"  [TIME] html_detect: {time.time()-t0:.1f}s")
+                if html_engine:
+                    engine_name = html_engine
+                    result.detection_method += "+html_keyword"
+            
+            result.booking_engine = engine_name or "unknown"
+            result.booking_engine_domain = engine_domain
+            
+            # Take homepage screenshot if no booking screenshot was taken
+            if not result.screenshot_path:
+                result = await self._take_screenshot(page, result, suffix="_homepage")
             
             log(f"  Engine: {result.booking_engine} ({result.booking_engine_domain or 'n/a'})")
             
@@ -513,12 +576,17 @@ class HotelProcessor:
         
         return result
     
-    async def _extract_contacts(self, page, result: HotelResult) -> HotelResult:
-        """Extract phone and email from page."""
+    def _needs_fallback(self, engine_name: str) -> bool:
+        """Check if we need to try fallback detection."""
+        return engine_name in ("", "unknown", "unknown_third_party", "proprietary_or_same_domain")
+    
+    async def _extract_contacts_fast(self, page, result: HotelResult) -> HotelResult:
+        """Extract phone and email using JS evaluate (non-blocking)."""
         try:
-            html = await page.content()
-            phones = ContactExtractor.extract_phones(html)
-            emails = ContactExtractor.extract_emails(html)
+            # Get body text via JS - doesn't wait for page stability
+            text = await page.evaluate("document.body ? document.body.innerText : ''")
+            phones = ContactExtractor.extract_phones(text)
+            emails = ContactExtractor.extract_emails(text)
             
             if phones:
                 result.phone_website = phones[0]
@@ -528,74 +596,137 @@ class HotelProcessor:
             pass
         return result
     
-    async def _detect_engine(self, context, page, hotel_domain: str, network_urls: dict, result: HotelResult) -> HotelResult:
-        """Detect booking engine using multiple methods."""
-        
-        # 1. Click booking button
+    async def _find_booking_url(self, context, page) -> tuple[str, str]:
+        """Find booking button and get the booking URL."""
         booking_page, booking_url, method = await self.button_finder.click_and_navigate(context, page)
-        result.booking_url = booking_url or ""
-        result.detection_method = method
         
-        engine_name = ""
-        engine_domain = ""
-        detection_method = method
-        
-        # 2. Check booking URL
-        if booking_url:
-            log(f"  Booking URL: {booking_url}")
-            engine_name, engine_domain, url_method = EngineDetector.from_url(booking_url, hotel_domain)
-            detection_method = f"{method}+{url_method}"
-        
-        # 3. Check booking page HTML
-        if self._needs_more_detection(engine_name) and booking_page:
+        # Close the booking page if it opened (we'll open a fresh one for sniffing)
+        if booking_page and booking_page != page:
             try:
-                html = await booking_page.content()
-                html_engine, html_method = EngineDetector.from_html(html)
-                if html_engine:
-                    engine_name = html_engine
-                    detection_method = f"{detection_method}+{html_method}"
+                await booking_page.close()
             except Exception:
                 pass
         
-        # 4. Check network requests
-        if self._needs_more_detection(engine_name):
-            net_engine, net_domain, net_method, net_url = EngineDetector.from_network(network_urls, hotel_domain)
-            if net_engine:
-                engine_name = net_engine
-                engine_domain = engine_domain or net_domain
-                detection_method = f"{detection_method}+{net_method}"
-                if not result.booking_url and net_url:
-                    result.booking_url = net_url
-        
-        # 5. Check iframes
-        if self._needs_more_detection(engine_name):
-            frame_engine, frame_domain, frame_method, frame_url = await FrameScanner.scan(booking_page or page)
-            if frame_engine:
-                engine_name = frame_engine
-                engine_domain = engine_domain or frame_domain
-                detection_method = f"{detection_method}+{frame_method}"
-                if not result.booking_url and frame_url:
-                    result.booking_url = frame_url
-        
-        result.booking_engine = engine_name or "unknown"
-        result.booking_engine_domain = engine_domain
-        result.detection_method = detection_method
-        
-        return result
+        return booking_url, method
     
-    def _needs_more_detection(self, engine_name: str) -> bool:
-        """Check if we need to try more detection methods."""
-        return engine_name in ("", "unknown", "unknown_third_party", "proprietary_or_same_domain")
-    
-    async def _take_screenshot(self, page, result: HotelResult) -> HotelResult:
-        """Take screenshot of booking page."""
-        if not result.booking_url:
-            return result
+    async def _analyze_booking_page(self, context, booking_url: str, hotel_domain: str, 
+                                     click_method: str, result: HotelResult) -> tuple[str, str, HotelResult]:
+        """Navigate to booking URL, sniff network, detect engine, take screenshot.
+        Returns (engine_name, engine_domain, result)."""
+        log(f"  Booking URL: {booking_url[:80]}...")
         
+        page = await context.new_page()
+        network_urls = {}
+        engine_name = ""
+        engine_domain = ""
+        
+        # Capture all network requests
+        def capture_request(request):
+            try:
+                url = request.url
+                host = extract_domain(url)
+                if host and host not in network_urls:
+                    network_urls[host] = url
+            except Exception:
+                pass
+        
+        page.on("request", capture_request)
+        
+        try:
+            # Navigate to booking URL
+            await page.goto(booking_url, timeout=self.config.timeout_page_load, wait_until="domcontentloaded")
+            await asyncio.sleep(1.5)  # Let booking engine load
+            
+            # Detect engine from network requests (most reliable)
+            engine_name, engine_domain, net_method, engine_url = EngineDetector.from_network(network_urls, hotel_domain)
+            
+            # Fallback: check the URL itself
+            if not engine_name:
+                engine_name, engine_domain, url_method = EngineDetector.from_url(booking_url, hotel_domain)
+                net_method = url_method
+            
+            # Update booking URL if we found a better one from network
+            if engine_url and engine_url != booking_url:
+                result.booking_url = engine_url
+            
+            result.detection_method = f"{click_method}+{net_method}"
+            
+            # Take screenshot as proof
+            result = await self._take_screenshot(page, result)
+            
+        except Exception as e:
+            log(f"  Booking page error: {e}")
+        finally:
+            await page.close()
+        
+        return engine_name, engine_domain, result
+    
+    async def _scan_frames(self, page) -> tuple[str, str, str]:
+        """Scan iframes for booking engine patterns. Returns (engine, domain, url)."""
+        for frame in page.frames:
+            try:
+                frame_url = frame.url
+            except Exception:
+                continue
+            
+            if not frame_url or frame_url.startswith("about:"):
+                continue
+            
+            # Check frame URL for engine patterns (fast, no waiting)
+            for engine_name, patterns in ENGINE_PATTERNS.items():
+                for pat in patterns:
+                    if pat in frame_url.lower():
+                        return (engine_name, pat, frame_url)
+        
+        # Skip frame HTML scanning - too slow and unreliable
+        return ("", "", "")
+    
+    async def _detect_from_html(self, page) -> str:
+        """Detect engine from page HTML keywords (non-blocking)."""
+        try:
+            # Use evaluate instead of content() - doesn't wait
+            html = await page.evaluate("document.documentElement.outerHTML")
+            return self._detect_engine_from_html_content(html)
+        except Exception:
+            return ""
+    
+    def _detect_engine_from_html_content(self, html: str) -> str:
+        """Check HTML for booking engine keywords."""
+        if not html:
+            return ""
+        
+        low = html.lower()
+        
+        keywords = [
+            ("cloudbeds", "Cloudbeds"),
+            ("synxis", "SynXis / TravelClick"),
+            ("travelclick", "SynXis / TravelClick"),
+            ("mews.com", "Mews"),
+            ("littlehotelier", "Little Hotelier"),
+            ("siteminder", "SiteMinder"),
+            ("thebookingbutton", "SiteMinder"),
+            ("direct-book", "SiteMinder"),
+            ("webrezpro", "WebRezPro"),
+            ("innroad", "InnRoad"),
+            ("resnexus", "ResNexus"),
+            ("newbook", "Newbook"),
+            ("roomraccoon", "RoomRaccoon"),
+            ("ezee", "eZee"),
+            ("rmscloud", "RMS Cloud"),
+        ]
+        
+        for keyword, engine in keywords:
+            if keyword in low:
+                return engine
+        
+        return ""
+    
+    async def _take_screenshot(self, page, result: HotelResult, suffix: str = "") -> HotelResult:
+        """Take screenshot of page."""
         try:
             safe_name = re.sub(r'[^\w\-]', '_', result.name)[:50]
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{safe_name}_{timestamp}.png"
+            filename = f"{safe_name}{suffix}_{timestamp}.png"
             path = os.path.join(self.screenshots_dir, filename)
             
             await page.screenshot(path=path, full_page=False)
@@ -639,7 +770,7 @@ class DetectorPipeline:
         
         # Process hotels
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=self.config.headless)
             semaphore = asyncio.Semaphore(self.config.concurrency)
             
             processor = HotelProcessor(self.config, browser, semaphore, self.config.screenshots_dir)
@@ -650,7 +781,7 @@ class DetectorPipeline:
             ]
             
             # Write results
-            self._write_results(tasks, append_mode)
+            await self._write_results(tasks, append_mode)
             
             await browser.close()
     
@@ -684,7 +815,7 @@ class DetectorPipeline:
         ]
         return remaining, True
     
-    def _write_results(self, tasks: list, append_mode: bool):
+    async def _write_results(self, tasks: list, append_mode: bool):
         """Write results to CSV as they complete."""
         fieldnames = list(HotelResult.__dataclass_fields__.keys())
         
@@ -697,7 +828,7 @@ class DetectorPipeline:
             stats = {"processed": 0, "known_engine": 0, "errors": 0}
             
             for coro in asyncio.as_completed(tasks):
-                result = asyncio.get_event_loop().run_until_complete(coro)
+                result = await coro
                 stats["processed"] += 1
                 
                 if result.error:
@@ -733,6 +864,7 @@ async def main_async(args):
         screenshots_dir=args.screenshots_dir,
         concurrency=args.concurrency,
         pause_between_hotels=args.pause,
+        headless=not args.headed,
     )
     
     pipeline = DetectorPipeline(config)
