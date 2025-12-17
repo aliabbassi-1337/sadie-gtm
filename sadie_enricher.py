@@ -96,6 +96,8 @@ class SearchResult:
     captcha: bool = False
 
 
+_debug_mode = False
+
 async def search_duckduckgo(page, hotel_name: str, location: str = "") -> SearchResult:
     """
     Search DuckDuckGo HTML version for a hotel's official website.
@@ -112,16 +114,44 @@ async def search_duckduckgo(page, hotel_name: str, location: str = "") -> Search
     
     try:
         await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
         
-        # HTML version uses simple class-based selectors
-        results = await page.locator("a.result__a").all()
+        # Try multiple selectors for DuckDuckGo HTML results
+        selectors_to_try = [
+            "a.result__a",
+            ".result__title a",
+            ".results a[href*='http']",
+            "a.result-link",
+            "#links a[href*='http']",
+        ]
         
-        for result in results[:10]:
+        all_results = []
+        for selector in selectors_to_try:
+            results = await page.locator(selector).all()
+            if results:
+                all_results = results
+                if _debug_mode:
+                    log(f"    [DEBUG] Found {len(results)} results with selector: {selector}")
+                break
+        
+        if not all_results and _debug_mode:
+            # Debug: dump page content
+            content = await page.content()
+            log(f"    [DEBUG] No results found. Page length: {len(content)}")
+            if "robot" in content.lower() or "captcha" in content.lower():
+                log(f"    [DEBUG] Possible bot detection!")
+            # Check what's on the page
+            all_links = await page.locator("a[href]").all()
+            log(f"    [DEBUG] Total links on page: {len(all_links)}")
+        
+        for result in all_results[:10]:
             try:
                 href = await result.get_attribute("href")
                 if not href:
                     continue
+                
+                if _debug_mode:
+                    log(f"    [DEBUG] Raw href: {href[:80]}...")
                 
                 # DuckDuckGo HTML wraps URLs - extract actual URL
                 # Format: //duckduckgo.com/l/?uddg=ENCODED_URL&...
@@ -132,6 +162,8 @@ async def search_duckduckgo(page, hotel_name: str, location: str = "") -> Search
                     if uddg_end == -1:
                         uddg_end = len(href)
                     href = unquote(href[uddg_start:uddg_end])
+                    if _debug_mode:
+                        log(f"    [DEBUG] Decoded URL: {href[:80]}...")
                 
                 # Skip internal links
                 if href.startswith("/") or "duckduckgo.com" in href:
@@ -140,15 +172,21 @@ async def search_duckduckgo(page, hotel_name: str, location: str = "") -> Search
                 # Check if it's a valid hotel domain
                 if is_valid_hotel_domain(href):
                     return SearchResult(hotel_name, href, True)
+                elif _debug_mode:
+                    log(f"    [DEBUG] Skipped (OTA/social): {extract_domain(href)}")
                     
-            except Exception:
+            except Exception as e:
+                if _debug_mode:
+                    log(f"    [DEBUG] Error processing result: {e}")
                 continue
         
         return SearchResult(hotel_name, "", False)
         
     except PWTimeoutError:
         return SearchResult(hotel_name, "", False)
-    except Exception:
+    except Exception as e:
+        if _debug_mode:
+            log(f"    [DEBUG] Search error: {e}")
         return SearchResult(hotel_name, "", False)
 
 
@@ -365,9 +403,11 @@ def main():
     
     args = parser.parse_args()
     
-    # --debug implies headed mode
+    # --debug implies headed mode and verbose logging
     if args.debug:
         args.headed = True
+        global _debug_mode
+        _debug_mode = True
     
     if not os.path.exists(args.input):
         print(f"Error: Input file not found: {args.input}")

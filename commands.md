@@ -1,5 +1,11 @@
 # Sadie Lead Gen - Commands
 
+## Full Pipeline (edit run_pipeline.sh for your location)
+
+```bash
+./run_pipeline.sh
+```
+
 ## Scraper
 
 ```bash
@@ -37,4 +43,6 @@ python3 sadie_detector.py --input enricher_output/gatlinburg_hotels_enriched.csv
 python3 sadie_detector.py --input scraper_output/test_hotel.csv --output detector_output/test_leads.csv --headed --concurrency 1 --debug
 
 python3 sadie_detector.py --input scraper_output/ocean_city_hotels.csv --output detector_output/ocean_city_leads.csv
+
+python3 sadie_detector.py --input scraper_output/gatlinburg_hotels.csv --output detector_output/gatlinburg_leads.csv
 ```
