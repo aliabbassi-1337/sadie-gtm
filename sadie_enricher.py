@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Sadie Enricher - Find Missing Hotel Websites via Google Search
-===============================================================
-Uses Playwright to search Google for hotels missing websites.
-Runs multiple concurrent searches for speed.
+Sadie Enricher - Find Missing Hotel Websites via DuckDuckGo Search
+===================================================================
+Uses Playwright to search DuckDuckGo for hotels missing websites.
+DuckDuckGo is much more lenient with automated searches (no CAPTCHAs!).
 
 Usage:
     python3 sadie_enricher.py --input hotels.csv --output enriched_hotels.csv
@@ -17,7 +17,7 @@ import argparse
 import asyncio
 import random
 import time
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse, quote_plus, unquote
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
@@ -28,11 +28,11 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeoutErro
 # CONFIGURATION
 # ============================================================================
 
-DEFAULT_CONCURRENCY = 3  # Number of parallel browser contexts
+DEFAULT_CONCURRENCY = 5  # Number of parallel browser contexts (DuckDuckGo handles more)
 
-# Delays to avoid detection (seconds) - reduced for speed
-MIN_DELAY = 1.5
-MAX_DELAY = 3.0
+# Delays between searches (DuckDuckGo is friendlier, can go faster)
+MIN_DELAY = 0.8
+MAX_DELAY = 1.5
 
 # User agents to rotate
 USER_AGENTS = [
@@ -59,7 +59,7 @@ SKIP_DOMAINS = [
 PROGRESS_FILE = "enricher_progress.txt"
 
 # Thread-safe counter
-_stats = {"processed": 0, "found": 0, "captcha": 0}
+_stats = {"processed": 0, "found": 0}
 _stats_lock = asyncio.Lock()
 
 def log(msg: str):
@@ -89,87 +89,52 @@ def extract_domain(url: str) -> str:
 
 @dataclass
 class SearchResult:
-    """Result of a Google search."""
+    """Result of a DuckDuckGo search."""
     hotel_name: str
     website: str
     success: bool
     captcha: bool = False
 
 
-async def dismiss_google_prompts(page):
-    """Dismiss Google language, consent, and other prompts."""
-    dismiss_selectors = [
-        # Language prompts
-        "a:has-text('English')",
-        "button:has-text('English')",
-        # Cookie/consent prompts
-        "button:has-text('Accept all')",
-        "button:has-text('Accept All')",
-        "button:has-text('I agree')",
-        "button:has-text('Reject all')",
-        # "Stay on" prompts
-        "a:has-text('Stay')",
-        "button:has-text('Stay')",
-        # Close buttons
-        "[aria-label='Close']",
-        "[aria-label='Dismiss']",
-        "button:has-text('No thanks')",
-        "button:has-text('Not now')",
-    ]
-    
-    for selector in dismiss_selectors:
-        try:
-            btn = page.locator(selector).first
-            if await btn.count() > 0 and await btn.is_visible():
-                await btn.click(timeout=1000)
-                await asyncio.sleep(0.3)
-                return True
-        except Exception:
-            continue
-    return False
-
-
-async def search_google(page, hotel_name: str, location: str = "") -> SearchResult:
+async def search_duckduckgo(page, hotel_name: str, location: str = "") -> SearchResult:
     """
-    Search Google for a hotel's official website.
-    Returns SearchResult with the found website or empty string.
+    Search DuckDuckGo HTML version for a hotel's official website.
+    Uses the lite/HTML version which doesn't need JavaScript rendering.
     """
     # Build search query
-    query = f'"{hotel_name}"'
+    query = f'{hotel_name}'
     if location:
         query += f" {location}"
-    query += " official website"
+    query += " hotel official website"
     
-    # Force English Google
-    search_url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en"
+    # Use DuckDuckGo HTML version - no JavaScript needed, much more reliable
+    search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
     
     try:
         await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
         
-        # Dismiss any Google prompts (language, consent, etc.)
-        await dismiss_google_prompts(page)
+        # HTML version uses simple class-based selectors
+        results = await page.locator("a.result__a").all()
         
-        # Check for CAPTCHA
-        content = await page.content()
-        if "unusual traffic" in content.lower() or "captcha" in content.lower():
-            return SearchResult(hotel_name, "", False, captcha=True)
-        
-        # Extract organic search results
-        results = await page.locator("div#search a[href]").all()
-        
-        for result in results[:10]:  # Check first 10 results
+        for result in results[:10]:
             try:
                 href = await result.get_attribute("href")
                 if not href:
                     continue
                 
-                # Google wraps URLs in /url?q=...
-                if href.startswith("/url?q="):
-                    href = href.split("/url?q=")[1].split("&")[0]
+                # DuckDuckGo HTML wraps URLs - extract actual URL
+                # Format: //duckduckgo.com/l/?uddg=ENCODED_URL&...
+                if "//duckduckgo.com/l/" in href and "uddg=" in href:
+                    # Extract the uddg parameter
+                    uddg_start = href.find("uddg=") + 5
+                    uddg_end = href.find("&", uddg_start)
+                    if uddg_end == -1:
+                        uddg_end = len(href)
+                    href = unquote(href[uddg_start:uddg_end])
                 
-                # Skip internal Google links
-                if href.startswith("/") or "google.com" in href:
+                # Skip internal links
+                if href.startswith("/") or "duckduckgo.com" in href:
                     continue
                 
                 # Check if it's a valid hotel domain
@@ -220,39 +185,13 @@ async def worker(
                 queue.task_done()
                 continue
             
-            # Search Google
-            result = await search_google(page, hotel_name, location)
+            # Search DuckDuckGo (no CAPTCHAs!)
+            result = await search_duckduckgo(page, hotel_name, location)
             
             async with _stats_lock:
                 _stats["processed"] += 1
-                current = _stats["processed"]
             
-            if result.captcha:
-                async with _stats_lock:
-                    _stats["captcha"] += 1
-                log(f"  [W{worker_id}] ⚠️ CAPTCHA detected - waiting for you to solve it...")
-                
-                # Wait for user to solve CAPTCHA (check every 3 seconds)
-                for _ in range(20):  # Wait up to 60 seconds
-                    await asyncio.sleep(3)
-                    # Dismiss any prompts that appeared
-                    await dismiss_google_prompts(page)
-                    # Check if CAPTCHA is gone
-                    content = await page.content()
-                    if "unusual traffic" not in content.lower() and "captcha" not in content.lower():
-                        log(f"  [W{worker_id}] ✓ CAPTCHA solved! Continuing...")
-                        # Re-queue this hotel
-                        await queue.put(hotel)
-                        break
-                else:
-                    log(f"  [W{worker_id}] CAPTCHA timeout - rotating context...")
-                    await context.close()
-                    context = await browser.new_context(
-                        user_agent=random.choice(USER_AGENTS),
-                        viewport={"width": 1280, "height": 800},
-                    )
-                    page = await context.new_page()
-            elif result.success:
+            if result.success:
                 hotel["website"] = result.website
                 results[hotel_name] = result.website
                 async with _stats_lock:
@@ -269,9 +208,9 @@ async def worker(
             delay = random.uniform(MIN_DELAY, MAX_DELAY)
             await asyncio.sleep(delay)
             
-            # Rotate user agent occasionally
+            # Rotate user agent occasionally (DuckDuckGo is friendlier, less frequent needed)
             searches_count += 1
-            if searches_count % 15 == 0:
+            if searches_count % 50 == 0:
                 await context.close()
                 context = await browser.new_context(
                     user_agent=random.choice(USER_AGENTS),
@@ -282,7 +221,10 @@ async def worker(
             queue.task_done()
             
     finally:
-        await context.close()
+        try:
+            await context.close()
+        except Exception:
+            pass  # Context may already be closed
 
 
 async def enrich_hotels(
@@ -336,7 +278,7 @@ async def enrich_hotels(
     
     # Reset stats
     global _stats
-    _stats = {"processed": 0, "found": 0, "captcha": 0}
+    _stats = {"processed": 0, "found": 0}
     
     start_time = time.time()
     
@@ -388,7 +330,6 @@ async def enrich_hotels(
     log(f"Hotels processed:  {_stats['processed']}")
     log(f"Websites found:    {_stats['found']}")
     log(f"Hit rate:          {_stats['found']/max(_stats['processed'],1)*100:.1f}%")
-    log(f"CAPTCHAs hit:      {_stats['captcha']}")
     log(f"Time elapsed:      {elapsed/60:.1f} minutes")
     log(f"Speed:             {_stats['processed']/max(elapsed,1)*60:.1f} hotels/min")
     log(f"Output:            {output_csv}")
@@ -437,7 +378,7 @@ def main():
         base = os.path.splitext(args.input)[0]
         output = f"{base}_enriched.csv"
     
-    log("Sadie Enricher - Google Search Website Finder")
+    log("Sadie Enricher - DuckDuckGo Website Finder")
     log(f"Input:       {args.input}")
     log(f"Output:      {output}")
     log(f"Location:    {args.location or '(none)'}")

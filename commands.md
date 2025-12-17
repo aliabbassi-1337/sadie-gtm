@@ -12,18 +12,17 @@ python3 sadie_scraper.py --center-lat 35.7125 --center-lng -83.5373 --overall-ra
 python3 sadie_scraper.py --center-lat 35.7125 --center-lng -83.5373 --overall-radius-km 150 --grid-rows 12 --grid-cols 12 --concurrency 25 --output scraper_output/gatlinburg_hotels.csv
 ```
 
-## Enricher
+## Enricher (uses DuckDuckGo - no CAPTCHAs!)
 
 ```bash
 python3 sadie_enricher.py --input scraper_output/ocean_city_hotels.csv --output enricher_output/ocean_city_hotels_enriched.csv --location "Ocean City MD"
 
-python3 sadie_enricher.py --input scraper_output/ocean_city_hotels.csv --output enricher_output/ocean_city_hotels_enriched.csv --location "Ocean City MD" --concurrency 5
+python3 sadie_enricher.py --input scraper_output/ocean_city_hotels.csv --output enricher_output/ocean_city_hotels_enriched.csv --location "Ocean City MD" --concurrency 8
 
-python3 sadie_enricher.py --input scraper_output/gatlinburg_hotels.csv --output enricher_output/gatlinburg_hotels_enriched.csv --location "Gatlinburg TN" --concurrency 5
+python3 sadie_enricher.py --input scraper_output/gatlinburg_hotels.csv --output enricher_output/gatlinburg_hotels_enriched.csv --location "Gatlinburg TN" --concurrency 8
 
-python3 sadie_enricher.py --input scraper_output/gatlinburg_hotels.csv --output enricher_output/gatlinburg_hotels_enriched.csv --location "Gatlinburg TN" --headed --concurrency 1
 
-python3 sadie_enricher.py --input scraper_output/ocean_city_hotels.csv --output enricher_output/ocean_city_hotels_enriched.csv --location "Ocean City MD" --headed --concurrency 1 --debug
+python3 sadie_enricher.py --input scraper_output/gatlinburg_hotels.csv --output enricher_output/gatlinburg_hotels_enriched.csv --location "Gatlinburg TN" --debug
 ```
 
 ## Detector
@@ -36,4 +35,6 @@ python3 sadie_detector.py --input enricher_output/ocean_city_hotels_enriched.csv
 python3 sadie_detector.py --input enricher_output/gatlinburg_hotels_enriched.csv --output detector_output/gatlinburg_leads.csv
 
 python3 sadie_detector.py --input scraper_output/test_hotel.csv --output detector_output/test_leads.csv --headed --concurrency 1 --debug
+
+python3 sadie_detector.py --input scraper_output/ocean_city_hotels.csv --output detector_output/ocean_city_leads.csv
 ```
