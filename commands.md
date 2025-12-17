@@ -1,47 +1,39 @@
 # Sadie Lead Gen - Commands
 
-## Setup
-
-```bash
-pip3 install -r requirements.txt
-python3 -m playwright install chromium
-```
-
 ## Scraper
 
 ```bash
-# Miami (default)
-python3 sadie_scraper.py
+python3 sadie_scraper.py --center-lat 38.3886 --center-lng -75.0735 --overall-radius-km 50 --output scraper_output/ocean_city_hotels.csv
 
-# Custom location
-python3 sadie_scraper.py --center-lat 34.0522 --center-lng -118.2437 --overall-radius-km 40
+python3 sadie_scraper.py --center-lat 38.3886 --center-lng -75.0735 --overall-radius-km 100 --grid-rows 10 --grid-cols 10 --output scraper_output/ocean_city_hotels.csv
 
-# Limit results
-python3 sadie_scraper.py --max-results 50
+python3 sadie_scraper.py --center-lat 35.7125 --center-lng -83.5373 --overall-radius-km 100 --grid-rows 10 --grid-cols 10 --output scraper_output/gatlinburg_hotels.csv
+
+python3 sadie_scraper.py --center-lat 35.7125 --center-lng -83.5373 --overall-radius-km 150 --grid-rows 12 --grid-cols 12 --concurrency 25 --output scraper_output/gatlinburg_hotels.csv
+```
+
+## Enricher
+
+```bash
+python3 sadie_enricher.py --input scraper_output/ocean_city_hotels.csv --output enricher_output/ocean_city_hotels_enriched.csv --location "Ocean City MD"
+
+python3 sadie_enricher.py --input scraper_output/ocean_city_hotels.csv --output enricher_output/ocean_city_hotels_enriched.csv --location "Ocean City MD" --concurrency 5
+
+python3 sadie_enricher.py --input scraper_output/gatlinburg_hotels.csv --output enricher_output/gatlinburg_hotels_enriched.csv --location "Gatlinburg TN" --concurrency 5
+
+python3 sadie_enricher.py --input scraper_output/gatlinburg_hotels.csv --output enricher_output/gatlinburg_hotels_enriched.csv --location "Gatlinburg TN" --headed --concurrency 1
+
+python3 sadie_enricher.py --input scraper_output/ocean_city_hotels.csv --output enricher_output/ocean_city_hotels_enriched.csv --location "Ocean City MD" --headed --concurrency 1 --debug
 ```
 
 ## Detector
 
 ```bash
-# Basic
-python3 sadie_detector.py --input hotels_manual.csv
+python3 sadie_detector.py --input enricher_output/ocean_city_hotels_enriched.csv --output detector_output/ocean_city_leads.csv
 
-# Debug mode (show browser + verbose logs)
-python3 sadie_detector.py --input hotels_manual.csv --headed --concurrency 1 --debug
+python3 sadie_detector.py --input enricher_output/ocean_city_hotels_enriched.csv --output detector_output/ocean_city_leads.csv --concurrency 10
 
-# Custom output
-python3 sadie_detector.py --input hotels.csv --output my_leads.csv
+python3 sadie_detector.py --input enricher_output/gatlinburg_hotels_enriched.csv --output detector_output/gatlinburg_leads.csv
 
-# Faster
-python3 sadie_detector.py --input hotels.csv --concurrency 10
-```
-
-## Full Workflow
-
-```bash
-# 1. Scrape hotels
-python3 sadie_scraper.py --center-lat 38.3365 --center-lng -75.0849 --overall-radius-km 20 --output hotels.csv
-
-# 2. Detect booking engines
-python3 sadie_detector.py --input hotels.csv --output leads.csv
+python3 sadie_detector.py --input scraper_output/test_hotel.csv --output detector_output/test_leads.csv --headed --concurrency 1 --debug
 ```

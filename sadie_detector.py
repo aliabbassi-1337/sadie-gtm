@@ -66,6 +66,7 @@ ENGINE_PATTERNS = {
     "IHG": ["ihg.com"],
     "Marriott": ["marriott.com"],
     "Hilton": ["hilton.com"],
+    "Vacatia": ["vacatia.com"],
 }
 
 # Keywords to identify booking buttons
@@ -118,7 +119,6 @@ class HotelResult:
     rating: str = ""
     review_count: str = ""
     screenshot_path: str = ""
-    place_id: str = ""
 
 
 # ============================================================================
@@ -363,21 +363,41 @@ class BookingButtonFinder:
         candidates = []
         
         # Use Playwright's text selector - try common booking button texts
-        # Filter out social media links with :not()
+        # Order matters: more specific/reliable first, generic fallbacks last
         selectors = [
+            # PRIMARY: Booking buttons (highest priority) - include div/span for custom elements
+            "button:has-text('book now')",
+            "a:has-text('book now'):not([href*='facebook'])",
+            "[role='button']:has-text('book now')",
+            "div:has-text('book now'):not(:has(div:has-text('book now')))",  # leaf div only
+            "span:has-text('book now')",
+            # General book buttons
             "button:has-text('book')",
             "a:has-text('book'):not([href*='facebook']):not([href*='twitter']):not([href*='instagram']):not([href*='spa']):not([href*='conference'])",
-            "a:has-text('reserve'):not([href*='facebook']):not([href*='spa']):not([href*='conference'])",
-            "a:has-text('availability'):not([href*='facebook'])",
+            "[role='button']:has-text('book')",
+            # Header/navbar specific booking links
+            "header a:has-text('book')",
+            "nav a:has-text('book')",
+            "[class*='header'] a:has-text('book')",
+            "[class*='nav'] a:has-text('book')",
+            # Reserve buttons
             "button:has-text('reserve')",
+            "a:has-text('reserve'):not([href*='facebook']):not([href*='spa']):not([href*='conference'])",
+            "[role='button']:has-text('reserve')",
+            # Availability/rates
+            "button:has-text('check availability')",
             "button:has-text('availability')",
-            # Additional patterns for hotels that use different text
+            "a:has-text('check availability')",
             "a:has-text('check rates')",
-            "a:has-text('find rooms')",
-            "a:has-text('rooms')",
-            "button:has-text('find')",
+            # URL-based selectors (booking engine links)
             "a[href*='reservations']",
             "a[href*='booking']",
+            "a[href*='synxis']",
+            "a[href*='cloudbeds']",
+            "a[href*='direct-book']",
+            # FALLBACK: Generic room links (lower priority)
+            "a:has-text('find rooms')",
+            "a:has-text('rooms'):not([href*='facebook'])",
         ]
         
         for selector in selectors:
@@ -393,6 +413,62 @@ class BookingButtonFinder:
             except Exception as e:
                 log(f"    [FIND] {selector}: error {e}")
                 continue
+        
+        # JavaScript fallback: find clickable elements with booking text
+        if not candidates:
+            log("    [FIND] No candidates from selectors, trying JS fallback...")
+            try:
+                js_result = await page.evaluate("""() => {
+                    const bookingTerms = ['book now', 'book', 'reserve', 'reservation'];
+                    const results = [];
+                    
+                    // Check all clickable elements
+                    const elements = document.querySelectorAll('a, button, [role="button"], [onclick]');
+                    for (const el of elements) {
+                        const text = (el.innerText || el.textContent || '').toLowerCase().trim();
+                        const rect = el.getBoundingClientRect();
+                        
+                        // Skip invisible elements
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        
+                        for (const term of bookingTerms) {
+                            if (text === term || text.includes(term)) {
+                                // Return element identifier
+                                results.push({
+                                    tag: el.tagName.toLowerCase(),
+                                    text: text.substring(0, 30),
+                                    href: el.href || el.getAttribute('href') || '',
+                                    classes: el.className || '',
+                                    id: el.id || ''
+                                });
+                                break;
+                            }
+                        }
+                        if (results.length >= 3) break;
+                    }
+                    return results;
+                }""")
+                
+                log(f"    [FIND] JS fallback found: {js_result}")
+                
+                # Convert JS results back to locators
+                for item in js_result:
+                    try:
+                        if item.get('id'):
+                            loc = page.locator(f"#{item['id']}").first
+                        elif item.get('href') and item['href'].startswith('http'):
+                            loc = page.locator(f"a[href='{item['href']}']").first
+                        else:
+                            # Use text content
+                            loc = page.locator(f"{item['tag']}:has-text('{item['text'][:15]}')").first
+                        
+                        if await loc.count() > 0:
+                            candidates.append(loc)
+                            log(f"    [FIND] Added JS fallback candidate: {item['tag']} '{item['text'][:20]}'")
+                    except Exception as e:
+                        log(f"    [FIND] Error converting JS result: {e}")
+            except Exception as e:
+                log(f"    [FIND] JS fallback error: {e}")
         
         return candidates
     
@@ -433,7 +509,9 @@ class BookingButtonFinder:
         
         import time
         
-        booking_words = ["book", "reserve", "availability", "rates", "rooms"]
+        # Words that indicate a booking button (not just navigation)
+        # "rooms" is last resort - only used if no better match found
+        booking_words = ["book", "reserve", "availability", "check rates", "check availability", "rooms"]
         
         for i, el in enumerate(candidates):
             try:
@@ -454,13 +532,33 @@ class BookingButtonFinder:
                     is_internal = el_href.startswith("/") or el_href.startswith("#")
                     is_protocol_link = el_href.startswith("mailto:") or el_href.startswith("tel:")
                     is_social = any(s in href_lower for s in ["facebook", "twitter", "instagram", "youtube", "linkedin"])
-                    is_bad_page = any(s in href_lower for s in ["/spa", "/conference", "/restaurant", "/dining", "/event", "/wedding", "/careers", "/contact", "/getaway", "/offer", "/group-booking"])
+                    # Skip navigation pages that aren't booking engines
+                    is_bad_page = any(s in href_lower for s in [
+                        "/spa", "/conference", "/restaurant", "/dining", "/event", "/wedding", 
+                        "/careers", "/contact", "/getaway", "/offer", "/group-booking",
+                        "/rooms", "/suites", "/accommodations", "/amenities", "/gallery", "/about",
+                        "/room-", "rooms-and-", "rooms_and_", "/packages", "/specials"
+                    ])
                     is_image = any(href_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".pdf"])
                     is_cdn = any(cdn in href_lower for cdn in ["cdn.", "cloudfront", "cloudinary", "crowdriff", "imgix", "fastly"])
                     is_external_booking = not is_internal and not is_protocol_link and not is_social and not is_bad_page and not is_image and not is_cdn
+                    
+                    # Check if it's a known external booking engine domain
+                    is_known_booking_engine = False
+                    if is_external_booking:
+                        href_domain = extract_domain(el_href)
+                        for engine_patterns in ENGINE_PATTERNS.values():
+                            for pattern in engine_patterns:
+                                if pattern in href_domain.lower():
+                                    is_known_booking_engine = True
+                                    break
+                            if is_known_booking_engine:
+                                break
                 
-                if el_href and is_external_booking:
-                    log("    [CLICK] Found booking URL in href, skipping click")
+                # Only skip clicking if it's a known external booking engine
+                # Otherwise, click it to capture any JavaScript-triggered navigation
+                if el_href and is_external_booking and is_known_booking_engine:
+                    log("    [CLICK] Found known booking engine URL in href, using directly")
                     return (None, el_href, "href_extraction")
                 
                 # Otherwise try clicking
@@ -602,8 +700,13 @@ class HotelProcessor:
     
     async def process(self, idx: int, total: int, hotel: dict) -> HotelResult:
         """Process a single hotel and return results."""
-        name = hotel.get("name", "")
+        # Support both 'name' and 'hotel' column names
+        name = hotel.get("name") or hotel.get("hotel", "")
         website = normalize_url(hotel.get("website", ""))
+        
+        # Fallback: use domain as name if no name provided
+        if not name and website:
+            name = extract_domain(website).replace("www.", "").split(".")[0].title()
         
         log(f"[{idx}/{total}] {name} | {website}")
         
@@ -616,7 +719,6 @@ class HotelProcessor:
             longitude=hotel.get("longitude", hotel.get("lng", "")),
             rating=hotel.get("rating", ""),
             review_count=hotel.get("review_count", ""),
-            place_id=hotel.get("place_id", ""),
         )
         
         if not website:
@@ -975,7 +1077,8 @@ class DetectorPipeline:
         processed = set()
         with open(self.config.output_csv, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                key = (row.get("name", ""), normalize_url(row.get("website", "")))
+                row_name = row.get("name") or row.get("hotel", "")
+                key = (row_name, normalize_url(row.get("website", "")))
                 processed.add(key)
         
         if not processed:
@@ -985,7 +1088,7 @@ class DetectorPipeline:
         
         remaining = [
             h for h in hotels
-            if (h.get("name", ""), normalize_url(h.get("website", ""))) not in processed
+            if ((h.get("name") or h.get("hotel", "")), normalize_url(h.get("website", ""))) not in processed
         ]
         return remaining, True
     
@@ -993,13 +1096,18 @@ class DetectorPipeline:
         """Write results to CSV as they complete."""
         fieldnames = list(HotelResult.__dataclass_fields__.keys())
         
+        # Create output directory if needed
+        output_dir = os.path.dirname(self.config.output_csv)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        
         mode = "a" if append_mode else "w"
         with open(self.config.output_csv, mode, newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not append_mode:
                 writer.writeheader()
             
-            stats = {"processed": 0, "known_engine": 0, "errors": 0}
+            stats = {"processed": 0, "known_engine": 0, "booking_url_found": 0, "errors": 0, "skipped_no_result": 0, "saved": 0}
             
             for coro in asyncio.as_completed(tasks):
                 result = await coro
@@ -1011,8 +1119,21 @@ class DetectorPipeline:
                 if result.booking_engine not in ("unknown", "unknown_third_party", "proprietary_or_same_domain"):
                     stats["known_engine"] += 1
                 
-                writer.writerow(asdict(result))
-                f.flush()
+                # Count as hit if we found a booking URL (regardless of engine recognition)
+                has_booking_url = result.booking_url and result.booking_url.strip()
+                if has_booking_url:
+                    stats["booking_url_found"] += 1
+                
+                # Only save if we found a booking URL or a known engine
+                has_known_engine = result.booking_engine not in ("unknown", "unknown_third_party", "proprietary_or_same_domain")
+                
+                if has_booking_url or has_known_engine:
+                    writer.writerow(asdict(result))
+                    f.flush()
+                    stats["saved"] += 1
+                else:
+                    stats["skipped_no_result"] += 1
+                    log(f"  Skipped {result.name}: no booking URL or known engine found")
         
         self._print_summary(stats)
     
@@ -1020,18 +1141,23 @@ class DetectorPipeline:
         """Print final summary with hit rate."""
         total = stats['processed']
         known = stats['known_engine']
-        hit_rate = (known / total * 100) if total > 0 else 0
+        booking_urls_found = stats['booking_url_found']
+        
+        # Hit rate = percentage of hotels where we found a booking URL
+        hit_rate = (booking_urls_found / total * 100) if total > 0 else 0
         
         logger.info("")
         logger.info("=" * 60)
         logger.info("DETECTION COMPLETE!")
         logger.info("=" * 60)
         logger.info(f"Hotels processed:    {total}")
-        logger.info(f"Known engines:       {known}")
-        logger.info(f"Unknown/proprietary: {total - known - stats['errors']}")
-        logger.info(f"Errors:              {stats['errors']}")
+        logger.info(f"Saved to output:      {stats.get('saved', 0)}")
+        logger.info(f"Booking URLs found:   {booking_urls_found}")
+        logger.info(f"Known engines:        {known}")
+        logger.info(f"Skipped (no result):  {stats.get('skipped_no_result', 0)}")
+        logger.info(f"Errors:               {stats['errors']}")
         logger.info("-" * 60)
-        logger.info(f"HIT RATE:            {hit_rate:.1f}%")
+        logger.info(f"HIT RATE:             {hit_rate:.1f}%")
         logger.info("=" * 60)
         logger.info(f"Output: {self.config.output_csv}")
         logger.info(f"Screenshots: {self.config.screenshots_dir}/")
@@ -1062,12 +1188,16 @@ def main():
     parser.add_argument("--concurrency", type=int, default=5)
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--pause", type=float, default=0.5)
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--debug", action="store_true", help="Run browser in headed mode + verbose logging")
     
     args = parser.parse_args()
     
     if not os.path.exists(args.input):
         raise SystemExit(f"Input file not found: {args.input}")
+    
+    # --debug implies headed mode
+    if args.debug:
+        args.headed = True
     
     setup_logging(args.debug)
     

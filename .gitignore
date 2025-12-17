@@ -2,6 +2,12 @@ yeet.md
 .env
 screenshots/
 sadie_leads.csv
-sadie_detector.log
-florida_miami_hotels 1.csv
+florida_miami_hotels_1.csv
 prompt.md
+test_hotel.csv
+sadie_scraper.log
+sadie_detector.log
+
+detector_output
+scraper_output
+enricher_output
