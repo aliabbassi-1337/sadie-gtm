@@ -1027,8 +1027,8 @@ class DetectorPipeline:
         hotels = self._load_hotels(input_csv)
         log(f"Loaded {len(hotels)} hotels from {input_csv}")
         
-        # Resume support
-        hotels, append_mode = self._filter_processed(hotels)
+        # Resume support - get existing successful results to preserve
+        hotels, existing_results = self._filter_processed(hotels)
         
         if not hotels:
             log("All hotels already processed. Nothing to do.")
@@ -1048,8 +1048,8 @@ class DetectorPipeline:
                 for idx, hotel in enumerate(hotels, 1)
             ]
             
-            # Write results
-            await self._write_results(tasks, append_mode)
+            # Write results (merging with existing successful results)
+            await self._write_results(tasks, existing_results)
             
             await browser.close()
     
@@ -1069,17 +1069,18 @@ class DetectorPipeline:
             log(f"Skipped {skipped} big chain hotels (Marriott, Hilton, etc.)")
         return hotels
     
-    def _filter_processed(self, hotels: list[dict]) -> tuple[list[dict], bool]:
-        """Filter out already-processed hotels. Returns (remaining, append_mode).
+    def _filter_processed(self, hotels: list[dict]) -> tuple[list[dict], dict]:
+        """Filter out already-processed hotels. Returns (remaining, existing_results).
         
         Hotels with errors are NOT filtered out - they can be retried.
+        existing_results is a dict of {(name, website): row_dict} for successful results only.
         """
         if not os.path.exists(self.config.output_csv):
-            return hotels, False
+            return hotels, {}
         
         # Read existing results, separating successful from failed
-        processed_success = set()
-        processed_errors = set()
+        existing_results = {}  # Will contain successful results to preserve
+        error_count = 0
         
         with open(self.config.output_csv, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
@@ -1089,24 +1090,25 @@ class DetectorPipeline:
                 # Check if this row had an error
                 error = row.get("error", "").strip()
                 if error:
-                    processed_errors.add(key)
+                    error_count += 1
+                    # Don't keep error rows - they'll be retried and updated
                 else:
-                    processed_success.add(key)
+                    existing_results[key] = row
         
-        if not processed_success and not processed_errors:
-            return hotels, False
+        if not existing_results and error_count == 0:
+            return hotels, {}
         
-        log(f"Found {len(processed_success)} successful, {len(processed_errors)} with errors (will retry)")
+        log(f"Found {len(existing_results)} successful, {error_count} with errors (will retry)")
         
         # Only skip successfully processed hotels - errors can be retried
         remaining = [
             h for h in hotels
-            if ((h.get("name") or h.get("hotel", "")), normalize_url(h.get("website", ""))) not in processed_success
+            if ((h.get("name") or h.get("hotel", "")), normalize_url(h.get("website", ""))) not in existing_results
         ]
-        return remaining, True
+        return remaining, existing_results
     
-    async def _write_results(self, tasks: list, append_mode: bool):
-        """Write results to CSV as they complete."""
+    async def _write_results(self, tasks: list, existing_results: dict):
+        """Write results to CSV as they complete, merging with existing successful results."""
         fieldnames = list(HotelResult.__dataclass_fields__.keys())
         
         # Create output directory if needed
@@ -1114,42 +1116,48 @@ class DetectorPipeline:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
         
-        mode = "a" if append_mode else "w"
-        with open(self.config.output_csv, mode, newline="", encoding="utf-8") as f:
+        # Collect all new results first
+        stats = {"processed": 0, "known_engine": 0, "booking_url_found": 0, "errors": 0, "skipped_no_result": 0, "saved": 0}
+        new_results = {}  # {(name, website): result_dict}
+        
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            stats["processed"] += 1
+            
+            if result.error:
+                stats["errors"] += 1
+            
+            if result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "proprietary_or_same_domain"):
+                stats["known_engine"] += 1
+            
+            # Count as hit if we found a booking URL (regardless of engine recognition)
+            has_booking_url = result.booking_url and result.booking_url.strip()
+            if has_booking_url:
+                stats["booking_url_found"] += 1
+            
+            # Only save if we found a booking URL or a known engine
+            has_known_engine = result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "proprietary_or_same_domain")
+            
+            # Also save errors so we can track/retry them
+            has_error = bool(result.error)
+            
+            if has_booking_url or has_known_engine or has_error:
+                key = (result.name, normalize_url(result.website))
+                new_results[key] = asdict(result)
+                stats["saved"] += 1
+            else:
+                stats["skipped_no_result"] += 1
+                log(f"  Skipped {result.name}: no booking URL or known engine found")
+        
+        # Merge: existing successful results + new results (new overwrites old errors)
+        merged_results = {**existing_results, **new_results}
+        
+        # Write the complete merged file
+        with open(self.config.output_csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not append_mode:
-                writer.writeheader()
-            
-            stats = {"processed": 0, "known_engine": 0, "booking_url_found": 0, "errors": 0, "skipped_no_result": 0, "saved": 0}
-            
-            for coro in asyncio.as_completed(tasks):
-                result = await coro
-                stats["processed"] += 1
-                
-                if result.error:
-                    stats["errors"] += 1
-                
-                if result.booking_engine not in ("unknown", "unknown_third_party", "proprietary_or_same_domain"):
-                    stats["known_engine"] += 1
-                
-                # Count as hit if we found a booking URL (regardless of engine recognition)
-                has_booking_url = result.booking_url and result.booking_url.strip()
-                if has_booking_url:
-                    stats["booking_url_found"] += 1
-                
-                # Only save if we found a booking URL or a known engine
-                has_known_engine = result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "proprietary_or_same_domain")
-                
-                # Also save errors so we can track/retry them
-                has_error = bool(result.error)
-                
-                if has_booking_url or has_known_engine or has_error:
-                    writer.writerow(asdict(result))
-                    f.flush()
-                    stats["saved"] += 1
-                else:
-                    stats["skipped_no_result"] += 1
-                    log(f"  Skipped {result.name}: no booking URL or known engine found")
+            writer.writeheader()
+            for row in merged_results.values():
+                writer.writerow(row)
         
         self._print_summary(stats)
     
