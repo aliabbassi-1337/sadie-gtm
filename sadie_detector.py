@@ -31,7 +31,7 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeoutErro
 class Config:
     """Central configuration for the detector."""
     # Timeouts (milliseconds)
-    timeout_page_load: int = 120000     # 120s (some sites are very slow)
+    timeout_page_load: int = 30000      # 30s (we use fallback if slow)
     timeout_booking_click: int = 3000   # 3s (was 10s!)
     timeout_popup_detect: int = 1500    # 1.5s
     
@@ -68,6 +68,9 @@ ENGINE_PATTERNS = {
     "Hilton": ["hilton.com"],
     "Vacatia": ["vacatia.com"],
     "JEHS / iPMS": ["ipms247.com", "live.ipms247.com"],
+    "Windsurfer CRS": ["windsurfercrs.com", "res.windsurfercrs.com"],
+    "ThinkReservations": ["thinkreservations.com", "secure.thinkreservations.com"],
+    "ASI Web Reservations": ["asiwebres.com", "reservation.asiwebres.com"],
 }
 
 # Keywords to identify booking buttons
@@ -375,6 +378,9 @@ class BookingButtonFinder:
             "a[href*='travelclick']",
             "a[href*='webrezpro']",
             "a[href*='resnexus']",
+            "a[href*='windsurfercrs']",
+            "a[href*='thinkreservations']",
+            "a[href*='asiwebres']",
             # INPUT SUBMIT buttons (often the actual booking button!)
             "input[type='submit'][value*='Availability' i]",
             "input[type='submit'][value*='Book' i]",
@@ -435,34 +441,55 @@ class BookingButtonFinder:
             log("    [FIND] No candidates from selectors, trying JS fallback...")
             try:
                 js_result = await page.evaluate("""() => {
-                    const bookingTerms = ['book now', 'book', 'reserve', 'reservation'];
+                    const bookingTerms = ['book now', 'book online', 'reserve now', 'reserve', 'check availability', 'book'];
+                    const bookingUrls = ['synxis', 'cloudbeds', 'ipms247', 'windsurfercrs', 'travelclick', 'webrezpro', 'resnexus', 'thinkreservations', 'booking', 'reservations'];
                     const results = [];
                     
-                    // Check all clickable elements
-                    const elements = document.querySelectorAll('a, button, [role="button"], [onclick]');
+                    // Check ALL elements that could be clickable (not just standard buttons)
+                    const elements = document.querySelectorAll('a, button, input[type="submit"], input[type="button"], li, div, span, [role="button"], [onclick], [class*="book"], [class*="reserve"], [class*="cta"]');
                     for (const el of elements) {
-                        const text = (el.innerText || el.textContent || '').toLowerCase().trim();
+                        const text = (el.innerText || el.textContent || el.value || '').toLowerCase().trim();
+                        const href = el.href || el.getAttribute('href') || '';
                         const rect = el.getBoundingClientRect();
                         
                         // Skip invisible elements
                         if (rect.width === 0 || rect.height === 0) continue;
+                        // Skip very large elements (likely containers)
+                        if (rect.width > 500 || rect.height > 200) continue;
                         
-                        for (const term of bookingTerms) {
-                            if (text === term || text.includes(term)) {
-                                // Return element identifier
-                                results.push({
-                                    tag: el.tagName.toLowerCase(),
-                                    text: text.substring(0, 30),
-                                    href: el.href || el.getAttribute('href') || '',
-                                    classes: el.className || '',
-                                    id: el.id || ''
-                                });
+                        // Check if href contains booking engine URL
+                        let isBookingUrl = false;
+                        for (const url of bookingUrls) {
+                            if (href.toLowerCase().includes(url)) {
+                                isBookingUrl = true;
                                 break;
                             }
                         }
-                        if (results.length >= 3) break;
+                        
+                        // Check if text matches booking terms
+                        let isBookingText = false;
+                        for (const term of bookingTerms) {
+                            if (text === term || (text.includes(term) && text.length < 50)) {
+                                isBookingText = true;
+                                break;
+                            }
+                        }
+                        
+                        if (isBookingUrl || isBookingText) {
+                            results.push({
+                                tag: el.tagName.toLowerCase(),
+                                text: text.substring(0, 30),
+                                href: href,
+                                classes: el.className || '',
+                                id: el.id || '',
+                                priority: isBookingUrl ? 0 : 1  // Prioritize URL matches
+                            });
+                        }
+                        if (results.length >= 10) break;
                     }
-                    return results;
+                    // Sort by priority (URL matches first)
+                    results.sort((a, b) => a.priority - b.priority);
+                    return results.slice(0, 5);
                 }""")
                 
                 log(f"    [FIND] JS fallback found: {js_result}")
@@ -470,17 +497,27 @@ class BookingButtonFinder:
                 # Convert JS results back to locators
                 for item in js_result:
                     try:
+                        loc = None
+                        # Try multiple strategies to find the element
                         if item.get('id'):
                             loc = page.locator(f"#{item['id']}").first
                         elif item.get('href') and item['href'].startswith('http'):
-                            loc = page.locator(f"a[href='{item['href']}']").first
-                        else:
-                            # Use text content
-                            loc = page.locator(f"{item['tag']}:has-text('{item['text'][:15]}')").first
+                            # Try finding by href (could be a, or li/div containing a)
+                            loc = page.locator(f"[href='{item['href']}']").first
+                            if await loc.count() == 0:
+                                loc = page.locator(f"*:has([href='{item['href']}'])").first
+                        elif item.get('classes') and 'book' in item['classes'].lower():
+                            # Try finding by class
+                            loc = page.locator(f".{item['classes'].split()[0]}").first
                         
-                        if await loc.count() > 0:
+                        # Fallback to text content
+                        if not loc or await loc.count() == 0:
+                            text_escaped = item['text'][:20].replace("'", "\\'")
+                            loc = page.locator(f"{item['tag']}:has-text('{text_escaped}')").first
+                        
+                        if loc and await loc.count() > 0:
                             candidates.append(loc)
-                            log(f"    [FIND] Added JS fallback candidate: {item['tag']} '{item['text'][:20]}'")
+                            log(f"    [FIND] Added JS candidate: {item['tag']} '{item['text'][:25]}' href={item.get('href', 'none')[:30]}")
                     except Exception as e:
                         log(f"    [FIND] Error converting JS result: {e}")
             except Exception as e:
@@ -573,7 +610,13 @@ class BookingButtonFinder:
                     log("    [CLICK] Found known booking engine URL in href, using directly")
                     return (None, el_href, "href_extraction")
                 
-                # Otherwise try clicking
+                # Scroll element into view first
+                try:
+                    await el.scroll_into_view_if_needed(timeout=2000)
+                except Exception:
+                    pass
+                
+                # Try clicking
                 click_start = time.time()
                 try:
                     async with context.expect_page(timeout=1000) as p_info:
@@ -584,7 +627,16 @@ class BookingButtonFinder:
                 except PWTimeoutError:
                     log(f"    [CLICK] No popup after {time.time() - click_start:.1f}s, checking URL...")
                 except Exception as click_err:
-                    log(f"    [CLICK] Click failed: {str(click_err)[:80]}")
+                    # If click failed, try JS click as fallback
+                    try:
+                        await el.evaluate("el => el.click()")
+                        await asyncio.sleep(0.5)
+                        if page.url != original_url:
+                            log(f"    [CLICK] JS click worked, URL: {page.url[:60]}")
+                            return (page, page.url, "js_click")
+                    except Exception:
+                        pass
+                    log(f"    [CLICK] Click failed: {str(click_err)[:60]}")
                     continue
                 
                 # No popup - wait for sidebar/modal to appear
@@ -809,14 +861,21 @@ class HotelProcessor:
         try:
             import time
             
-            # 1. Load homepage
+            # 1. Load homepage (don't wait for full load - find buttons ASAP)
             t0 = time.time()
-            await page.goto(result.website, timeout=self.config.timeout_page_load, wait_until="domcontentloaded")
+            try:
+                # Use shorter timeout and don't wait for network idle
+                await page.goto(result.website, timeout=30000, wait_until="domcontentloaded")
+            except PWTimeoutError:
+                # If domcontentloaded times out, try with just commit
+                try:
+                    await page.goto(result.website, timeout=15000, wait_until="commit")
+                except Exception:
+                    pass
             log(f"  [TIME] goto: {time.time()-t0:.1f}s")
             
-            t0 = time.time()
-            await asyncio.sleep(1)
-            log(f"  [TIME] sleep: {time.time()-t0:.1f}s")
+            # Brief pause to let JS render (but not too long)
+            await asyncio.sleep(0.5)
             
             hotel_domain = extract_domain(page.url)
             log(f"  Loaded: {hotel_domain}")
