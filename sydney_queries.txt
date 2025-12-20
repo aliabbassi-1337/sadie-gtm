@@ -1,0 +1,657 @@
+# Sydney Hotels - Comprehensive Query List
+# =========================================
+# 650+ suburbs × multiple property types = thousands of queries
+# Each query returns ~20 results from Google Maps
+
+# -----------------------------------------------------------------------------
+# PROPERTY TYPES TO COMBINE WITH EACH SUBURB
+# -----------------------------------------------------------------------------
+# hotels, motels, accommodation, B&B, serviced apartments, hostels
+
+# -----------------------------------------------------------------------------
+# ALL SYDNEY SUBURBS (650+)
+# -----------------------------------------------------------------------------
+
+# CBD & Inner City
+Sydney CBD hotels
+Sydney city hotels
+The Rocks Sydney hotels
+Circular Quay hotels
+Millers Point hotels
+Barangaroo hotels
+Dawes Point hotels
+Haymarket hotels
+Chinatown Sydney hotels
+Ultimo hotels
+Pyrmont hotels
+Darling Harbour hotels
+Chippendale hotels
+Surry Hills hotels
+Darlinghurst hotels
+Potts Point hotels
+Woolloomooloo hotels
+Kings Cross hotels
+Elizabeth Bay hotels
+Rushcutters Bay hotels
+Paddington Sydney hotels
+Woollahra hotels
+Edgecliff hotels
+Double Bay hotels
+Point Piper hotels
+Rose Bay hotels
+Vaucluse hotels
+Watsons Bay hotels
+Dover Heights hotels
+Bondi hotels
+Bondi Beach hotels
+Bondi Junction hotels
+Bronte hotels
+Tamarama hotels
+Clovelly hotels
+Coogee hotels
+South Coogee hotels
+Maroubra hotels
+Maroubra Beach hotels
+Malabar hotels
+La Perouse hotels
+Little Bay hotels
+Chifley hotels
+Eastgardens hotels
+Pagewood hotels
+Daceyville hotels
+Kingsford hotels
+Kensington Sydney hotels
+Randwick hotels
+Centennial Park hotels
+Moore Park hotels
+
+# Inner West
+Newtown Sydney hotels
+Enmore hotels
+Marrickville hotels
+St Peters Sydney hotels
+Sydenham hotels
+Tempe hotels
+Petersham hotels
+Lewisham hotels
+Summer Hill hotels
+Ashfield hotels
+Croydon Sydney hotels
+Burwood hotels
+Strathfield hotels
+Homebush hotels
+Homebush West hotels
+Concord hotels
+Concord West hotels
+Rhodes hotels
+Wentworth Point hotels
+Sydney Olympic Park hotels
+Lidcombe hotels
+Auburn hotels
+Silverwater hotels
+Flemington hotels
+Rookwood hotels
+Regents Park Sydney hotels
+Berala hotels
+Birrong hotels
+Sefton hotels
+Chester Hill hotels
+Bass Hill hotels
+Yagoona hotels
+Bankstown hotels
+Revesby hotels
+Padstow hotels
+Riverwood hotels
+Peakhurst hotels
+Lugarno hotels
+Oatley hotels
+Hurstville hotels
+Mortdale hotels
+Penshurst hotels
+Beverly Hills Sydney hotels
+Narwee hotels
+Kingsgrove hotels
+Bexley hotels
+Bexley North hotels
+Arncliffe hotels
+Wolli Creek hotels
+Turrella hotels
+Bardwell Park hotels
+Bardwell Valley hotels
+Earlwood hotels
+Clemton Park hotels
+Campsie hotels
+Belmore hotels
+Lakemba hotels
+Wiley Park hotels
+Punchbowl hotels
+Greenacre hotels
+Chullora hotels
+Villawood hotels
+Leightonfield hotels
+Carramar hotels
+Lansdowne hotels
+Canley Vale hotels
+Canley Heights hotels
+Cabramatta hotels
+Cabramatta West hotels
+Mount Pritchard hotels
+Bonnyrigg hotels
+Bonnyrigg Heights hotels
+Edensor Park hotels
+Wakeley hotels
+Fairfield hotels
+Fairfield East hotels
+Fairfield West hotels
+Fairfield Heights hotels
+Smithfield hotels
+Wetherill Park hotels
+Prairiewood hotels
+Bossley Park hotels
+St Johns Park hotels
+Greenfield Park hotels
+Yennora hotels
+Guildford hotels
+Granville hotels
+South Granville hotels
+Merrylands hotels
+Merrylands West hotels
+Greystanes hotels
+Pemulwuy hotels
+Prospect hotels
+Girraween hotels
+Toongabbie hotels
+Pendle Hill hotels
+Wentworthville hotels
+Westmead hotels
+Northmead hotels
+North Parramatta hotels
+Parramatta hotels
+Harris Park hotels
+Rosehill hotels
+Camellia hotels
+Rydalmere hotels
+Dundas hotels
+Dundas Valley hotels
+Ermington hotels
+Melrose Park hotels
+Meadowbank hotels
+West Ryde hotels
+Ryde hotels
+Top Ryde hotels
+Gladesville hotels
+Tennyson Point hotels
+Putney hotels
+Kissing Point hotels
+Denistone hotels
+Denistone East hotels
+Denistone West hotels
+Eastwood hotels
+Epping hotels
+North Epping hotels
+Carlingford hotels
+Beecroft hotels
+Cheltenham Sydney hotels
+Pennant Hills hotels
+Thornleigh hotels
+Normanhurst hotels
+Hornsby hotels
+Hornsby Heights hotels
+Waitara hotels
+Wahroonga hotels
+Warrawee hotels
+Turramurra hotels
+South Turramurra hotels
+Pymble hotels
+West Pymble hotels
+Gordon hotels
+Killara hotels
+Lindfield hotels
+East Lindfield hotels
+Roseville hotels
+Roseville Chase hotels
+Chatswood hotels
+Chatswood West hotels
+Willoughby hotels
+Artarmon hotels
+St Leonards hotels
+Wollstonecraft hotels
+Waverton hotels
+North Sydney hotels
+McMahons Point hotels
+Lavender Bay hotels
+Milsons Point hotels
+Kirribilli hotels
+Neutral Bay hotels
+Cremorne hotels
+Cremorne Point hotels
+Mosman hotels
+Balmoral hotels
+The Spit hotels
+Seaforth hotels
+Clontarf hotels
+Balgowlah hotels
+Balgowlah Heights hotels
+Fairlight hotels
+Manly hotels
+Manly Vale hotels
+Queenscliff hotels
+Freshwater hotels
+Curl Curl hotels
+Dee Why hotels
+North Curl Curl hotels
+Brookvale hotels
+Allambie Heights hotels
+Beacon Hill hotels
+Narraweena hotels
+Cromer hotels
+Wheeler Heights hotels
+Collaroy hotels
+Collaroy Plateau hotels
+Narrabeen hotels
+North Narrabeen hotels
+Elanora Heights hotels
+Warriewood hotels
+Mona Vale hotels
+Bayview hotels
+Church Point hotels
+Terrey Hills hotels
+Duffys Forest hotels
+Cottage Point hotels
+Ku-ring-gai Chase hotels
+Ingleside hotels
+Bilgola hotels
+Bilgola Plateau hotels
+Newport hotels
+Clareville hotels
+Avalon hotels
+Avalon Beach hotels
+Whale Beach hotels
+Palm Beach hotels
+Scotland Island hotels
+Lovett Bay hotels
+Elvina Bay hotels
+
+# Northern Suburbs Extended
+Castle Hill hotels
+Castle Cove hotels
+Middle Cove hotels
+Willoughby East hotels
+North Willoughby hotels
+Naremburn hotels
+Cammeray hotels
+Crows Nest hotels
+Lane Cove hotels
+Lane Cove North hotels
+Lane Cove West hotels
+Greenwich hotels
+Longueville hotels
+Riverview hotels
+Linley Point hotels
+Hunters Hill hotels
+Woolwich hotels
+Henley hotels
+Drummoyne hotels
+Russell Lea hotels
+Rodd Point hotels
+Five Dock hotels
+Abbotsford Sydney hotels
+Wareemba hotels
+Chiswick Sydney hotels
+Canada Bay hotels
+Breakfast Point hotels
+Mortlake Sydney hotels
+Cabarita hotels
+Concord hotels
+North Strathfield hotels
+Homebush hotels
+
+# South Sydney
+Mascot hotels
+Rosebery hotels
+Beaconsfield Sydney hotels
+Zetland hotels
+Waterloo Sydney hotels
+Alexandria hotels
+Redfern hotels
+Eveleigh hotels
+Green Square hotels
+Erskineville hotels
+Newtown hotels
+Stanmore hotels
+Annandale hotels
+Leichhardt hotels
+Lilyfield hotels
+Rozelle hotels
+Balmain hotels
+Balmain East hotels
+Birchgrove hotels
+Glebe hotels
+Forest Lodge hotels
+Camperdown hotels
+Ultimo hotels
+
+# South West
+Liverpool hotels
+Warwick Farm hotels
+Chipping Norton hotels
+Moorebank hotels
+Holsworthy hotels
+Wattle Grove hotels
+Voyager Point hotels
+Pleasure Point hotels
+Sandy Point hotels
+Casula hotels
+Prestons hotels
+Lurnea hotels
+Hinchinbrook hotels
+Hoxton Park hotels
+Horningsea Park hotels
+Middleton Grange hotels
+West Hoxton hotels
+Carnes Hill hotels
+Len Waters Estate hotels
+Edmondson Park hotels
+Bardia hotels
+Ingleburn hotels
+Macquarie Fields hotels
+Glenfield hotels
+Casula hotels
+Crossroads hotels
+
+# Sutherland Shire
+Sutherland hotels
+Jannali hotels
+Como hotels
+Oyster Bay hotels
+Bonnet Bay hotels
+Kangaroo Point hotels
+Sylvania hotels
+Sylvania Waters hotels
+Taren Point hotels
+Caringbah hotels
+Caringbah South hotels
+Dolans Bay hotels
+Lilli Pilli hotels
+Port Hacking hotels
+Yowie Bay hotels
+Miranda hotels
+Gymea hotels
+Gymea Bay hotels
+Grays Point hotels
+Kirrawee hotels
+Engadine hotels
+Yarrawarrah hotels
+Heathcote Sydney hotels
+Waterfall hotels
+Woronora hotels
+Woronora Heights hotels
+Menai hotels
+Barden Ridge hotels
+Illawong hotels
+Alfords Point hotels
+Bangor hotels
+Lucas Heights hotels
+Sandy Point hotels
+Loftus hotels
+Cronulla hotels
+Woolooware hotels
+Burraneer hotels
+Greenhills Beach hotels
+Kurnell hotels
+
+# Hills District
+Baulkham Hills hotels
+Bella Vista hotels
+Kellyville hotels
+Kellyville Ridge hotels
+Rouse Hill hotels
+Beaumont Hills hotels
+The Ponds hotels
+Stanhope Gardens hotels
+Parklea hotels
+Glenwood hotels
+Kings Langley hotels
+Seven Hills hotels
+Blacktown hotels
+Prospect hotels
+Eastern Creek hotels
+Rooty Hill hotels
+Mount Druitt hotels
+Whalan hotels
+Tregear hotels
+Shalvey hotels
+Bidwill hotels
+Hebersham hotels
+Emerton hotels
+Dharruk hotels
+Lethbridge Park hotels
+Willmot hotels
+Oakhurst hotels
+Hassall Grove hotels
+Plumpton hotels
+Dean Park hotels
+Glendenning hotels
+Colebee hotels
+Quakers Hill hotels
+Acacia Gardens hotels
+Nirimba Fields hotels
+Schofields hotels
+Riverstone hotels
+Vineyard hotels
+Box Hill Sydney hotels
+Nelson hotels
+Marsden Park hotels
+Shanes Park hotels
+Llandilo hotels
+Berkshire Park hotels
+Londonderry hotels
+Agnes Banks hotels
+Castlereagh hotels
+Cranebrook hotels
+Penrith hotels
+Jamisontown hotels
+South Penrith hotels
+Kingswood Sydney hotels
+Werrington hotels
+Werrington Downs hotels
+Cambridge Park hotels
+Claremont Meadows hotels
+Erskine Park hotels
+St Clair hotels
+Colyton hotels
+St Marys hotels
+North St Marys hotels
+Oxley Park hotels
+Minchinbury hotels
+
+# Blue Mountains (Sydney region)
+Lapstone hotels
+Glenbrook hotels
+Blaxland hotels
+Warrimoo hotels
+Valley Heights hotels
+Springwood hotels
+Faulconbridge hotels
+Linden hotels
+Woodford hotels
+Hazelbrook hotels
+Lawson hotels
+Bullaburra hotels
+Wentworth Falls hotels
+Leura hotels
+Katoomba hotels
+Medlow Bath hotels
+Blackheath hotels
+Mount Victoria hotels
+Bell hotels
+Mount Wilson hotels
+Mount Irvine hotels
+
+# Hawkesbury
+Windsor hotels
+Richmond Sydney hotels
+Clarendon hotels
+North Richmond hotels
+Kurrajong hotels
+Kurrajong Heights hotels
+Bilpin hotels
+Mount Tomah hotels
+Bowen Mountain hotels
+Glossodia hotels
+Freemans Reach hotels
+Wilberforce hotels
+Pitt Town hotels
+McGraths Hill hotels
+Oakville hotels
+Maraylya hotels
+South Maroota hotels
+Wisemans Ferry hotels
+
+# Northern Beaches Extended
+Dee Why hotels
+North Curl Curl hotels
+South Curl Curl hotels
+Harbord hotels
+Queenscliff Sydney hotels
+North Manly hotels
+Allambie Heights hotels
+Forestville hotels
+Killarney Heights hotels
+Davidson hotels
+Frenchs Forest hotels
+Belrose hotels
+Oxford Falls hotels
+North Rocks hotels
+Carlingford hotels
+North Parramatta hotels
+Oatlands hotels
+Dundas Valley hotels
+Telopea hotels
+Ermington hotels
+Rydalmere hotels
+
+# Campbelltown Area
+Campbelltown hotels
+Leumeah hotels
+Minto hotels
+Ingleburn hotels
+Macquarie Fields hotels
+Bow Bowing hotels
+Airds hotels
+Bradbury hotels
+St Helens Park hotels
+Rosemeadow hotels
+Glen Alpine hotels
+Ambarvale hotels
+Claymore hotels
+Eagle Vale hotels
+Eschol Park hotels
+Kearns hotels
+Raby hotels
+Varroville hotels
+Denham Court hotels
+Ruse hotels
+
+# Wollongong (Greater Sydney commuter area)
+Wollongong hotels
+North Wollongong hotels
+Fairy Meadow hotels
+Balgownie hotels
+Mount Ousley hotels
+Keiraville hotels
+Gwynneville hotels
+Mangerton hotels
+Mount Saint Thomas hotels
+Figtree hotels
+Cordeaux Heights hotels
+Farmborough Heights hotels
+Unanderra hotels
+Kembla Grange hotels
+Dapto hotels
+Kanahooka hotels
+Brownsville hotels
+Berkeley hotels
+Warrawong hotels
+Port Kembla hotels
+Thirroul hotels
+Austinmer hotels
+Coledale hotels
+Wombarra hotels
+Scarborough Wollongong hotels
+Coalcliff hotels
+Stanwell Park hotels
+Stanwell Tops hotels
+Helensburgh hotels
+Otford hotels
+
+# Central Coast (Greater Sydney)
+Gosford hotels
+Wyoming hotels
+Narara hotels
+Niagara Park hotels
+Lisarow hotels
+Ourimbah hotels
+Tuggerah hotels
+Wyong hotels
+The Entrance hotels
+Long Jetty hotels
+Terrigal hotels
+Avoca Beach hotels
+Copacabana hotels
+MacMasters Beach hotels
+Killcare hotels
+Hardys Bay hotels
+Pretty Beach hotels
+Ettalong Beach hotels
+Umina Beach hotels
+Woy Woy hotels
+Booker Bay hotels
+Pearl Beach hotels
+Patonga hotels
+
+# Additional property type variations
+Sydney motels
+Sydney motor inn
+Sydney bed and breakfast
+Sydney B&B
+Sydney guesthouse
+Sydney hostels
+Sydney backpackers
+Sydney serviced apartments
+Sydney apartment hotel
+Sydney boutique hotel
+Sydney luxury hotel
+Sydney budget hotel
+Sydney cheap accommodation
+Sydney airport accommodation
+Sydney beachside accommodation
+Sydney harbour accommodation
+Sydney waterfront hotels
+Sydney pet friendly hotels
+Sydney family hotels
+
+# Landmark-based searches
+hotels near Sydney Opera House
+hotels near Sydney Harbour Bridge
+hotels near Bondi Beach
+hotels near Manly Beach
+hotels near Sydney Airport
+hotels near Central Station Sydney
+hotels near Darling Harbour
+hotels near Circular Quay
+hotels near Sydney Olympic Park
+hotels near Taronga Zoo
+hotels near Sydney University
+hotels near UNSW
+hotels near Macquarie University
+hotels near Luna Park Sydney
+hotels near Royal Botanic Gardens Sydney
+hotels near Sydney Tower
+hotels near Queen Victoria Building
+hotels near Westfield Sydney
+hotels near Sydney Convention Centre
+hotels near ANZ Stadium
+hotels near SCG Sydney
+hotels near Fox Studios Sydney
+

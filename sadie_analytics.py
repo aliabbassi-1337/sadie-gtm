@@ -133,85 +133,75 @@ def analyze_csv(filepath: str):
     # ========================================================================
     filename = os.path.basename(filepath)
     
-    print("\n" + "=" * 70)
-    print(f"📊 ANALYTICS: {filename}")
-    print("=" * 70)
+    print(f"\nANALYTICS: {filename}")
+    print("=" * 50)
     
     # Overview
-    print("\n📈 OVERVIEW")
-    print("-" * 40)
-    print(f"  Total hotels:           {total:,}")
-    print(f"  With website:           {len(has_website):,} ({len(has_website)/total*100:.1f}%)")
-    print(f"  With booking URL:       {len(has_booking_url):,} ({len(has_booking_url)/total*100:.1f}%)")
-    print(f"  With contact info:      {len(has_any_contact):,} ({len(has_any_contact)/total*100:.1f}%)")
-    print(f"  With errors:            {len(has_error):,} ({len(has_error)/total*100:.1f}%)")
+    print("\nOVERVIEW")
+    print(f"Total hotels: {total:,}")
+    print(f"With website: {len(has_website):,} ({len(has_website)/total*100:.1f}%)")
+    print(f"With booking URL: {len(has_booking_url):,} ({len(has_booking_url)/total*100:.1f}%)")
+    print(f"With contact info: {len(has_any_contact):,} ({len(has_any_contact)/total*100:.1f}%)")
+    print(f"With errors: {len(has_error):,} ({len(has_error)/total*100:.1f}%)")
     
     # Lead Quality
-    print("\n🎯 LEAD QUALITY TIERS")
-    print("-" * 40)
-    print(f"  Tier 1 (Booking + Known Engine):    {len(tier1_leads):,} ({len(tier1_leads)/total*100:.1f}%)")
-    print(f"  Tier 2 (Booking + Unknown Engine):  {len(tier2_leads):,} ({len(tier2_leads)/total*100:.1f}%)")
-    print(f"  Tier 3 (Contact Only):              {len(tier3_leads):,} ({len(tier3_leads)/total*100:.1f}%)")
-    print(f"  Tier 4 (Website, No Booking):       {len(tier4_leads):,} ({len(tier4_leads)/total*100:.1f}%)")
-    print(f"  Tier 5 (No Website):                {len(tier5_leads):,} ({len(tier5_leads)/total*100:.1f}%)")
+    print("\nLEAD QUALITY TIERS")
+    print(f"Tier 1 (Booking + Known Engine): {len(tier1_leads):,} ({len(tier1_leads)/total*100:.1f}%)")
+    print(f"Tier 2 (Booking + Unknown Engine): {len(tier2_leads):,} ({len(tier2_leads)/total*100:.1f}%)")
+    print(f"Tier 3 (Contact Only): {len(tier3_leads):,} ({len(tier3_leads)/total*100:.1f}%)")
+    print(f"Tier 4 (Website, No Booking): {len(tier4_leads):,} ({len(tier4_leads)/total*100:.1f}%)")
+    print(f"Tier 5 (No Website): {len(tier5_leads):,} ({len(tier5_leads)/total*100:.1f}%)")
     
     # Booking Engines
-    print("\n🔌 BOOKING ENGINES")
-    print("-" * 40)
+    print("\nBOOKING ENGINES")
     if known_engines:
         for engine, count in sorted(known_engines.items(), key=lambda x: -x[1]):
-            print(f"  {engine:35} {count:4} ({count/total*100:.1f}%)")
-    print(f"  {'Unknown/Third Party':35} {unknown_engines:4} ({unknown_engines/total*100:.1f}%)")
-    print(f"  {'Proprietary/Same Domain':35} {proprietary:4} ({proprietary/total*100:.1f}%)")
-    print(f"  {'Contact Only':35} {contact_only:4} ({contact_only/total*100:.1f}%)")
+            print(f"{engine}: {count} ({count/total*100:.1f}%)")
+    print(f"Unknown/Third Party: {unknown_engines} ({unknown_engines/total*100:.1f}%)")
+    print(f"Proprietary/Same Domain: {proprietary} ({proprietary/total*100:.1f}%)")
+    print(f"Contact Only: {contact_only} ({contact_only/total*100:.1f}%)")
     
     # Unknown Third Party Domains
     if third_party_domains:
-        print("\n🔍 UNKNOWN THIRD-PARTY DOMAINS (potential new engines)")
-        print("-" * 40)
+        print("\nUNKNOWN THIRD-PARTY DOMAINS")
         for domain, count in third_party_domains.most_common(15):
-            print(f"  {domain:40} {count:4}")
+            print(f"{domain}: {count}")
     
     # Errors
     if error_counts:
-        print("\n❌ ERRORS")
-        print("-" * 40)
+        print("\nERRORS")
         for error, count in error_counts.most_common(10):
-            error_display = error[:40] if len(error) > 40 else error
-            print(f"  {error_display:40} {count:4} ({count/total*100:.1f}%)")
+            error_display = error[:50] if len(error) > 50 else error
+            print(f"{error_display}: {count} ({count/total*100:.1f}%)")
     
     # Contact Info
-    print("\n📞 CONTACT INFO")
-    print("-" * 40)
-    print(f"  Phone (Google):         {len(has_phone_google):,} ({len(has_phone_google)/total*100:.1f}%)")
-    print(f"  Phone (Website):        {len(has_phone_website):,} ({len(has_phone_website)/total*100:.1f}%)")
-    print(f"  Email:                  {len(has_email):,} ({len(has_email)/total*100:.1f}%)")
+    print("\nCONTACT INFO")
+    print(f"Phone (Google): {len(has_phone_google):,} ({len(has_phone_google)/total*100:.1f}%)")
+    print(f"Phone (Website): {len(has_phone_website):,} ({len(has_phone_website)/total*100:.1f}%)")
+    print(f"Email: {len(has_email):,} ({len(has_email)/total*100:.1f}%)")
     
     # Detection Methods
     if detection_methods:
-        print("\n🔬 DETECTION METHODS (components)")
-        print("-" * 40)
+        print("\nDETECTION METHODS")
         for method, count in detection_methods.most_common(10):
-            print(f"  {method:35} {count:4}")
+            print(f"{method}: {count}")
     
     # Top Website Domains
     if top_website_domains:
-        print("\n🌐 TOP WEBSITE DOMAINS")
-        print("-" * 40)
+        print("\nTOP WEBSITE DOMAINS")
         for domain, count in top_website_domains:
             if domain:
-                print(f"  {domain:40} {count:4}")
+                print(f"{domain}: {count}")
     
     # Screenshots
-    print("\n📷 SCREENSHOTS")
-    print("-" * 40)
-    print(f"  With screenshot:        {len(has_screenshot):,} ({len(has_screenshot)/total*100:.1f}%)")
+    print("\nSCREENSHOTS")
+    print(f"With screenshot: {len(has_screenshot):,} ({len(has_screenshot)/total*100:.1f}%)")
     
     # Summary
     actionable = len(tier1_leads) + len(tier2_leads) + len(tier3_leads)
-    print("\n" + "=" * 70)
-    print(f"💰 ACTIONABLE LEADS (Tier 1-3): {actionable:,} ({actionable/total*100:.1f}%)")
-    print("=" * 70 + "\n")
+    print("\n" + "=" * 50)
+    print(f"ACTIONABLE LEADS (Tier 1-3): {actionable:,} ({actionable/total*100:.1f}%)")
+    print("=" * 50 + "\n")
 
 
 def main():

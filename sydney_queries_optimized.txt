@@ -1,0 +1,660 @@
+# Sydney Hotels - OPTIMIZED Query List
+# Total queries: 656
+# High-value areas first, skip tiny suburbs
+
+Sydney CBD hotels
+Sydney CBD motels
+Sydney CBD accommodation
+Sydney CBD serviced apartments
+Sydney CBD bed and breakfast
+The Rocks hotels
+The Rocks motels
+The Rocks accommodation
+The Rocks serviced apartments
+The Rocks bed and breakfast
+Circular Quay hotels
+Circular Quay motels
+Circular Quay accommodation
+Circular Quay serviced apartments
+Circular Quay bed and breakfast
+Darling Harbour hotels
+Darling Harbour motels
+Darling Harbour accommodation
+Darling Harbour serviced apartments
+Darling Harbour bed and breakfast
+Pyrmont hotels
+Pyrmont motels
+Pyrmont accommodation
+Pyrmont serviced apartments
+Pyrmont bed and breakfast
+Surry Hills hotels
+Surry Hills motels
+Surry Hills accommodation
+Surry Hills serviced apartments
+Surry Hills bed and breakfast
+Darlinghurst hotels
+Darlinghurst motels
+Darlinghurst accommodation
+Darlinghurst serviced apartments
+Darlinghurst bed and breakfast
+Potts Point hotels
+Potts Point motels
+Potts Point accommodation
+Potts Point serviced apartments
+Potts Point bed and breakfast
+Kings Cross hotels
+Kings Cross motels
+Kings Cross accommodation
+Kings Cross serviced apartments
+Kings Cross bed and breakfast
+Paddington hotels
+Paddington motels
+Paddington accommodation
+Paddington serviced apartments
+Paddington bed and breakfast
+Bondi hotels
+Bondi motels
+Bondi accommodation
+Bondi serviced apartments
+Bondi bed and breakfast
+Bondi Beach hotels
+Bondi Beach motels
+Bondi Beach accommodation
+Bondi Beach serviced apartments
+Bondi Beach bed and breakfast
+Bondi Junction hotels
+Bondi Junction motels
+Bondi Junction accommodation
+Bondi Junction serviced apartments
+Bondi Junction bed and breakfast
+Coogee hotels
+Coogee motels
+Coogee accommodation
+Coogee serviced apartments
+Coogee bed and breakfast
+Manly hotels
+Manly motels
+Manly accommodation
+Manly serviced apartments
+Manly bed and breakfast
+Manly Beach hotels
+Manly Beach motels
+Manly Beach accommodation
+Manly Beach serviced apartments
+Manly Beach bed and breakfast
+Newtown hotels
+Newtown motels
+Newtown accommodation
+Newtown serviced apartments
+Newtown bed and breakfast
+Glebe hotels
+Glebe motels
+Glebe accommodation
+Glebe serviced apartments
+Glebe bed and breakfast
+Chippendale hotels
+Chippendale motels
+Chippendale accommodation
+Chippendale serviced apartments
+Chippendale bed and breakfast
+Ultimo hotels
+Ultimo motels
+Ultimo accommodation
+Ultimo serviced apartments
+Ultimo bed and breakfast
+Haymarket hotels
+Haymarket motels
+Haymarket accommodation
+Haymarket serviced apartments
+Haymarket bed and breakfast
+Chinatown Sydney hotels
+Chinatown Sydney motels
+Chinatown Sydney accommodation
+Chinatown Sydney serviced apartments
+Chinatown Sydney bed and breakfast
+North Sydney hotels
+North Sydney motels
+North Sydney accommodation
+North Sydney serviced apartments
+North Sydney bed and breakfast
+Chatswood hotels
+Chatswood motels
+Chatswood accommodation
+Chatswood serviced apartments
+Chatswood bed and breakfast
+Parramatta hotels
+Parramatta motels
+Parramatta accommodation
+Parramatta serviced apartments
+Parramatta bed and breakfast
+Sydney Airport hotels
+Sydney Airport motels
+Sydney Airport accommodation
+Sydney Airport serviced apartments
+Sydney Airport bed and breakfast
+Mascot hotels
+Mascot motels
+Mascot accommodation
+Mascot serviced apartments
+Mascot bed and breakfast
+Double Bay hotels
+Double Bay motels
+Double Bay accommodation
+Double Bay serviced apartments
+Double Bay bed and breakfast
+Rose Bay hotels
+Rose Bay motels
+Rose Bay accommodation
+Rose Bay serviced apartments
+Rose Bay bed and breakfast
+Cronulla hotels
+Cronulla motels
+Cronulla accommodation
+Cronulla serviced apartments
+Cronulla bed and breakfast
+Wollongong hotels
+Wollongong motels
+Wollongong accommodation
+Wollongong serviced apartments
+Wollongong bed and breakfast
+Katoomba hotels
+Katoomba motels
+Katoomba accommodation
+Katoomba serviced apartments
+Katoomba bed and breakfast
+Leura hotels
+Leura motels
+Leura accommodation
+Leura serviced apartments
+Leura bed and breakfast
+Blue Mountains hotels
+Blue Mountains motels
+Blue Mountains accommodation
+Blue Mountains serviced apartments
+Blue Mountains bed and breakfast
+Central Coast hotels
+Central Coast motels
+Central Coast accommodation
+Central Coast serviced apartments
+Central Coast bed and breakfast
+Terrigal hotels
+Terrigal motels
+Terrigal accommodation
+Terrigal serviced apartments
+Terrigal bed and breakfast
+Gosford hotels
+Gosford motels
+Gosford accommodation
+Gosford serviced apartments
+Gosford bed and breakfast
+Liverpool hotels
+Liverpool motels
+Liverpool accommodation
+Liverpool serviced apartments
+Liverpool bed and breakfast
+Penrith hotels
+Penrith motels
+Penrith accommodation
+Penrith serviced apartments
+Penrith bed and breakfast
+Blacktown hotels
+Blacktown motels
+Blacktown accommodation
+Blacktown serviced apartments
+Blacktown bed and breakfast
+Campbelltown hotels
+Campbelltown motels
+Campbelltown accommodation
+Campbelltown serviced apartments
+Campbelltown bed and breakfast
+Hurstville hotels
+Hurstville motels
+Hurstville accommodation
+Hurstville serviced apartments
+Hurstville bed and breakfast
+Bankstown hotels
+Bankstown motels
+Bankstown accommodation
+Bankstown serviced apartments
+Bankstown bed and breakfast
+Olympic Park hotels
+Olympic Park motels
+Olympic Park accommodation
+Olympic Park serviced apartments
+Olympic Park bed and breakfast
+Homebush hotels
+Homebush motels
+Homebush accommodation
+Homebush serviced apartments
+Homebush bed and breakfast
+Strathfield hotels
+Strathfield motels
+Strathfield accommodation
+Strathfield serviced apartments
+Strathfield bed and breakfast
+Burwood hotels
+Burwood motels
+Burwood accommodation
+Burwood serviced apartments
+Burwood bed and breakfast
+Auburn hotels
+Auburn motels
+Auburn accommodation
+Auburn serviced apartments
+Auburn bed and breakfast
+Woolloomooloo hotels
+Woolloomooloo motels
+Woolloomooloo accommodation
+Woolloomooloo serviced apartments
+Woolloomooloo bed and breakfast
+Elizabeth Bay hotels
+Elizabeth Bay motels
+Elizabeth Bay accommodation
+Elizabeth Bay serviced apartments
+Elizabeth Bay bed and breakfast
+Rushcutters Bay hotels
+Rushcutters Bay motels
+Rushcutters Bay accommodation
+Rushcutters Bay serviced apartments
+Rushcutters Bay bed and breakfast
+Edgecliff hotels
+Edgecliff motels
+Edgecliff accommodation
+Edgecliff serviced apartments
+Edgecliff bed and breakfast
+Barangaroo hotels
+Barangaroo motels
+Barangaroo accommodation
+Barangaroo serviced apartments
+Barangaroo bed and breakfast
+Millers Point hotels
+Millers Point motels
+Millers Point accommodation
+Millers Point serviced apartments
+Millers Point bed and breakfast
+Kirribilli hotels
+Kirribilli motels
+Kirribilli accommodation
+Kirribilli serviced apartments
+Kirribilli bed and breakfast
+Neutral Bay hotels
+Neutral Bay motels
+Neutral Bay accommodation
+Neutral Bay serviced apartments
+Neutral Bay bed and breakfast
+Mosman hotels
+Mosman motels
+Mosman accommodation
+Mosman serviced apartments
+Mosman bed and breakfast
+Cremorne hotels
+Cremorne motels
+Cremorne accommodation
+Cremorne serviced apartments
+Cremorne bed and breakfast
+Lane Cove hotels
+Lane Cove motels
+Lane Cove accommodation
+Lane Cove serviced apartments
+Lane Cove bed and breakfast
+Hornsby hotels
+Hornsby motels
+Hornsby accommodation
+Hornsby serviced apartments
+Hornsby bed and breakfast
+Epping hotels
+Epping motels
+Epping accommodation
+Epping serviced apartments
+Epping bed and breakfast
+Macquarie Park hotels
+Macquarie Park motels
+Macquarie Park accommodation
+Macquarie Park serviced apartments
+Macquarie Park bed and breakfast
+Randwick hotels
+Randwick motels
+Randwick accommodation
+Randwick serviced apartments
+Randwick bed and breakfast
+Kensington hotels
+Kensington motels
+Kensington accommodation
+Kensington serviced apartments
+Kensington bed and breakfast
+Maroubra hotels
+Maroubra motels
+Maroubra accommodation
+Maroubra serviced apartments
+Maroubra bed and breakfast
+Brighton-Le-Sands hotels
+Brighton-Le-Sands motels
+Brighton-Le-Sands accommodation
+Brighton-Le-Sands serviced apartments
+Brighton-Le-Sands bed and breakfast
+Rockdale hotels
+Rockdale motels
+Rockdale accommodation
+Rockdale serviced apartments
+Rockdale bed and breakfast
+St Leonards hotels
+St Leonards motels
+St Leonards accommodation
+St Leonards serviced apartments
+St Leonards bed and breakfast
+Artarmon hotels
+Artarmon motels
+Artarmon accommodation
+Artarmon serviced apartments
+Artarmon bed and breakfast
+Willoughby hotels
+Willoughby motels
+Willoughby accommodation
+Willoughby serviced apartments
+Willoughby bed and breakfast
+Dee Why hotels
+Dee Why motels
+Dee Why accommodation
+Dee Why serviced apartments
+Dee Why bed and breakfast
+Brookvale hotels
+Brookvale motels
+Brookvale accommodation
+Brookvale serviced apartments
+Brookvale bed and breakfast
+Newport hotels
+Newport motels
+Newport accommodation
+Newport serviced apartments
+Newport bed and breakfast
+Avalon hotels
+Avalon motels
+Avalon accommodation
+Avalon serviced apartments
+Avalon bed and breakfast
+Palm Beach hotels
+Palm Beach motels
+Palm Beach accommodation
+Palm Beach serviced apartments
+Palm Beach bed and breakfast
+Mona Vale hotels
+Mona Vale motels
+Mona Vale accommodation
+Mona Vale serviced apartments
+Mona Vale bed and breakfast
+Narrabeen hotels
+Narrabeen motels
+Narrabeen accommodation
+Narrabeen serviced apartments
+Narrabeen bed and breakfast
+Castle Hill hotels
+Castle Hill motels
+Castle Hill accommodation
+Castle Hill serviced apartments
+Castle Hill bed and breakfast
+Bella Vista hotels
+Bella Vista motels
+Bella Vista accommodation
+Bella Vista serviced apartments
+Bella Vista bed and breakfast
+Rouse Hill hotels
+Rouse Hill motels
+Rouse Hill accommodation
+Rouse Hill serviced apartments
+Rouse Hill bed and breakfast
+Windsor hotels
+Windsor motels
+Windsor accommodation
+Windsor serviced apartments
+Windsor bed and breakfast
+Richmond hotels
+Richmond motels
+Richmond accommodation
+Richmond serviced apartments
+Richmond bed and breakfast
+Sutherland hotels
+Sutherland motels
+Sutherland accommodation
+Sutherland serviced apartments
+Sutherland bed and breakfast
+Miranda hotels
+Miranda motels
+Miranda accommodation
+Miranda serviced apartments
+Miranda bed and breakfast
+Caringbah hotels
+Caringbah motels
+Caringbah accommodation
+Caringbah serviced apartments
+Caringbah bed and breakfast
+Engadine hotels
+Engadine motels
+Engadine accommodation
+Engadine serviced apartments
+Engadine bed and breakfast
+Helensburgh hotels
+Helensburgh motels
+Helensburgh accommodation
+Helensburgh serviced apartments
+Helensburgh bed and breakfast
+Redfern hotels
+Redfern accommodation
+Waterloo hotels
+Waterloo accommodation
+Zetland hotels
+Zetland accommodation
+Alexandria hotels
+Alexandria accommodation
+Green Square hotels
+Green Square accommodation
+Rosebery hotels
+Rosebery accommodation
+Erskineville hotels
+Erskineville accommodation
+Stanmore hotels
+Stanmore accommodation
+Marrickville hotels
+Marrickville accommodation
+Petersham hotels
+Petersham accommodation
+Leichhardt hotels
+Leichhardt accommodation
+Annandale hotels
+Annandale accommodation
+Rozelle hotels
+Rozelle accommodation
+Balmain hotels
+Balmain accommodation
+Lilyfield hotels
+Lilyfield accommodation
+Drummoyne hotels
+Drummoyne accommodation
+Gladesville hotels
+Gladesville accommodation
+Ryde hotels
+Ryde accommodation
+West Ryde hotels
+West Ryde accommodation
+Eastwood hotels
+Eastwood accommodation
+Carlingford hotels
+Carlingford accommodation
+Beecroft hotels
+Beecroft accommodation
+Pennant Hills hotels
+Pennant Hills accommodation
+Thornleigh hotels
+Thornleigh accommodation
+Waitara hotels
+Waitara accommodation
+Turramurra hotels
+Turramurra accommodation
+Pymble hotels
+Pymble accommodation
+Gordon hotels
+Gordon accommodation
+Lindfield hotels
+Lindfield accommodation
+Roseville hotels
+Roseville accommodation
+Killara hotels
+Killara accommodation
+Wahroonga hotels
+Wahroonga accommodation
+Seaforth hotels
+Seaforth accommodation
+Balgowlah hotels
+Balgowlah accommodation
+Freshwater hotels
+Freshwater accommodation
+Curl Curl hotels
+Curl Curl accommodation
+Collaroy hotels
+Collaroy accommodation
+Narraweena hotels
+Narraweena accommodation
+Cromer hotels
+Cromer accommodation
+Frenchs Forest hotels
+Frenchs Forest accommodation
+Concord hotels
+Concord accommodation
+Rhodes hotels
+Rhodes accommodation
+Meadowbank hotels
+Meadowbank accommodation
+Ermington hotels
+Ermington accommodation
+Dundas hotels
+Dundas accommodation
+Rydalmere hotels
+Rydalmere accommodation
+Merrylands hotels
+Merrylands accommodation
+Granville hotels
+Granville accommodation
+Guildford hotels
+Guildford accommodation
+Fairfield hotels
+Fairfield accommodation
+Cabramatta hotels
+Cabramatta accommodation
+Lidcombe hotels
+Lidcombe accommodation
+Berala hotels
+Berala accommodation
+Regents Park hotels
+Regents Park accommodation
+Bass Hill hotels
+Bass Hill accommodation
+Yagoona hotels
+Yagoona accommodation
+Revesby hotels
+Revesby accommodation
+Padstow hotels
+Padstow accommodation
+Riverwood hotels
+Riverwood accommodation
+Peakhurst hotels
+Peakhurst accommodation
+Mortdale hotels
+Mortdale accommodation
+Penshurst hotels
+Penshurst accommodation
+Kogarah hotels
+Kogarah accommodation
+Bexley hotels
+Bexley accommodation
+Arncliffe hotels
+Arncliffe accommodation
+Wolli Creek hotels
+Wolli Creek accommodation
+Tempe hotels
+Tempe accommodation
+Sydenham hotels
+Sydenham accommodation
+Campsie hotels
+Campsie accommodation
+Belmore hotels
+Belmore accommodation
+Lakemba hotels
+Lakemba accommodation
+Punchbowl hotels
+Punchbowl accommodation
+Greenacre hotels
+Greenacre accommodation
+Casula hotels
+Casula accommodation
+Moorebank hotels
+Moorebank accommodation
+Holsworthy hotels
+Holsworthy accommodation
+Ingleburn hotels
+Ingleburn accommodation
+Minto hotels
+Minto accommodation
+Leumeah hotels
+Leumeah accommodation
+Glenfield hotels
+Glenfield accommodation
+Macquarie Fields hotels
+Macquarie Fields accommodation
+Seven Hills hotels
+Seven Hills accommodation
+Rooty Hill hotels
+Rooty Hill accommodation
+Mt Druitt hotels
+Mt Druitt accommodation
+Quakers Hill hotels
+Quakers Hill accommodation
+Schofields hotels
+Schofields accommodation
+Riverstone hotels
+Riverstone accommodation
+Marsden Park hotels
+Marsden Park accommodation
+Jamisontown hotels
+Jamisontown accommodation
+Kingswood hotels
+Kingswood accommodation
+Werrington hotels
+Werrington accommodation
+St Marys hotels
+St Marys accommodation
+St Clair hotels
+St Clair accommodation
+Glenbrook hotels
+Glenbrook accommodation
+Springwood hotels
+Springwood accommodation
+Wentworth Falls hotels
+Wentworth Falls accommodation
+Blackheath hotels
+Blackheath accommodation
+Mt Victoria hotels
+Mt Victoria accommodation
+Como hotels
+Como accommodation
+Jannali hotels
+Jannali accommodation
+Sylvania hotels
+Sylvania accommodation
+Gymea hotels
+Gymea accommodation
+Kirrawee hotels
+Kirrawee accommodation
+Woolooware hotels
+Woolooware accommodation
+Sydney boutique hotels
+Sydney luxury hotels
+Sydney budget hotels
+Sydney hostels
+Sydney backpackers
+Sydney waterfront hotels
+Sydney beachside hotels
+Sydney pet friendly hotels
+Sydney airport hotels
+hotels near Sydney Opera House
+hotels near Sydney Harbour Bridge
+hotels near Bondi Beach
+hotels near Darling Harbour

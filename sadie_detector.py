@@ -71,6 +71,19 @@ ENGINE_PATTERNS = {
     "Windsurfer CRS": ["windsurfercrs.com", "res.windsurfercrs.com"],
     "ThinkReservations": ["thinkreservations.com", "secure.thinkreservations.com"],
     "ASI Web Reservations": ["asiwebres.com", "reservation.asiwebres.com"],
+    "IQWebBook": ["iqwebbook.com", "us01.iqwebbook.com"],
+    "BookDirect": ["bookdirect.net", "ococean.bookdirect.net"],
+    "RezStream": ["rezstream.com", "guest.rezstream.com"],
+    "Reseze": ["reseze.net"],
+    "WebRez": ["webrez.com", "secure.webrez.com"],
+    "IB Strategies": ["ibstrategies.com", "secure.ibstrategies.com"],
+    "Morey's Piers": ["moreyspiers.com", "irm.moreyspiers.com"],
+    "ReservationKey": ["reservationkey.com", "v2.reservationkey.com"],
+    "FareHarbor": ["fareharbor.com"],
+    "Firefly Reservations": ["fireflyreservations.com", "app.fireflyreservations.com"],
+    "Lodgify": ["lodgify.com", "checkout.lodgify.com"],
+    "eviivo": ["eviivo.com", "via.eviivo.com"],
+    "LuxuryRes": ["luxuryres.com"],
 }
 
 # Keywords to identify booking buttons
@@ -84,6 +97,14 @@ BOOKING_BUTTON_KEYWORDS = [
 SKIP_CHAIN_DOMAINS = [
     "marriott.com", "hilton.com", "ihg.com", "hyatt.com", "wyndham.com",
     "choicehotels.com", "bestwestern.com", "radissonhotels.com", "accor.com",
+]
+
+# Skip social media and junk websites (not real hotel sites)
+SKIP_JUNK_DOMAINS = [
+    "facebook.com", "instagram.com", "twitter.com", "youtube.com", "tiktok.com",
+    "linkedin.com", "yelp.com", "tripadvisor.com", "google.com",
+    "booking.com", "expedia.com", "hotels.com", "airbnb.com", "vrbo.com",
+    "dnr.", "parks.", "recreation.", ".gov", ".edu", ".mil",
 ]
 
 # ============================================================================
@@ -944,6 +965,21 @@ class HotelProcessor:
             result.booking_engine = engine_name or "unknown"
             result.booking_engine_domain = engine_domain
             
+            # Check if booking URL is actually a junk domain (facebook, etc) - mark for retry
+            junk_booking_domains = [
+                "facebook.com", "instagram.com", "twitter.com", "youtube.com",
+                "linkedin.com", "yelp.com", "tripadvisor.com", "google.com",
+                "booking.com", "expedia.com", "hotels.com", "airbnb.com", "vrbo.com",
+            ]
+            if result.booking_url:
+                booking_domain = extract_domain(result.booking_url)
+                if any(junk in booking_domain for junk in junk_booking_domains):
+                    log(f"  Junk booking URL detected: {booking_domain} - marking for retry")
+                    result.booking_url = ""
+                    result.booking_engine = ""
+                    result.booking_engine_domain = ""
+                    result.error = "junk_booking_url_retry"
+            
             # Mark as error ONLY if we found no booking URL, no known engine, AND no contact info
             has_contact_info = bool(result.phone_website or result.phone_google or result.email)
             if not result.booking_url and result.booking_engine == "unknown" and not has_contact_info:
@@ -1208,19 +1244,26 @@ class DetectorPipeline:
             await browser.close()
     
     def _load_hotels(self, input_csv: str) -> list[dict]:
-        """Load hotels from CSV, filtering out big chains."""
+        """Load hotels from CSV, filtering out big chains and junk sites."""
         hotels = []
-        skipped = 0
+        skipped_chains = 0
+        skipped_junk = 0
         with open(input_csv, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 website = row.get("website", "").lower()
                 # Skip big hotel chains - they have their own booking systems
                 if any(chain in website for chain in SKIP_CHAIN_DOMAINS):
-                    skipped += 1
+                    skipped_chains += 1
+                    continue
+                # Skip social media and junk domains
+                if any(junk in website for junk in SKIP_JUNK_DOMAINS):
+                    skipped_junk += 1
                     continue
                 hotels.append(row)
-        if skipped:
-            log(f"Skipped {skipped} big chain hotels (Marriott, Hilton, etc.)")
+        if skipped_chains:
+            log(f"Skipped {skipped_chains} big chain hotels (Marriott, Hilton, etc.)")
+        if skipped_junk:
+            log(f"Skipped {skipped_junk} junk URLs (Facebook, gov sites, etc.)")
         return hotels
     
     def _filter_processed(self, hotels: list[dict]) -> tuple[list[dict], dict]:

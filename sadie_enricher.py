@@ -79,8 +79,12 @@ def is_valid_hotel_domain(url: str) -> bool:
         if any(lower_url.endswith(ext) for ext in bad_extensions):
             return False
         
-        # Skip government sites
-        if '.gov' in lower_url or '.edu' in lower_url:
+        # Skip government and educational sites
+        if '.gov' in lower_url or '.edu' in lower_url or '.mil' in lower_url:
+            return False
+        
+        # Skip state parks and similar
+        if 'dnr.' in lower_url or 'parks.' in lower_url or 'recreation.' in lower_url:
             return False
         
         domain = extract_domain(url)
