@@ -1,0 +1,16 @@
+[project]
+name = "sadie-gtm"
+version = "0.1.0"
+description = "Hotel lead generation pipeline"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "playwright>=1.40.0",
+    "loguru>=0.7.0",
+    "httpx>=0.25.0",
+    "openpyxl>=3.1.0",
+]
+
+[tool.uv]
+dev-dependencies = []

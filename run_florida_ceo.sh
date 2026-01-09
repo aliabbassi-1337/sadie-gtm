@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run city scraper for all 27 CEO Florida cities concurrently
+# Scrape hotels for CEO's 27 Florida cities concurrently
 # Usage: ./run_florida_ceo.sh
 
 set -e
@@ -7,49 +7,49 @@ set -e
 OUTPUT_DIR="scraper_output/florida_ceo"
 mkdir -p "$OUTPUT_DIR"
 
-echo "Starting scrapers for 27 CEO Florida cities..."
+echo "Scraping 27 CEO Florida cities..."
 echo "Output: $OUTPUT_DIR"
 echo ""
 
-# All 27 CEO cities
+# CEO's 27 Florida cities
 CITIES=(
-    orlando
-    miami
-    miami_beach
-    fort_lauderdale
-    tampa
-    west_palm_beach
-    key_west
-    st_petersburg
-    clearwater
-    naples
-    sarasota
-    jacksonville
-    st_augustine
-    destin
-    panama_city_beach
-    fort_myers
-    pensacola
-    kissimmee
-    cape_coral
-    marco_island
-    fort_walton_beach
-    bradenton
-    pompano_beach
-    fernandina_beach
-    clearwater_beach
-    palm_coast
-    flagler_beach
+    "Orlando"
+    "Miami"
+    "Miami Beach"
+    "Fort Lauderdale"
+    "Tampa"
+    "West Palm Beach"
+    "Key West"
+    "St Petersburg"
+    "Clearwater"
+    "Naples"
+    "Sarasota"
+    "Jacksonville"
+    "St Augustine"
+    "Destin"
+    "Panama City Beach"
+    "Fort Myers"
+    "Pensacola"
+    "Kissimmee"
+    "Cape Coral"
+    "Marco Island"
+    "Fort Walton Beach"
+    "Bradenton"
+    "Pompano Beach"
+    "Fernandina Beach"
+    "Clearwater Beach"
+    "Palm Coast"
+    "Flagler Beach"
 )
 
-# Launch all scrapers in parallel
+# Launch all scrapers concurrently
 for city in "${CITIES[@]}"; do
     echo "Starting: $city"
     python3 scripts/scrapers/city.py --city "$city" --state FL --output "$OUTPUT_DIR" &
 done
 
 echo ""
-echo "All ${#CITIES[@]} scrapers launched. Waiting for completion..."
+echo "All ${#CITIES[@]} scrapers launched. Waiting..."
 wait
 
 echo ""
