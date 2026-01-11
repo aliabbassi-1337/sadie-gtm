@@ -23,8 +23,10 @@ for city in "${CITIES[@]}"; do
 done
 
 mkdir -p logs/florida
+BATCH_SIZE=5
 
-echo "[$(date +%H:%M:%S)] Starting detection (25 cities parallel)..."
+echo "[$(date +%H:%M:%S)] Starting detection (${BATCH_SIZE} cities at a time)..."
+count=0
 for city in "${CITIES[@]}"; do
     [ -f "scraper_output/florida/${city}.csv" ] || continue
     echo "  Starting: ${city}"
@@ -33,12 +35,14 @@ for city in "${CITIES[@]}"; do
         --output "detector_output/florida/${city}_leads.csv" \
         --concurrency $CONCURRENCY \
         > "logs/florida/${city}.log" 2>&1 &
-done
 
-echo "[$(date +%H:%M:%S)] All jobs launched. Logs in logs/florida/"
-echo "  Monitor with: tail -f logs/florida/*.log"
-echo "  Check status: ls -la logs/florida/ | wc -l"
-wait
+    count=$((count + 1))
+    if [ $((count % BATCH_SIZE)) -eq 0 ]; then
+        echo "[$(date +%H:%M:%S)] Waiting for batch to complete..."
+        wait
+    fi
+done
+wait  # Wait for any remaining jobs
 
 # Summary
 echo ""
