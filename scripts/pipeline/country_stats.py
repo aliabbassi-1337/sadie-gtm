@@ -27,6 +27,16 @@ except ImportError:
 ONEDRIVE_BASE = os.path.expanduser("~/Library/CloudStorage/OneDrive-ValsoftCorporation")
 SADIE_FOLDER = "Sadie Lead Gen"
 
+# Top 25 priority cities for Florida
+TOP_25_FLORIDA_CITIES = {
+    "miami beach", "kissimmee", "miami", "pensacola", "fort lauderdale",
+    "tampa", "saint augustine", "st augustine", "key west", "windermere",
+    "panama city beach", "bay pines", "orlando", "daytona beach",
+    "north miami beach", "pompano beach", "homestead", "fort myers beach",
+    "hialeah", "saint petersburg", "st petersburg", "clearwater beach",
+    "jacksonville", "sarasota", "pembroke pines", "fort myers", "high springs"
+}
+
 
 def get_sadie_path() -> Path:
     return Path(ONEDRIVE_BASE) / SADIE_FOLDER
@@ -77,15 +87,32 @@ def extract_stats_from_excel(xlsx_path: Path) -> dict:
         "tier2": 0,
         "with_phone": 0,
         "with_email": 0,
+        "booking_engines": defaultdict(int),  # Count by booking engine
     }
     
     try:
         wb = load_workbook(xlsx_path, read_only=True, data_only=True)
         
-        # Get leads count from Leads sheet
+        # Get leads count and booking engine breakdown from Leads sheet
         if "Leads" in wb.sheetnames:
             ws_leads = wb["Leads"]
             stats["leads_count"] = ws_leads.max_row - 1  # Subtract header
+
+            # Find booking_engine column
+            header_row = list(ws_leads.iter_rows(min_row=1, max_row=1, values_only=True))[0]
+            be_col = None
+            for i, h in enumerate(header_row):
+                if h and str(h).lower() == "booking_engine":
+                    be_col = i
+                    break
+
+            # Count booking engines
+            if be_col is not None:
+                for row in ws_leads.iter_rows(min_row=2, values_only=True):
+                    if row and len(row) > be_col and row[be_col]:
+                        engine = str(row[be_col]).strip().lower()
+                        if engine and engine != "none":
+                            stats["booking_engines"][engine] += 1
         
         # Try to parse Stats sheet for metrics
         if "Stats" in wb.sheetnames:
@@ -178,6 +205,12 @@ def generate_country_stats(country_name: str, city_stats: list[dict]) -> Path:
         "with_phone": sum(c["with_phone"] for c in city_stats),
         "with_email": sum(c["with_email"] for c in city_stats),
     }
+
+    # Aggregate booking engines
+    all_engines = defaultdict(int)
+    for c in city_stats:
+        for engine, count in c["booking_engines"].items():
+            all_engines[engine] += count
     
     # Calculate rates
     website_rate = round(totals["with_website"] / totals["hotels_scraped"] * 100, 1) if totals["hotels_scraped"] else 0
@@ -271,33 +304,74 @@ def generate_country_stats(country_name: str, city_stats: list[dict]) -> Path:
         ws.cell(row=r, column=5).alignment = right
         ws.cell(row=r, column=5).border = thin_border
     
-    # CITIES BREAKDOWN
-    ws.merge_cells('A9:E9')
-    c = ws.cell(row=9, column=1, value="CITIES BREAKDOWN")
+    # BOOKING ENGINES BREAKDOWN
+    ws.merge_cells('A9:B9')
+    c = ws.cell(row=9, column=1, value="BOOKING ENGINES")
     c.font = section_font
     c.fill = section_fill
     c.alignment = center
-    
+
+    # Sort engines by count descending
+    sorted_engines = sorted(all_engines.items(), key=lambda x: x[1], reverse=True)
+    total_engines = sum(all_engines.values())
+
+    for i, (engine, count) in enumerate(sorted_engines[:10]):  # Top 10 engines
+        r = 10 + i
+        pct = round(count / total_engines * 100, 1) if total_engines else 0
+        # Format engine name nicely
+        engine_display = engine.replace("_", " ").title()
+        ws.cell(row=r, column=1, value=engine_display).font = label_font
+        ws.cell(row=r, column=1).border = thin_border
+        ws.cell(row=r, column=2, value=f"{count:,} ({pct}%)").font = value_font
+        ws.cell(row=r, column=2).alignment = right
+        ws.cell(row=r, column=2).border = thin_border
+
+    # Calculate row offset for next section
+    engine_rows = min(len(sorted_engines), 10)
+    next_section_row = 10 + engine_rows + 2
+
+    # CITIES BREAKDOWN
+    ws.merge_cells(f'A{next_section_row}:F{next_section_row}')
+    c = ws.cell(row=next_section_row, column=1, value="CITIES BREAKDOWN")
+    c.font = section_font
+    c.fill = section_fill
+    c.alignment = center
+
     # Headers
-    headers = ["City", "Scraped", "Booking Found", "Tier 1", "Tier 2"]
+    headers = ["City", "Top 25", "Scraped", "Booking Found", "Tier 1", "Tier 2"]
+    ws.column_dimensions["F"].width = 12
+    header_row = next_section_row + 1
     for col, h in enumerate(headers, 1):
-        c = ws.cell(row=10, column=col, value=h)
+        c = ws.cell(row=header_row, column=col, value=h)
         c.font = Font(bold=True)
         c.border = thin_border
         c.alignment = center
-    
+
+    # Highlight fill for Top 25 cities
+    top25_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")  # Light yellow
+
     # City rows
     for i, city in enumerate(sorted(city_stats, key=lambda x: x["booking_found"], reverse=True)):
-        r = 11 + i
+        r = header_row + 1 + i
+        city_name_lower = city["city"].lower()
+        is_top25 = city_name_lower in TOP_25_FLORIDA_CITIES
+
         ws.cell(row=r, column=1, value=city["city"]).border = thin_border
-        ws.cell(row=r, column=2, value=city["hotels_scraped"]).border = thin_border
-        ws.cell(row=r, column=2).alignment = right
-        ws.cell(row=r, column=3, value=city["booking_found"]).border = thin_border
+        ws.cell(row=r, column=2, value="Yes" if is_top25 else "").border = thin_border
+        ws.cell(row=r, column=2).alignment = center
+        ws.cell(row=r, column=3, value=city["hotels_scraped"]).border = thin_border
         ws.cell(row=r, column=3).alignment = right
-        ws.cell(row=r, column=4, value=city["tier1"]).border = thin_border
+        ws.cell(row=r, column=4, value=city["booking_found"]).border = thin_border
         ws.cell(row=r, column=4).alignment = right
-        ws.cell(row=r, column=5, value=city["tier2"]).border = thin_border
+        ws.cell(row=r, column=5, value=city["tier1"]).border = thin_border
         ws.cell(row=r, column=5).alignment = right
+        ws.cell(row=r, column=6, value=city["tier2"]).border = thin_border
+        ws.cell(row=r, column=6).alignment = right
+
+        # Highlight entire row if Top 25
+        if is_top25:
+            for col in range(1, 7):
+                ws.cell(row=r, column=col).fill = top25_fill
     
     # Save - single file, overwrites each time
     # Keep USA uppercase, title case others
