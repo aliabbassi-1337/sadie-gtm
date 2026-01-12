@@ -173,7 +173,7 @@ for SCRAPER_FILE in "${FILES[@]}"; do
     # Step 3: Room count enrichment (updates in-place)
     if [ "$SKIP_ROOM_COUNT" = false ]; then
         header "ROOM COUNT ENRICHMENT (Groq)"
-        python3 scripts/enrichers/room_count_groq.py --input "$LEADS_FILE" --concurrency 25 || warn "Groq room count failed"
+        python3 scripts/enrichers/room_count_groq.py --input "$LEADS_FILE" --concurrency 50 || warn "Groq room count failed"
 
         header "ROOM COUNT ENRICHMENT (Google AI fallback)"
         python3 scripts/enrichers/room_count_google.py --input "$LEADS_FILE" --concurrency 15 || warn "Google AI room count failed"

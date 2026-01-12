@@ -589,7 +589,7 @@ def main():
     parser = argparse.ArgumentParser(description="Enrich leads with room counts using LLM")
     parser.add_argument("--input", required=True, help="Input CSV file")
     parser.add_argument("--output", help="Output CSV file (default: update in-place)")
-    parser.add_argument("--concurrency", type=int, default=5, help="Concurrent requests (default: 5)")
+    parser.add_argument("--concurrency", type=int, default=50, help="Concurrent requests (default: 50)")
 
     args = parser.parse_args()
 

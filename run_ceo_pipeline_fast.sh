@@ -60,7 +60,7 @@ if [ "$SKIP_ROOM" = false ]; then
     echo "[$(date +%H:%M:%S)] Room count enrichment (Groq)..."
     for city in "${CITIES[@]}"; do
         leads="detector_output/florida/${city}_leads.csv"
-        [ -f "$leads" ] && python3 scripts/enrichers/room_count_groq.py --input "$leads" --concurrency 25 &
+        [ -f "$leads" ] && python3 scripts/enrichers/room_count_groq.py --input "$leads" --concurrency 50 &
     done
     wait
 
