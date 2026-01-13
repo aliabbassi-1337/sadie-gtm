@@ -1,0 +1,20 @@
+# Workflow definitions and schedules for Sadie GTM
+
+workflows:
+  scraper:
+    description: Scrape hotels from Serper for cities/states
+    command: uv run main.py scraper
+    schedule: "0 6 * * *"  # Daily at 6am
+    enabled: true
+
+  # detect_dispatcher:
+  #   description: Poll for scraped hotels and send to detect queue
+  #   command: uv run main.py detect_dispatcher
+  #   schedule: "*/5 * * * *"  # Every 5 minutes
+  #   enabled: true
+
+  # launcher:
+  #   description: Mark scored hotels as live based on quality criteria
+  #   command: uv run main.py launcher
+  #   schedule: "0 8 * * *"  # Daily at 8am
+  #   enabled: true

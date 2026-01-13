@@ -95,7 +95,7 @@ flowchart TB
 
 ### Pipeline Overview
 
-This is a 6 stage pipeline using AWS SQS and EC2 consumers that'll help us scrape, detect, and enrich the state of Florida, the entire United States, and other countries. The dispatchers will help us only dispatch what we're interested in, the enrichment dispatcher for example will only dispatch messages for tier 1 booking engines, reducing the number of hotels for enrichment and hence saving on AI agents costs.
+This is a 6-stage pipeline using AWS SQS and EC2 consumers that will help us scrape, detect, and enrich the state of Florida, the entire United States, and other countries. The dispatchers only dispatch what we're interested in—the enrichment dispatcher, for example, will only dispatch messages for tier 1 booking engines, reducing the number of hotels for enrichment and hence saving on AI agent costs.
 
 ---
 
