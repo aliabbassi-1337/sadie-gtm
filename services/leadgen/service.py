@@ -6,7 +6,7 @@ from typing import List, Optional
 from loguru import logger
 
 from services.leadgen import repo
-from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, CITY_COORDINATES
+from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, CITY_COORDINATES, DEFAULT_CELL_SIZE_KM
 
 # Re-export for public API
 __all__ = ["IService", "Service", "ScrapeEstimate", "CITY_COORDINATES"]
@@ -20,7 +20,8 @@ class IService(ABC):
         self,
         center_lat: float,
         center_lng: float,
-        radius_km: float
+        radius_km: float,
+        cell_size_km: float = DEFAULT_CELL_SIZE_KM,
     ) -> int:
         """
         Scrape hotels in a circular region using adaptive grid.
@@ -29,7 +30,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def scrape_state(self, state: str) -> int:
+    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM) -> int:
         """
         Scrape hotels in an entire state using adaptive grid.
         Returns number of hotels found.
@@ -50,13 +51,14 @@ class IService(ABC):
         self,
         center_lat: float,
         center_lng: float,
-        radius_km: float
+        radius_km: float,
+        cell_size_km: float = DEFAULT_CELL_SIZE_KM,
     ) -> ScrapeEstimate:
         """Estimate cost for scraping a circular region."""
         pass
 
     @abstractmethod
-    def estimate_state(self, state: str) -> ScrapeEstimate:
+    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM) -> ScrapeEstimate:
         """Estimate cost for scraping a state."""
         pass
 
@@ -77,7 +79,8 @@ class Service(IService):
         self,
         center_lat: float,
         center_lng: float,
-        radius_km: float
+        radius_km: float,
+        cell_size_km: float = DEFAULT_CELL_SIZE_KM,
     ) -> int:
         """
         Scrape hotels in a circular region using adaptive grid.
@@ -86,6 +89,7 @@ class Service(IService):
             center_lat: Center latitude of the region
             center_lng: Center longitude of the region
             radius_km: Radius in kilometers
+            cell_size_km: Cell size in km (smaller = more thorough, default 2km)
 
         Returns:
             Number of hotels found and saved to database
@@ -93,7 +97,7 @@ class Service(IService):
         logger.info(f"Starting region scrape: center=({center_lat}, {center_lng}), radius={radius_km}km")
 
         # Initialize scraper
-        scraper = GridScraper(api_key=self._api_key)
+        scraper = GridScraper(api_key=self._api_key, cell_size_km=cell_size_km)
 
         # Run the scrape
         hotels, stats = await scraper.scrape_region(center_lat, center_lng, radius_km)
@@ -109,12 +113,13 @@ class Service(IService):
 
         return saved_count
 
-    async def scrape_state(self, state: str) -> int:
+    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM) -> int:
         """
         Scrape hotels in an entire state using adaptive grid.
 
         Args:
             state: State name (e.g., "florida", "california")
+            cell_size_km: Cell size in km (smaller = more thorough, default 2km)
 
         Returns:
             Number of hotels found and saved to database
@@ -122,7 +127,7 @@ class Service(IService):
         logger.info(f"Starting state scrape: {state}")
 
         # Initialize scraper
-        scraper = GridScraper(api_key=self._api_key)
+        scraper = GridScraper(api_key=self._api_key, cell_size_km=cell_size_km)
 
         # Run the scrape
         hotels, stats = await scraper.scrape_state(state)
@@ -186,13 +191,16 @@ class Service(IService):
         self,
         center_lat: float,
         center_lng: float,
-        radius_km: float
+        radius_km: float,
+        cell_size_km: float = DEFAULT_CELL_SIZE_KM,
     ) -> ScrapeEstimate:
         """Estimate cost for scraping a circular region."""
         scraper = GridScraper.__new__(GridScraper)  # Skip __init__ validation
+        scraper.cell_size_km = cell_size_km
         return scraper.estimate_region(center_lat, center_lng, radius_km)
 
-    def estimate_state(self, state: str) -> ScrapeEstimate:
+    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM) -> ScrapeEstimate:
         """Estimate cost for scraping a state."""
         scraper = GridScraper.__new__(GridScraper)  # Skip __init__ validation
+        scraper.cell_size_km = cell_size_km
         return scraper.estimate_state(state)

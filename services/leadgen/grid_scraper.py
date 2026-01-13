@@ -32,9 +32,18 @@ CITY_COORDINATES = {
 }
 
 # Adaptive subdivision settings (from context/grid_scraper_adaptive.md)
-INITIAL_CELL_SIZE_KM = 10.0  # Start with 10km cells
-MIN_CELL_SIZE_KM = 2.5       # Don't subdivide below 2.5km
+DEFAULT_CELL_SIZE_KM = 2.0   # Default cell size (2km works for most areas)
+MIN_CELL_SIZE_KM = 0.5       # Don't subdivide below 500m
 API_RESULT_LIMIT = 20        # Serper returns max 20 results - subdivide if hit
+
+# Zoom levels by cell size (must cover the cell area)
+ZOOM_BY_CELL_SIZE = {
+    0.5: 16,   # 500m cell -> 16z
+    1.0: 15,   # 1km cell -> 15z
+    2.0: 14,   # 2km cell -> 14z
+    5.0: 13,   # 5km cell -> 13z
+    10.0: 12,  # 10km cell -> 12z
+}
 
 # Concurrency settings - stay under Serper rate limits
 MAX_CONCURRENT_CELLS = 2     # Process up to 2 cells concurrently
@@ -191,10 +200,18 @@ class ScrapeEstimate(BaseModel):
 class GridScraper:
     """Adaptive grid-based hotel scraper using Serper Maps API."""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, cell_size_km: float = DEFAULT_CELL_SIZE_KM):
         self.api_key = api_key or os.environ.get("SERPER_API_KEY", "")
         if not self.api_key:
             raise ValueError("No Serper API key. Set SERPER_API_KEY env var or pass api_key.")
+
+        self.cell_size_km = cell_size_km
+        # Pick zoom level that covers the cell
+        self.zoom_level = 14  # default
+        for size, zoom in sorted(ZOOM_BY_CELL_SIZE.items()):
+            if cell_size_km <= size:
+                self.zoom_level = zoom
+                break
 
         self._seen: Set[str] = set()
         self._stats = ScrapeStats()
@@ -267,22 +284,26 @@ class GridScraper:
         width_km = (lng_max - lng_min) * 111.0 * math.cos(math.radians(center_lat))
         region_size_km2 = height_km * width_km
 
-        # Count initial cells
-        cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, INITIAL_CELL_SIZE_KM)
+        # Count cells with configured cell size
+        cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, self.cell_size_km)
         initial_cells = len(cells)
 
-        # Estimate subdivision: ~25% of cells subdivide in typical mixed urban/rural areas
-        # Dense urban areas subdivide more, rural areas don't subdivide
-        subdivision_rate = 0.25
-        subdivided_cells = int(initial_cells * subdivision_rate * 4)  # Each subdivides into 4
+        # For small cells (dense mode), no subdivision expected
+        # For large cells, ~25% subdivide
+        if self.cell_size_km <= 2.0:
+            subdivision_rate = 0.0
+        else:
+            subdivision_rate = 0.25
+        subdivided_cells = int(initial_cells * subdivision_rate * 4)
         estimated_total_cells = initial_cells + subdivided_cells
 
-        # Adaptive query count based on density:
-        # - ~65% sparse cells (2 queries) = 1.3 avg
-        # - ~25% medium cells (6 queries) = 1.5 avg
-        # - ~10% dense cells (12 queries) = 1.2 avg
-        # Total: ~4 queries/cell average (down from 12)
-        avg_queries_per_cell = 4.0
+        # Query count depends on cell size:
+        # - Small cells (≤2km, dense mode): 12 queries per cell (no early exit)
+        # - Large cells (>2km): ~4 queries avg (early exit)
+        if self.cell_size_km <= 2.0:
+            avg_queries_per_cell = 12.0
+        else:
+            avg_queries_per_cell = 4.0
         estimated_api_calls = int(estimated_total_cells * avg_queries_per_cell)
 
         # Cost: $1 per 1000 credits ($50 plan = 50k credits)
@@ -319,9 +340,9 @@ class GridScraper:
 
         hotels: List[ScrapedHotel] = []
 
-        # Generate initial coarse grid
-        cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, INITIAL_CELL_SIZE_KM)
-        logger.info(f"Starting scrape: {len(cells)} initial cells")
+        # Generate grid with configured cell size
+        cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, self.cell_size_km)
+        logger.info(f"Starting scrape: {len(cells)} cells ({self.cell_size_km}km, zoom {self.zoom_level}z)")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             self._client = client
@@ -397,11 +418,8 @@ class GridScraper:
     ) -> Tuple[List[ScrapedHotel], bool]:
         """Search a cell with adaptive query count based on density.
 
-        Early exit optimization:
-        - Scout query first to gauge density
-        - 0-5 results → sparse, do 1 more query (2 total)
-        - 6-14 results → medium, do 5 more queries (6 total)
-        - 15+ results → dense, do all 12 queries
+        For small cells (≤2km, dense mode): run all 12 queries
+        For large cells: early exit based on scout query results
         """
         hotels: List[ScrapedHotel] = []
         hit_limit = False
@@ -430,7 +448,22 @@ class GridScraper:
                 query = f"{modifier} {search_type}".strip() if modifier else search_type
                 all_queries.append(query)
 
-        # Scout query first to gauge density
+        # Dense mode (small cells ≤2km): run all queries, no early exit
+        if self.cell_size_km <= 2.0:
+            results = await asyncio.gather(*[
+                self._search_serper(query, cell.center_lat, cell.center_lng)
+                for query in all_queries
+            ])
+            for places in results:
+                if len(places) >= API_RESULT_LIMIT:
+                    hit_limit = True
+                for place in places:
+                    hotel = self._process_place(place)
+                    if hotel:
+                        hotels.append(hotel)
+            return hotels, hit_limit
+
+        # Sparse mode (large cells): scout first, early exit if sparse
         scout_results = await self._search_serper(all_queries[0], cell.center_lat, cell.center_lng)
         scout_count = len(scout_results)
 
@@ -444,14 +477,11 @@ class GridScraper:
 
         # Determine how many more queries based on density
         if scout_count <= 5:
-            # Sparse area - just 1 more query (2 total)
-            remaining_queries = all_queries[1:2]
+            remaining_queries = all_queries[1:2]  # 2 total
         elif scout_count <= 14:
-            # Medium density - 5 more queries (6 total)
-            remaining_queries = all_queries[1:6]
+            remaining_queries = all_queries[1:6]  # 6 total
         else:
-            # Dense area - all remaining queries (12 total)
-            remaining_queries = all_queries[1:]
+            remaining_queries = all_queries[1:]   # 12 total
 
         # Execute remaining queries concurrently
         if remaining_queries:
@@ -487,7 +517,7 @@ class GridScraper:
                 resp = await self._client.post(
                     SERPER_MAPS_URL,
                     headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-                    json={"q": query, "num": 100, "ll": f"@{lat},{lng},17z"},  # 17z = tight ~500m view
+                    json={"q": query, "num": 100, "ll": f"@{lat},{lng},{self.zoom_level}z"},
                 )
 
                 if resp.status_code == 400 and "credits" in resp.text.lower():

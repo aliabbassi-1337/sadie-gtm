@@ -48,26 +48,27 @@ async def scrape_region_workflow(
     center_lat: float,
     center_lng: float,
     radius_km: float,
+    cell_size_km: float,
 ) -> int:
     """Scrape hotels in a circular region."""
     await init_db()
 
     try:
         service = Service()
-        count = await service.scrape_region(center_lat, center_lng, radius_km)
+        count = await service.scrape_region(center_lat, center_lng, radius_km, cell_size_km)
         logger.info(f"Scrape complete: {count} hotels saved to database")
         return count
     finally:
         await close_db()
 
 
-async def scrape_state_workflow(state: str) -> int:
+async def scrape_state_workflow(state: str, cell_size_km: float) -> int:
     """Scrape hotels in a state."""
     await init_db()
 
     try:
         service = Service()
-        count = await service.scrape_state(state)
+        count = await service.scrape_state(state, cell_size_km)
         logger.info(f"Scrape complete: {count} hotels saved to database")
         return count
     finally:
@@ -84,10 +85,13 @@ def main():
     # Region by center + radius
     parser.add_argument("--center-lat", type=float, help="Center latitude")
     parser.add_argument("--center-lng", type=float, help="Center longitude")
-    parser.add_argument("--radius-km", type=float, default=5, help="Radius in km (default: 5)")
+    parser.add_argument("--radius-km", type=float, default=10, help="Radius in km (default: 10)")
 
     # Or by state
     parser.add_argument("--state", type=str, help="State name (e.g., florida)")
+
+    # Scraper settings
+    parser.add_argument("--cell-size", type=float, default=2.0, help="Cell size in km (default: 2, smaller=denser)")
 
     # Estimate only
     parser.add_argument("--estimate", action="store_true", help="Only show cost estimate, don't scrape")
@@ -106,29 +110,30 @@ def main():
 
     # Service for estimates and scraping
     service = Service()
+    cell_size = args.cell_size
 
     # Resolve city to coordinates
     if args.city:
         lat, lng = CITY_COORDINATES[args.city]
         if args.estimate:
-            estimate = service.estimate_region(lat, lng, args.radius_km)
-            print_estimate(estimate, f"City: {args.city.replace('_', ' ').title()} r={args.radius_km}km")
+            estimate = service.estimate_region(lat, lng, args.radius_km, cell_size)
+            print_estimate(estimate, f"City: {args.city.replace('_', ' ').title()} r={args.radius_km}km cell={cell_size}km")
         else:
-            asyncio.run(scrape_region_workflow(lat, lng, args.radius_km))
+            asyncio.run(scrape_region_workflow(lat, lng, args.radius_km, cell_size))
 
     elif args.state:
         if args.estimate:
-            estimate = service.estimate_state(args.state)
-            print_estimate(estimate, f"State: {args.state.title()}")
+            estimate = service.estimate_state(args.state, cell_size)
+            print_estimate(estimate, f"State: {args.state.title()} cell={cell_size}km")
         else:
-            asyncio.run(scrape_state_workflow(args.state))
+            asyncio.run(scrape_state_workflow(args.state, cell_size))
 
     elif args.center_lat and args.center_lng:
         if args.estimate:
-            estimate = service.estimate_region(args.center_lat, args.center_lng, args.radius_km)
-            print_estimate(estimate, f"Region: ({args.center_lat}, {args.center_lng}) r={args.radius_km}km")
+            estimate = service.estimate_region(args.center_lat, args.center_lng, args.radius_km, cell_size)
+            print_estimate(estimate, f"Region: ({args.center_lat}, {args.center_lng}) r={args.radius_km}km cell={cell_size}km")
         else:
-            asyncio.run(scrape_region_workflow(args.center_lat, args.center_lng, args.radius_km))
+            asyncio.run(scrape_region_workflow(args.center_lat, args.center_lng, args.radius_km, cell_size))
 
     else:
         parser.error("Provide --city, --state, or --center-lat and --center-lng")
