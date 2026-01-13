@@ -37,8 +37,8 @@ MIN_CELL_SIZE_KM = 2.5       # Don't subdivide below 2.5km
 API_RESULT_LIMIT = 20        # Serper returns max 20 results - subdivide if hit
 
 # Concurrency settings - stay under Serper rate limits
-MAX_CONCURRENT_CELLS = 10    # Process up to 10 cells concurrently
-MAX_CONCURRENT_REQUESTS = 46 # Stay under 50 qps rate limit ($50 plan)
+MAX_CONCURRENT_CELLS = 2     # Process up to 2 cells concurrently
+MAX_CONCURRENT_REQUESTS = 4  # Stay under 5 qps rate limit (free/basic plan)
 
 # State bounding boxes from scripts/scrapers/grid.py
 STATE_BOUNDS = {
