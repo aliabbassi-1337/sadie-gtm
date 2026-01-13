@@ -27,7 +27,7 @@ Thumbs.db
 old/
 
 # Context/notes (not for git)
-/context
+# /context
 
 # Temp files
 *.csv
