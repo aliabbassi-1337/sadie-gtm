@@ -13,19 +13,14 @@ Usage:
     uv run python workflows/scrape_region.py --state florida
 """
 
+import sys
 import asyncio
 import argparse
-import logging
+
+from loguru import logger
 
 from db.client import init_db, close_db
 from services.leadgen.service import Service, ScrapeEstimate, CITY_COORDINATES
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
 
 
 def print_estimate(estimate: ScrapeEstimate, region_name: str):
@@ -43,8 +38,8 @@ def print_estimate(estimate: ScrapeEstimate, region_name: str):
     print(f"Est. hotels:          {estimate.estimated_hotels:,}")
     print()
     print("Pricing: $1 per 1,000 credits ($50 = 50k credits)")
-    print("Rate limit: 46 queries/second")
-    print(f"Est. time:            ~{estimate.estimated_api_calls / 46 / 60:.1f} minutes")
+    print("Rate limit: 4 queries/second")
+    print(f"Est. time:            ~{estimate.estimated_api_calls / 4 / 60:.1f} minutes")
     print("=" * 60)
     print()
 
@@ -97,7 +92,17 @@ def main():
     # Estimate only
     parser.add_argument("--estimate", action="store_true", help="Only show cost estimate, don't scrape")
 
+    # Debug logging
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging (shows filtered hotels)")
+
     args = parser.parse_args()
+
+    # Configure logging
+    logger.remove()
+    if args.debug:
+        logger.add(sys.stderr, level="DEBUG", format="<level>{level: <8}</level> | {message}")
+    else:
+        logger.add(sys.stderr, level="INFO", format="<level>{level: <8}</level> | {message}")
 
     # Service for estimates and scraping
     service = Service()

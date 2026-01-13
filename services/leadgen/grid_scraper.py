@@ -37,8 +37,8 @@ MIN_CELL_SIZE_KM = 2.5       # Don't subdivide below 2.5km
 API_RESULT_LIMIT = 20        # Serper returns max 20 results - subdivide if hit
 
 # Concurrency settings - stay under Serper rate limits
-MAX_CONCURRENT_CELLS = 10    # Process up to 10 cells concurrently
-MAX_CONCURRENT_REQUESTS = 46 # Stay under 50 qps rate limit ($50 plan)
+MAX_CONCURRENT_CELLS = 2     # Process up to 2 cells concurrently
+MAX_CONCURRENT_REQUESTS = 4  # Stay under 5 qps rate limit (free/basic plan)
 
 # State bounding boxes from scripts/scrapers/grid.py
 STATE_BOUNDS = {
@@ -511,24 +511,29 @@ class GridScraper:
             return None
 
         name_lower = name.lower()
+        website = place.get("website", "") or ""
 
         # Skip duplicates
         if name_lower in self._seen:
             self._stats.duplicates_skipped += 1
+            logger.debug(f"SKIP duplicate: {name}")
             return None
         self._seen.add(name_lower)
 
         # Skip chains by name
-        if any(chain in name_lower for chain in SKIP_CHAINS):
-            self._stats.chains_skipped += 1
-            return None
+        for chain in SKIP_CHAINS:
+            if chain in name_lower:
+                self._stats.chains_skipped += 1
+                logger.debug(f"SKIP chain '{chain}': {name}")
+                return None
 
         # Skip chains/aggregators by website domain
-        website = place.get("website", "") or ""
         website_lower = website.lower()
-        if any(domain in website_lower for domain in SKIP_DOMAINS):
-            self._stats.chains_skipped += 1
-            return None
+        for domain in SKIP_DOMAINS:
+            if domain in website_lower:
+                self._stats.chains_skipped += 1
+                logger.debug(f"SKIP domain '{domain}': {name} -> {website}")
+                return None
 
         # Parse city/state from address
         address = place.get("address", "")
