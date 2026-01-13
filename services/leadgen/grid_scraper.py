@@ -71,7 +71,7 @@ SEARCH_MODIFIERS = [
     "downtown",
 ]
 
-# Chain filter from scripts/scrapers/grid.py
+# Chain filter - names to skip
 SKIP_CHAINS = [
     "marriott", "hilton", "hyatt", "sheraton", "westin", "w hotel",
     "intercontinental", "holiday inn", "crowne plaza", "ihg",
@@ -79,6 +79,18 @@ SKIP_CHAINS = [
     "radisson", "wyndham", "ramada", "days inn", "super 8", "motel 6",
     "la quinta", "travelodge", "ibis", "novotel", "mercure", "accor",
     "four seasons", "ritz-carlton", "st. regis", "fairmont",
+]
+
+# Website domains to skip (big chains, aggregators, social media)
+SKIP_DOMAINS = [
+    "marriott.com", "hilton.com", "hyatt.com", "ihg.com",
+    "wyndhamhotels.com", "choicehotels.com", "bestwestern.com",
+    "radissonhotels.com", "accor.com", "fourseasons.com",
+    "ritzcarlton.com", "starwoodhotels.com",
+    "booking.com", "expedia.com", "hotels.com", "trivago.com",
+    "tripadvisor.com", "kayak.com", "priceline.com",
+    "facebook.com", "instagram.com", "twitter.com", "yelp.com",
+    "google.com", "airbnb.com", "vrbo.com",
 ]
 
 
@@ -351,8 +363,15 @@ class GridScraper:
             return None
         self._seen.add(name_lower)
 
-        # Skip chains
+        # Skip chains by name
         if any(chain in name_lower for chain in SKIP_CHAINS):
+            self._stats.chains_skipped += 1
+            return None
+
+        # Skip chains/aggregators by website domain
+        website = place.get("website", "") or ""
+        website_lower = website.lower()
+        if any(domain in website_lower for domain in SKIP_DOMAINS):
             self._stats.chains_skipped += 1
             return None
 
