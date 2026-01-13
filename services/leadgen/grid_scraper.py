@@ -171,7 +171,7 @@ class ScrapeEstimate(BaseModel):
     """Cost estimate for a scrape run."""
     initial_cells: int = 0
     estimated_cells_after_subdivision: int = 0
-    api_calls_per_cell: int = 12  # 4 types × 3 modifiers
+    avg_queries_per_cell: float = 4.0  # Adaptive: sparse=2, medium=6, dense=12
     estimated_api_calls: int = 0
     estimated_cost_usd: float = 0.0
     estimated_hotels: int = 0
@@ -267,9 +267,13 @@ class GridScraper:
         subdivided_cells = int(initial_cells * subdivision_rate * 4)  # Each subdivides into 4
         estimated_total_cells = initial_cells + subdivided_cells
 
-        # API calls: 12 per cell (4 types × 3 modifiers)
-        api_calls_per_cell = 12
-        estimated_api_calls = estimated_total_cells * api_calls_per_cell
+        # Adaptive query count based on density:
+        # - ~65% sparse cells (2 queries) = 1.3 avg
+        # - ~25% medium cells (6 queries) = 1.5 avg
+        # - ~10% dense cells (12 queries) = 1.2 avg
+        # Total: ~4 queries/cell average (down from 12)
+        avg_queries_per_cell = 4.0
+        estimated_api_calls = int(estimated_total_cells * avg_queries_per_cell)
 
         # Cost: $1 per 1000 credits ($50 plan = 50k credits)
         cost_per_credit = 0.001
@@ -283,7 +287,7 @@ class GridScraper:
         return ScrapeEstimate(
             initial_cells=initial_cells,
             estimated_cells_after_subdivision=estimated_total_cells,
-            api_calls_per_cell=api_calls_per_cell,
+            avg_queries_per_cell=avg_queries_per_cell,
             estimated_api_calls=estimated_api_calls,
             estimated_cost_usd=round(estimated_cost, 2),
             estimated_hotels=estimated_hotels,
@@ -381,7 +385,14 @@ class GridScraper:
         self,
         cell: GridCell,
     ) -> Tuple[List[ScrapedHotel], bool]:
-        """Search a cell with rotated search types and modifiers concurrently."""
+        """Search a cell with adaptive query count based on density.
+
+        Early exit optimization:
+        - Scout query first to gauge density
+        - 0-5 results → sparse, do 1 more query (2 total)
+        - 6-14 results → medium, do 5 more queries (6 total)
+        - 15+ results → dense, do all 12 queries
+        """
         hotels: List[ScrapedHotel] = []
         hit_limit = False
 
@@ -403,27 +414,49 @@ class GridScraper:
         ]
 
         # Build all queries for this cell
-        queries = []
+        all_queries = []
         for search_type in types_for_cell:
             for modifier in modifiers_for_cell:
                 query = f"{modifier} {search_type}".strip() if modifier else search_type
-                queries.append(query)
+                all_queries.append(query)
 
-        # Execute all queries concurrently
-        results = await asyncio.gather(*[
-            self._search_serper(query, cell.center_lat, cell.center_lng)
-            for query in queries
-        ])
+        # Scout query first to gauge density
+        scout_results = await self._search_serper(all_queries[0], cell.center_lat, cell.center_lng)
+        scout_count = len(scout_results)
 
-        # Process results
-        for places in results:
-            if len(places) >= API_RESULT_LIMIT:
-                hit_limit = True
+        # Process scout results
+        if scout_count >= API_RESULT_LIMIT:
+            hit_limit = True
+        for place in scout_results:
+            hotel = self._process_place(place)
+            if hotel:
+                hotels.append(hotel)
 
-            for place in places:
-                hotel = self._process_place(place)
-                if hotel:
-                    hotels.append(hotel)
+        # Determine how many more queries based on density
+        if scout_count <= 5:
+            # Sparse area - just 1 more query (2 total)
+            remaining_queries = all_queries[1:2]
+        elif scout_count <= 14:
+            # Medium density - 5 more queries (6 total)
+            remaining_queries = all_queries[1:6]
+        else:
+            # Dense area - all remaining queries (12 total)
+            remaining_queries = all_queries[1:]
+
+        # Execute remaining queries concurrently
+        if remaining_queries:
+            results = await asyncio.gather(*[
+                self._search_serper(query, cell.center_lat, cell.center_lng)
+                for query in remaining_queries
+            ])
+
+            for places in results:
+                if len(places) >= API_RESULT_LIMIT:
+                    hit_limit = True
+                for place in places:
+                    hotel = self._process_place(place)
+                    if hotel:
+                        hotels.append(hotel)
 
         return hotels, hit_limit
 

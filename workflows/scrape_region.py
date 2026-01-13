@@ -38,7 +38,7 @@ def print_estimate(estimate: ScrapeEstimate, region_name: str):
     print(f"Region size:          {estimate.region_size_km2:,.1f} km²")
     print(f"Initial cells:        {estimate.initial_cells:,}")
     print(f"Est. total cells:     {estimate.estimated_cells_after_subdivision:,} (after subdivision)")
-    print(f"API calls/cell:       {estimate.api_calls_per_cell}")
+    print(f"Avg queries/cell:     {estimate.avg_queries_per_cell:.1f} (adaptive: 2-12)")
     print(f"Est. API calls:       {estimate.estimated_api_calls:,}")
     print(f"Est. cost:            ${estimate.estimated_cost_usd:.2f}")
     print(f"Est. hotels:          {estimate.estimated_hotels:,}")
