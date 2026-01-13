@@ -167,6 +167,17 @@ class ScrapeStats(BaseModel):
     chains_skipped: int = 0
 
 
+class ScrapeEstimate(BaseModel):
+    """Cost estimate for a scrape run."""
+    initial_cells: int = 0
+    estimated_cells_after_subdivision: int = 0
+    api_calls_per_cell: int = 12  # 4 types × 3 modifiers
+    estimated_api_calls: int = 0
+    estimated_cost_usd: float = 0.0
+    estimated_hotels: int = 0
+    region_size_km2: float = 0.0
+
+
 class GridScraper:
     """Adaptive grid-based hotel scraper using Serper Maps API."""
 
@@ -205,6 +216,79 @@ class GridScraper:
 
         lat_min, lat_max, lng_min, lng_max = STATE_BOUNDS[state_key]
         return await self._scrape_bounds(lat_min, lat_max, lng_min, lng_max)
+
+    def estimate_region(
+        self,
+        center_lat: float,
+        center_lng: float,
+        radius_km: float,
+    ) -> ScrapeEstimate:
+        """Estimate cost for scraping a circular region."""
+        lat_deg = radius_km / 111.0
+        lng_deg = radius_km / (111.0 * math.cos(math.radians(center_lat)))
+
+        return self._estimate_bounds(
+            lat_min=center_lat - lat_deg,
+            lat_max=center_lat + lat_deg,
+            lng_min=center_lng - lng_deg,
+            lng_max=center_lng + lng_deg,
+        )
+
+    def estimate_state(self, state: str) -> ScrapeEstimate:
+        """Estimate cost for scraping a state."""
+        state_key = state.lower().replace(" ", "_")
+        if state_key not in STATE_BOUNDS:
+            raise ValueError(f"Unknown state: {state}. Available: {list(STATE_BOUNDS.keys())}")
+
+        lat_min, lat_max, lng_min, lng_max = STATE_BOUNDS[state_key]
+        return self._estimate_bounds(lat_min, lat_max, lng_min, lng_max)
+
+    def _estimate_bounds(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lng_min: float,
+        lng_max: float,
+    ) -> ScrapeEstimate:
+        """Calculate cost estimate for a bounding box."""
+        # Calculate region size
+        center_lat = (lat_min + lat_max) / 2
+        height_km = (lat_max - lat_min) * 111.0
+        width_km = (lng_max - lng_min) * 111.0 * math.cos(math.radians(center_lat))
+        region_size_km2 = height_km * width_km
+
+        # Count initial cells
+        cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, INITIAL_CELL_SIZE_KM)
+        initial_cells = len(cells)
+
+        # Estimate subdivision: ~25% of cells subdivide in typical mixed urban/rural areas
+        # Dense urban areas subdivide more, rural areas don't subdivide
+        subdivision_rate = 0.25
+        subdivided_cells = int(initial_cells * subdivision_rate * 4)  # Each subdivides into 4
+        estimated_total_cells = initial_cells + subdivided_cells
+
+        # API calls: 12 per cell (4 types × 3 modifiers)
+        api_calls_per_cell = 12
+        estimated_api_calls = estimated_total_cells * api_calls_per_cell
+
+        # Cost: $0.75 per 1000 credits (Standard tier: $375/500k)
+        cost_per_credit = 0.00075
+        estimated_cost = estimated_api_calls * cost_per_credit
+
+        # Estimate hotels: ~8-15 unique hotels per cell after dedup/filtering
+        # Conservative estimate of 10 per cell
+        hotels_per_cell = 10
+        estimated_hotels = estimated_total_cells * hotels_per_cell
+
+        return ScrapeEstimate(
+            initial_cells=initial_cells,
+            estimated_cells_after_subdivision=estimated_total_cells,
+            api_calls_per_cell=api_calls_per_cell,
+            estimated_api_calls=estimated_api_calls,
+            estimated_cost_usd=round(estimated_cost, 2),
+            estimated_hotels=estimated_hotels,
+            region_size_km2=round(region_size_km2, 1),
+        )
 
     async def _scrape_bounds(
         self,
