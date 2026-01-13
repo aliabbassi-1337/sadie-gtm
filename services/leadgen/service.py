@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 
 class IService(ABC):
-    """LeadGen Service - Scraping and detection pipeline."""
+    """LeadGen Service - Scraping pipeline."""
 
     @abstractmethod
     async def scrape_region(
@@ -29,7 +29,7 @@ class IService(ABC):
     async def detect_booking_engines(self, limit: int = 100) -> int:
         """
         Detect booking engines for hotels with status=0 (scraped).
-        Updates status to 1 (detected) or 99 (no_booking_engine).
+        Updates status to 1 (detected) or 2 (no_booking_engine).
         Returns number of hotels processed.
         """
         pass
