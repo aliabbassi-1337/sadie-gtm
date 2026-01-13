@@ -26,9 +26,9 @@ INITIAL_CELL_SIZE_KM = 10.0  # Start with 10km cells
 MIN_CELL_SIZE_KM = 2.5       # Don't subdivide below 2.5km
 API_RESULT_LIMIT = 20        # Serper returns max 20 results - subdivide if hit
 
-# Concurrency settings
-MAX_CONCURRENT_CELLS = 5     # Process up to 5 cells concurrently
-MAX_CONCURRENT_REQUESTS = 10 # Max concurrent API requests
+# Concurrency settings - match Serper rate limits
+MAX_CONCURRENT_CELLS = 10    # Process up to 10 cells concurrently
+MAX_CONCURRENT_REQUESTS = 50 # Match Serper 50 qps rate limit ($50 plan)
 
 # State bounding boxes from scripts/scrapers/grid.py
 STATE_BOUNDS = {
@@ -271,8 +271,8 @@ class GridScraper:
         api_calls_per_cell = 12
         estimated_api_calls = estimated_total_cells * api_calls_per_cell
 
-        # Cost: $0.75 per 1000 credits (Standard tier: $375/500k)
-        cost_per_credit = 0.00075
+        # Cost: $1 per 1000 credits ($50 plan = 50k credits)
+        cost_per_credit = 0.001
         estimated_cost = estimated_api_calls * cost_per_credit
 
         # Estimate hotels: ~8-15 unique hotels per cell after dedup/filtering
