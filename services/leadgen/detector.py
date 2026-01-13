@@ -25,13 +25,14 @@ class DetectionConfig(BaseModel):
     """Configuration for the detector."""
     model_config = ConfigDict(frozen=True)
 
-    timeout_page_load: int = 30000      # 30s
-    timeout_booking_click: int = 3000   # 3s
-    timeout_popup_detect: int = 1500    # 1.5s
+    timeout_page_load: int = 15000      # 15s (was 30s)
+    timeout_booking_click: int = 2000   # 2s (was 3s)
+    timeout_popup_detect: int = 1000    # 1s (was 1.5s)
     concurrency: int = 5
-    pause_between_hotels: float = 0.2
+    pause_between_hotels: float = 0.0   # 0s (was 0.2s) - semaphore handles this
     headless: bool = True
     debug: bool = False  # Enable debug logging
+    fast_mode: bool = True  # Reduce waits for speed
 
 
 # =============================================================================
@@ -178,6 +179,14 @@ SKIP_JUNK_DOMAINS = [
 ]
 
 
+def is_junk_domain(url: str) -> bool:
+    """Check if URL is a junk domain that should be skipped."""
+    if not url:
+        return True
+    url_lower = url.lower()
+    return any(junk in url_lower for junk in SKIP_JUNK_DOMAINS)
+
+
 # =============================================================================
 # DATA MODELS
 # =============================================================================
@@ -223,7 +232,7 @@ def normalize_url(url: str) -> str:
     return url
 
 
-async def http_precheck(url: str, timeout: float = 5.0) -> Tuple[bool, str]:
+async def http_precheck(url: str, timeout: float = 3.0) -> Tuple[bool, str]:
     """Quick HTTP check before launching Playwright."""
     try:
         async with httpx.AsyncClient(
@@ -245,6 +254,28 @@ async def http_precheck(url: str, timeout: float = 5.0) -> Tuple[bool, str]:
         return (False, "connection_refused")
     except Exception as e:
         return (False, str(e)[:50])
+
+
+async def batch_precheck(urls: List[Tuple[int, str]], concurrency: int = 20) -> Dict[int, Tuple[bool, str]]:
+    """Check multiple URLs in parallel. Returns dict of hotel_id -> (reachable, error)."""
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def check_one(hotel_id: int, url: str) -> Tuple[int, bool, str]:
+        async with semaphore:
+            reachable, error = await http_precheck(url)
+            return (hotel_id, reachable, error)
+
+    tasks = [check_one(hid, url) for hid, url in urls]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    output = {}
+    for r in results:
+        if isinstance(r, Exception):
+            continue
+        hotel_id, reachable, error = r
+        output[hotel_id] = (reachable, error)
+
+    return output
 
 
 # =============================================================================
@@ -714,7 +745,7 @@ class BookingButtonFinder:
                 pass
 
             # Check if page URL changed
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)  # Reduced from 1.5s
             if page.url != original_url:
                 page.remove_listener("request", capture_click_request)
                 self._log(f"    [CLICK] ✓ Navigated: {page.url[:60]}")
@@ -808,7 +839,7 @@ class HotelProcessor:
         if self.config.debug:
             logger.debug(msg)
 
-    async def process(self, hotel_id: int, name: str, website: str) -> DetectionResult:
+    async def process(self, hotel_id: int, name: str, website: str, skip_precheck: bool = False) -> DetectionResult:
         """Process a single hotel and return results."""
         website = normalize_url(website)
         result = DetectionResult(hotel_id=hotel_id)
@@ -818,18 +849,19 @@ class HotelProcessor:
         if not website:
             return result
 
-        # Skip junk domains
-        website_lower = website.lower()
-        if any(junk in website_lower for junk in SKIP_JUNK_DOMAINS):
-            result.error = "junk_domain"
-            return result
+        # Skip junk domains (unless already checked)
+        if not skip_precheck:
+            website_lower = website.lower()
+            if any(junk in website_lower for junk in SKIP_JUNK_DOMAINS):
+                result.error = "junk_domain"
+                return result
 
-        # HTTP pre-check
-        is_reachable, precheck_error = await http_precheck(website)
-        if not is_reachable:
-            self._log(f"  [PRECHECK] ✗ Skipping (not reachable): {precheck_error}")
-            result.error = f"precheck_failed: {precheck_error}"
-            return result
+            # HTTP pre-check
+            is_reachable, precheck_error = await http_precheck(website)
+            if not is_reachable:
+                self._log(f"  [PRECHECK] ✗ Skipping (not reachable): {precheck_error}")
+                result.error = f"precheck_failed: {precheck_error}"
+                return result
 
         async with self.semaphore:
             result = await self._process_website(website, result)
@@ -868,7 +900,7 @@ class HotelProcessor:
                     pass
             self._log(f"  [TIME] goto: {time.time()-t0:.1f}s")
 
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)  # Reduced from 1.5s
             hotel_domain = extract_domain(page.url)
             self._log(f"  Loaded: {hotel_domain}")
 
@@ -1331,7 +1363,7 @@ class HotelProcessor:
 
         try:
             await page.goto(booking_url, timeout=self.config.timeout_page_load, wait_until="domcontentloaded")
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(1.0)  # Reduced from 3.0s
 
             # Find external booking URL
             external_booking_url = await self._find_external_booking_url(page, hotel_domain)
@@ -1394,7 +1426,7 @@ class HotelProcessor:
                                 try:
                                     if not page.is_closed():
                                         await page.goto(second_url, timeout=self.config.timeout_page_load, wait_until="domcontentloaded")
-                                        await asyncio.sleep(2.0)
+                                        await asyncio.sleep(0.5)  # Reduced from 2.0s
 
                                         html_engine, html_domain = await self._scan_html_for_engines(page)
                                         if html_engine:
@@ -1509,6 +1541,42 @@ class BatchDetector:
 
         results: List[DetectionResult] = []
 
+        # OPTIMIZATION: Batch precheck all URLs first (parallel HTTP checks)
+        urls_to_check = []
+        for h in hotels:
+            website = h.get('website', '')
+            if website and not is_junk_domain(website):
+                urls_to_check.append((h['id'], normalize_url(website)))
+
+        logger.info(f"Running batch precheck on {len(urls_to_check)} URLs...")
+        precheck_results = await batch_precheck(urls_to_check, concurrency=30)
+
+        # Filter to only reachable hotels
+        reachable_hotels = []
+        for h in hotels:
+            hotel_id = h['id']
+            website = h.get('website', '')
+
+            # Check for junk domain
+            if not website or is_junk_domain(website):
+                results.append(DetectionResult(hotel_id=hotel_id, error="junk_domain"))
+                continue
+
+            # Check precheck result
+            if hotel_id in precheck_results:
+                reachable, error = precheck_results[hotel_id]
+                if not reachable:
+                    results.append(DetectionResult(hotel_id=hotel_id, error=f"precheck_failed: {error}"))
+                    continue
+
+            reachable_hotels.append(h)
+
+        logger.info(f"Precheck: {len(reachable_hotels)} reachable, {len(hotels) - len(reachable_hotels)} filtered")
+
+        if not reachable_hotels:
+            return results
+
+        # Now process only reachable hotels with Playwright
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=self.config.headless)
             semaphore = asyncio.Semaphore(self.config.concurrency)
@@ -1526,14 +1594,15 @@ class BatchDetector:
 
             processor = HotelProcessor(self.config, browser, semaphore, context_queue)
 
-            # Process all hotels
+            # Process only reachable hotels (skip precheck in processor)
             tasks = [
                 processor.process(
                     hotel_id=h['id'],
                     name=h['name'],
                     website=h.get('website', ''),
+                    skip_precheck=True,  # Already done
                 )
-                for h in hotels
+                for h in reachable_hotels
             ]
 
             task_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1542,7 +1611,7 @@ class BatchDetector:
             for i, result in enumerate(task_results):
                 if isinstance(result, Exception):
                     results.append(DetectionResult(
-                        hotel_id=hotels[i]['id'],
+                        hotel_id=reachable_hotels[i]['id'],
                         error=f"exception: {str(result)[:100]}"
                     ))
                 else:
