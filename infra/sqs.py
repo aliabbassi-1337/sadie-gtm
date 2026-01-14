@@ -79,7 +79,7 @@ def receive_messages(
     queue_url: str,
     max_messages: int = 1,
     wait_time_seconds: int = 20,
-    visibility_timeout: int = 90,
+    visibility_timeout: int = 7200,  # 2 hours default
 ) -> List[Dict[str, Any]]:
     """Receive messages from SQS with long polling.
 
