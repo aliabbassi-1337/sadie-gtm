@@ -27,11 +27,12 @@ UPDATE hotels
 SET status = 2, updated_at = CURRENT_TIMESTAMP
 WHERE id IN (
     SELECT h.id FROM hotels h
-    LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
     WHERE h.status = 1
       AND h.website IS NOT NULL
       AND h.website != ''
-      AND hrc.id IS NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM hotel_room_count hrc WHERE hrc.hotel_id = h.id
+      )
     FOR UPDATE SKIP LOCKED
     LIMIT :limit
 )
@@ -95,7 +96,7 @@ WHERE id = :hotel_id;
 
 -- name: get_hotels_pending_proximity
 -- Get hotels that need customer proximity calculation
--- Criteria: has location, not already in hotel_customer_proximity
+-- Criteria: status=1 (detected), has location, not already in hotel_customer_proximity
 -- Only select columns needed for proximity calculation
 SELECT
     h.id,
@@ -107,7 +108,8 @@ SELECT
     h.updated_at
 FROM hotels h
 LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
-WHERE h.location IS NOT NULL
+WHERE h.status = 1
+  AND h.location IS NOT NULL
   AND hcp.id IS NULL
 ORDER BY h.updated_at DESC
 LIMIT :limit;
@@ -172,9 +174,10 @@ DELETE FROM hotel_customer_proximity
 WHERE hotel_id = :hotel_id;
 
 -- name: get_pending_proximity_count^
--- Count hotels waiting for proximity calculation
+-- Count hotels waiting for proximity calculation (status=1, has location)
 SELECT COUNT(*) AS count
 FROM hotels h
 LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
-WHERE h.location IS NOT NULL
+WHERE h.status = 1
+  AND h.location IS NOT NULL
   AND hcp.id IS NULL;
