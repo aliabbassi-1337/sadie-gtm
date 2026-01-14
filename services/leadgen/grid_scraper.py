@@ -63,19 +63,18 @@ STATE_BOUNDS = {
     "colorado": (36.992426, 41.003444, -109.060253, -102.041524),
 }
 
-# Search types - diverse terms to surface different properties (from original)
+# Search types - diverse terms to surface different properties
 SEARCH_TYPES = [
     "hotel",
     "motel",
     "resort",
-    "boutique hotel",
     "inn",
     "lodge",
     "guest house",
+    "bed and breakfast",
     "vacation rental",
     "extended stay",
     "suites",
-    "apart hotel",
 ]
 
 # Modifiers to get niche results (rotated per cell)
@@ -87,8 +86,6 @@ SEARCH_MODIFIERS = [
     "budget",
     "local",
     "independent",
-    "boutique",
-    "cozy",
     "beachfront",
     "waterfront",
     "downtown",
