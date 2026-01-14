@@ -268,3 +268,141 @@ SELECT error_type, COUNT(*) as count
 FROM detection_errors
 GROUP BY error_type
 ORDER BY count DESC;
+
+-- ============================================================================
+-- REPORTING QUERIES
+-- ============================================================================
+
+-- name: get_leads_for_city
+-- Get hotel leads for a city with booking engine, room count, and nearest customer
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM hotels h
+LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE h.city = :city
+  AND h.state = :state
+  AND h.status = 1
+ORDER BY h.name;
+
+-- name: get_leads_for_state
+-- Get hotel leads for an entire state with booking engine, room count, and nearest customer
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM hotels h
+LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE h.state = :state
+  AND h.status = 1
+ORDER BY h.city, h.name;
+
+-- name: get_city_stats^
+-- Get stats for a city (for analytics tab)
+SELECT
+    -- Total counts
+    COUNT(*) AS total_scraped,
+    COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
+    COUNT(CASE WHEN h.status = 1 THEN 1 END) AS booking_found,
+    -- Contact info
+    COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
+    COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
+    -- Tier breakdown (of hotels with booking engine)
+    COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
+    COUNT(CASE WHEN be.tier = 2 THEN 1 END) AS tier_2_count
+FROM hotels h
+LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.city = :city
+  AND h.state = :state;
+
+-- name: get_state_stats^
+-- Get stats for a state (for analytics tab)
+SELECT
+    -- Total counts
+    COUNT(*) AS total_scraped,
+    COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
+    COUNT(CASE WHEN h.status = 1 THEN 1 END) AS booking_found,
+    -- Contact info
+    COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
+    COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
+    -- Tier breakdown (of hotels with booking engine)
+    COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
+    COUNT(CASE WHEN be.tier = 2 THEN 1 END) AS tier_2_count
+FROM hotels h
+LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.state = :state;
+
+-- name: get_top_engines_for_city
+-- Get top booking engines for a city
+SELECT
+    be.name AS engine_name,
+    COUNT(*) AS hotel_count
+FROM hotels h
+JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.city = :city
+  AND h.state = :state
+  AND h.status = 1
+GROUP BY be.name
+ORDER BY hotel_count DESC;
+
+-- name: get_top_engines_for_state
+-- Get top booking engines for a state
+SELECT
+    be.name AS engine_name,
+    COUNT(*) AS hotel_count
+FROM hotels h
+JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.state = :state
+  AND h.status = 1
+GROUP BY be.name
+ORDER BY hotel_count DESC;
+
+-- name: get_cities_in_state
+-- Get all cities in a state that have detected hotels
+SELECT DISTINCT city
+FROM hotels
+WHERE state = :state
+  AND city IS NOT NULL
+  AND status = 1
+ORDER BY city;
