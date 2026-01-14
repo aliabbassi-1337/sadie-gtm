@@ -114,6 +114,57 @@ WHERE status = 0
   AND LOWER(website) NOT LIKE '%accor.com%'
 LIMIT :limit;
 
+-- name: claim_hotels_for_detection
+-- Atomically claim hotels for processing (multi-worker safe)
+-- Uses FOR UPDATE SKIP LOCKED so multiple workers grab different rows
+-- Sets status=10 (processing) to mark as claimed
+UPDATE hotels
+SET status = 10, updated_at = CURRENT_TIMESTAMP
+WHERE id IN (
+    SELECT id FROM hotels
+    WHERE status = 0
+      AND website IS NOT NULL
+      AND website != ''
+      AND LOWER(website) NOT LIKE '%marriott.com%'
+      AND LOWER(website) NOT LIKE '%hilton.com%'
+      AND LOWER(website) NOT LIKE '%ihg.com%'
+      AND LOWER(website) NOT LIKE '%hyatt.com%'
+      AND LOWER(website) NOT LIKE '%wyndham.com%'
+      AND LOWER(website) NOT LIKE '%choicehotels.com%'
+      AND LOWER(website) NOT LIKE '%bestwestern.com%'
+      AND LOWER(website) NOT LIKE '%radissonhotels.com%'
+      AND LOWER(website) NOT LIKE '%accor.com%'
+    FOR UPDATE SKIP LOCKED
+    LIMIT :limit
+)
+RETURNING
+    id,
+    name,
+    website,
+    phone_google,
+    phone_website,
+    email,
+    city,
+    state,
+    country,
+    address,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude,
+    rating,
+    review_count,
+    status,
+    source,
+    created_at,
+    updated_at;
+
+-- name: reset_stale_processing_hotels!
+-- Reset hotels stuck in processing state (status=10) for more than N minutes
+-- Run this periodically to recover from crashed workers
+UPDATE hotels
+SET status = 0, updated_at = CURRENT_TIMESTAMP
+WHERE status = 10
+  AND updated_at < NOW() - INTERVAL '30 minutes';
+
 -- name: update_hotel_status!
 -- Update hotel status after detection
 UPDATE hotels
