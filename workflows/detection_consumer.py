@@ -66,46 +66,57 @@ async def process_message(
     queue_url: str,
     batch_concurrency: int,
     debug: bool,
+    target_location: str = "",
 ) -> tuple:
     """Process a single SQS message containing hotel IDs.
 
     Returns (processed_count, detected_count, error_count).
+    On exception, does NOT delete message so SQS can retry.
     """
+    receipt_handle = message["receipt_handle"]
     hotel_ids = message["body"].get("hotel_ids", [])
+
     if not hotel_ids:
         # Empty message, delete it
-        delete_message(queue_url, message["receipt_handle"])
+        delete_message(queue_url, receipt_handle)
         return (0, 0, 0)
 
-    # Fetch hotels from DB
-    hotels = await service.get_hotels_by_ids(hotel_ids)
-    if not hotels:
-        # Hotels not found (maybe deleted), delete message
-        delete_message(queue_url, message["receipt_handle"])
-        return (0, 0, 0)
+    try:
+        # Fetch hotels from DB
+        hotels = await service.get_hotels_by_ids(hotel_ids)
+        if not hotels:
+            # Hotels not found (maybe deleted), delete message
+            delete_message(queue_url, receipt_handle)
+            return (0, 0, 0)
 
-    # Convert to dicts for detector
-    hotel_dicts = [
-        {"id": h.id, "name": h.name, "website": h.website}
-        for h in hotels
-    ]
+        # Convert to dicts for detector
+        hotel_dicts = [
+            {"id": h.id, "name": h.name, "website": h.website}
+            for h in hotels
+        ]
 
-    # Run detection
-    config = DetectionConfig(
-        concurrency=batch_concurrency,
-        headless=True,
-        debug=debug,
-    )
-    detector = BatchDetector(config)
-    results = await detector.detect_batch(hotel_dicts)
+        # Run detection with target_location for filtering
+        config = DetectionConfig(
+            concurrency=batch_concurrency,
+            headless=True,
+            debug=debug,
+            target_location=target_location,
+        )
+        detector = BatchDetector(config)
+        results = await detector.detect_batch(hotel_dicts)
 
-    # Save results
-    detected, errors = await service.save_detection_results(results)
+        # Save results
+        detected, errors = await service.save_detection_results(results)
 
-    # Delete message from SQS (successful processing)
-    delete_message(queue_url, message["receipt_handle"])
+        # Delete message from SQS (successful processing)
+        delete_message(queue_url, receipt_handle)
 
-    return (len(results), detected, errors)
+        return (len(results), detected, errors)
+
+    except Exception as e:
+        # Don't delete message - SQS will retry after visibility timeout
+        logger.error(f"Error processing message (will retry): {e}")
+        raise  # Re-raise so worker_loop knows it failed
 
 
 async def worker_loop(
@@ -155,6 +166,7 @@ async def worker_loop(
                     queue_url=queue_url,
                     batch_concurrency=batch_concurrency,
                     debug=debug,
+                    target_location=target_location,
                 )
 
         while not shutdown_requested:

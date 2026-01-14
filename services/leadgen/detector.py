@@ -35,6 +35,7 @@ class DetectionConfig(BaseModel):
     headless: bool = True
     debug: bool = False  # Enable debug logging
     fast_mode: bool = True  # Reduce waits for speed
+    target_location: str = ""  # Filter by location - skip engine detection if mismatch
 
 
 # =============================================================================
@@ -799,17 +800,26 @@ class HotelProcessor:
             hotel_domain = extract_domain(page.url)
             self._log(f"  Loaded: {hotel_domain}")
 
-            # 2. Extract contacts
+            # 2. Extract contacts and location
             t0 = time.time()
             result = await self._extract_contacts(page, result)
             self._log(f"  [TIME] contacts: {time.time()-t0:.1f}s")
+
+            # 3. Check location filter - skip engine detection if mismatch
+            if self.config.target_location and result.detected_location:
+                if not LocationExtractor.location_matches(result.detected_location, self.config.target_location):
+                    self._log(f"  [LOCATION] Mismatch: '{result.detected_location}' != '{self.config.target_location}' - skipping engine detection")
+                    result.error = "location_mismatch"
+                    await page.close()
+                    await self.context_queue.put(context)
+                    return result
 
             engine_name = ""
             engine_domain = ""
             booking_url = ""
             click_method = ""
 
-            # 3. STAGE 0: Quick scan homepage HTML for engine patterns
+            # 4. Quick scan homepage HTML for engine patterns
             t0 = time.time()
             html_engine, html_domain = await self._scan_html_for_engines(page)
             self._log(f"  [TIME] homepage_html_scan: {time.time()-t0:.1f}s")
@@ -825,7 +835,7 @@ class HotelProcessor:
                 if booking_url:
                     self._log(f"  [STAGE0] Sample booking URL: {booking_url[:60]}...")
 
-            # 4. STAGE 1: Find booking URL via button click
+            # 5. Find booking URL via button click
             if not engine_name or self._needs_fallback(engine_name) or not booking_url:
                 self._log(f"  [STAGE1] Looking for booking URL via button click...")
                 t0 = time.time()
@@ -849,7 +859,7 @@ class HotelProcessor:
             result.booking_url = booking_url or ""
             result.detection_method = click_method
 
-            # 5. STAGE 2: Analyze booking page
+            # 6. Analyze booking page
             if booking_url and self._needs_fallback(engine_name):
                 t0 = time.time()
                 engine_name, engine_domain, result = await self._analyze_booking_page(
@@ -857,7 +867,7 @@ class HotelProcessor:
                 )
                 self._log(f"  [TIME] analyze_booking: {time.time()-t0:.1f}s")
 
-            # 6. FALLBACK: Check homepage network
+            # 7. FALLBACK: Check homepage network
             if self._needs_fallback(engine_name):
                 t0 = time.time()
                 net_engine, net_domain, _, net_url = EngineDetector.from_network(homepage_network, hotel_domain)
@@ -869,7 +879,7 @@ class HotelProcessor:
                     if net_url and not result.booking_url:
                         result.booking_url = net_url
 
-            # 7. FALLBACK: Scan iframes
+            # 8. FALLBACK: Scan iframes
             if self._needs_fallback(engine_name):
                 t0 = time.time()
                 frame_engine, frame_domain, frame_url = await self._scan_frames(page)
@@ -881,7 +891,7 @@ class HotelProcessor:
                     if frame_url and not result.booking_url:
                         result.booking_url = frame_url
 
-            # 8. FALLBACK: HTML keyword scan
+            # 9. FALLBACK: HTML keyword scan
             if self._needs_fallback(engine_name):
                 t0 = time.time()
                 html_engine = await self._detect_from_html(page)

@@ -114,9 +114,17 @@ class Service(IService):
         detection_config: DetectionConfig = None,
         target_location: Optional[str] = None,
     ) -> None:
-        self.detection_config = detection_config or DetectionConfig()
         # Target location for filtering - defaults to env var
         self.target_location = target_location or os.getenv("DETECTION_TARGET_LOCATION", "")
+
+        # Create detection config with target_location included
+        if detection_config:
+            # Merge target_location into provided config
+            self.detection_config = DetectionConfig(
+                **{**detection_config.model_dump(), "target_location": self.target_location}
+            )
+        else:
+            self.detection_config = DetectionConfig(target_location=self.target_location)
 
     async def scrape_region(
         self,
