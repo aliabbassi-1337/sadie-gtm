@@ -14,6 +14,7 @@ dependencies = [
     "aiosql>=13.4",
     "pydantic>=2.12.5",
     "psycopg2-binary>=2.9.11",
+    "boto3>=1.42.27",
 ]
 
 [tool.uv]

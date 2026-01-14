@@ -171,3 +171,26 @@ async def insert_hotel_booking_engine(
             booking_url=booking_url,
             detection_method=detection_method,
         )
+
+
+async def get_hotels_by_ids(hotel_ids: List[int]) -> List[Hotel]:
+    """Get hotels by list of IDs.
+
+    Used by worker to fetch batch of hotels from SQS message.
+    """
+    if not hotel_ids:
+        return []
+    async with get_conn() as conn:
+        results = await queries.get_hotels_by_ids(conn, hotel_ids=hotel_ids)
+        return [Hotel.model_validate(dict(row)) for row in results]
+
+
+async def update_hotels_status_batch(hotel_ids: List[int], status: int) -> None:
+    """Update status for multiple hotels at once.
+
+    Used by enqueue job to mark hotels as enqueued (status=10).
+    """
+    if not hotel_ids:
+        return
+    async with get_conn() as conn:
+        await queries.update_hotels_status_batch(conn, hotel_ids=hotel_ids, status=status)

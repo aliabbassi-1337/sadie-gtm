@@ -218,3 +218,33 @@ ON CONFLICT (hotel_id) DO UPDATE SET
     booking_url = EXCLUDED.booking_url,
     detection_method = EXCLUDED.detection_method,
     updated_at = CURRENT_TIMESTAMP;
+
+-- name: get_hotels_by_ids
+-- Get hotels by list of IDs (for worker to fetch batch)
+SELECT
+    id,
+    name,
+    website,
+    phone_google,
+    phone_website,
+    email,
+    city,
+    state,
+    country,
+    address,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude,
+    rating,
+    review_count,
+    status,
+    source,
+    created_at,
+    updated_at
+FROM hotels
+WHERE id = ANY(:hotel_ids);
+
+-- name: update_hotels_status_batch!
+-- Update status for multiple hotels at once (for enqueue job)
+UPDATE hotels
+SET status = :status, updated_at = CURRENT_TIMESTAMP
+WHERE id = ANY(:hotel_ids);

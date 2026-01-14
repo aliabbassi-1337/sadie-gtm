@@ -87,6 +87,23 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def get_hotels_by_ids(self, hotel_ids: List[int]) -> List[Hotel]:
+        """
+        Get hotels by list of IDs.
+        Used by worker to fetch batch from SQS message.
+        """
+        pass
+
+    @abstractmethod
+    async def enqueue_hotels_for_detection(self, limit: int = 1000, batch_size: int = 20) -> int:
+        """
+        Enqueue hotels for detection via SQS.
+        Queries status=0 hotels, sends to SQS in batches, sets status=10.
+        Returns count of hotels enqueued.
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self, detection_config: DetectionConfig = None) -> None:
@@ -233,3 +250,38 @@ class Service(IService):
     async def reset_stale_processing_hotels(self) -> None:
         """Reset hotels stuck in processing state (status=10) for > 30 min."""
         await repo.reset_stale_processing_hotels()
+
+    async def get_hotels_by_ids(self, hotel_ids: List[int]) -> List[Hotel]:
+        """Get hotels by list of IDs."""
+        return await repo.get_hotels_by_ids(hotel_ids=hotel_ids)
+
+    async def enqueue_hotels_for_detection(self, limit: int = 1000, batch_size: int = 20) -> int:
+        """Enqueue hotels for detection via SQS.
+
+        Queries status=0 hotels, sends to SQS in batches, sets status=10.
+        Returns count of hotels enqueued.
+        """
+        from infra.sqs import send_messages_batch, get_queue_url
+
+        # Get hotels pending detection
+        hotels = await repo.get_hotels_pending_detection(limit=limit)
+        if not hotels:
+            return 0
+
+        hotel_ids = [h.id for h in hotels]
+
+        # Create messages in batches of batch_size
+        messages = []
+        for i in range(0, len(hotel_ids), batch_size):
+            batch_ids = hotel_ids[i:i + batch_size]
+            messages.append({"hotel_ids": batch_ids})
+
+        # Send to SQS
+        queue_url = get_queue_url()
+        sent = send_messages_batch(queue_url, messages)
+        logger.info(f"Sent {sent} messages to SQS ({len(hotel_ids)} hotels)")
+
+        # Update status to 10 (enqueued)
+        await repo.update_hotels_status_batch(hotel_ids=hotel_ids, status=10)
+
+        return len(hotel_ids)
