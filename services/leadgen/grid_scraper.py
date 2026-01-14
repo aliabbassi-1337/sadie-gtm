@@ -182,6 +182,8 @@ class ScrapeStats(BaseModel):
     api_calls: int = 0
     cells_searched: int = 0
     cells_subdivided: int = 0
+    cells_skipped: int = 0  # Cells with existing coverage
+    cells_reduced: int = 0  # Cells with partial coverage (fewer queries)
     duplicates_skipped: int = 0
     chains_skipped: int = 0
 
@@ -214,6 +216,7 @@ class GridScraper:
                 break
 
         self._seen: Set[str] = set()
+        self._seen_locations: Set[Tuple[float, float]] = set()  # (lat, lng) rounded to ~100m
         self._stats = ScrapeStats()
         self._out_of_credits = False
 
@@ -346,6 +349,7 @@ class GridScraper:
                                Use for incremental saving.
         """
         self._seen = set()
+        self._seen_locations = set()
         self._stats = ScrapeStats()
         self._out_of_credits = False
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -431,6 +435,14 @@ class GridScraper:
                 idx += 1
         return cells
 
+    def _get_cell_coverage(self, cell: GridCell) -> int:
+        """Count how many already-seen hotels are within this cell."""
+        count = 0
+        for lat, lng in self._seen_locations:
+            if cell.lat_min <= lat <= cell.lat_max and cell.lng_min <= lng <= cell.lng_max:
+                count += 1
+        return count
+
     async def _search_cell(
         self,
         cell: GridCell,
@@ -439,9 +451,29 @@ class GridScraper:
 
         For small cells (≤2km, dense mode): run all 12 queries
         For large cells: early exit based on scout query results
+
+        Skip cells that already have good coverage from adjacent cells.
         """
         hotels: List[ScrapedHotel] = []
         hit_limit = False
+
+        # Check if cell already has coverage from adjacent cells
+        existing_coverage = self._get_cell_coverage(cell)
+        if existing_coverage >= 5:
+            # Cell already has 5+ hotels from adjacent cell queries - skip entirely
+            self._stats.cells_skipped += 1
+            logger.debug(f"SKIP cell ({cell.center_lat:.3f}, {cell.center_lng:.3f}) - already has {existing_coverage} hotels from adjacent cells")
+            return hotels, False
+        elif existing_coverage >= 2:
+            # Cell has some coverage - run reduced queries (just 1)
+            self._stats.cells_reduced += 1
+            logger.debug(f"REDUCED queries for cell ({cell.center_lat:.3f}, {cell.center_lng:.3f}) - has {existing_coverage} hotels")
+            results = await self._search_serper("hotel", cell.center_lat, cell.center_lng)
+            for place in results:
+                hotel = self._process_place(place)
+                if hotel:
+                    hotels.append(hotel)
+            return hotels, len(results) >= API_RESULT_LIMIT
 
         # Pick 4 types for this cell (rotate through them based on cell index)
         num_types = len(SEARCH_TYPES)
@@ -571,6 +603,13 @@ class GridScraper:
             logger.debug(f"SKIP duplicate: {name}")
             return None
         self._seen.add(name_lower)
+
+        # Track location for cell coverage analysis (round to ~100m grid)
+        lat = place.get("latitude")
+        lng = place.get("longitude")
+        if lat and lng:
+            loc_key = (round(lat, 3), round(lng, 3))  # ~111m precision
+            self._seen_locations.add(loc_key)
 
         # Skip chains by name
         for chain in SKIP_CHAINS:
