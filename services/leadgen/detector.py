@@ -36,134 +36,38 @@ class DetectionConfig(BaseModel):
 
 
 # =============================================================================
-# ENGINE PATTERNS - All 100+ booking engines
+# ENGINE PATTERNS - Loaded from database at runtime
 # =============================================================================
 
-ENGINE_PATTERNS = {
-    "Cloudbeds": ["cloudbeds.com"],
-    "Mews": ["mews.com", "mews.li", "app.mews.com", "distributor.mews.com"],
-    "SynXis / TravelClick": ["synxis.com", "travelclick.com"],
-    "BookingSuite / Booking.com": ["bookingsuite.com"],
-    "Little Hotelier": ["littlehotelier.com"],
-    "WebRezPro": ["webrezpro.com"],
-    "InnRoad": ["innroad.com"],
-    "ResNexus": ["resnexus.com"],
-    "Newbook": ["newbook.cloud", "newbooksoftware.com"],
-    "RMS Cloud": ["rmscloud.com"],
-    "RoomRaccoon": ["roomraccoon.com"],
-    "SiteMinder": ["thebookingbutton.com", "siteminder.com", "direct-book"],
-    "Sabre / CRS": ["sabre.com", "crs.sabre.com"],
-    "eZee": ["ezeeabsolute.com", "ezeereservation.com", "ezeetechnosys.com"],
-    "RezTrip": ["reztrip.com"],
-    "IHG": ["ihg.com"],
-    "Marriott": ["marriott.com"],
-    "Hilton": ["hilton.com"],
-    "Vacatia": ["vacatia.com"],
-    "JEHS / iPMS": ["ipms247.com", "live.ipms247.com"],
-    "Windsurfer CRS": ["windsurfercrs.com", "res.windsurfercrs.com"],
-    "ThinkReservations": ["thinkreservations.com", "secure.thinkreservations.com"],
-    "ASI Web Reservations": ["asiwebres.com", "reservation.asiwebres.com"],
-    "IQWebBook": ["iqwebbook.com", "us01.iqwebbook.com"],
-    "BookDirect": ["bookdirect.net", "ococean.bookdirect.net"],
-    "RezStream": ["rezstream.com", "guest.rezstream.com"],
-    "Reseze": ["reseze.net"],
-    "WebRez": ["webrez.com", "secure.webrez.com"],
-    "IB Strategies": ["ibstrategies.com", "secure.ibstrategies.com"],
-    "ReservationKey": ["reservationkey.com", "v2.reservationkey.com"],
-    "FareHarbor": ["fareharbor.com"],
-    "Firefly Reservations": ["fireflyreservations.com", "app.fireflyreservations.com"],
-    "Lodgify": ["lodgify.com", "checkout.lodgify.com"],
-    "eviivo": ["eviivo.com", "via.eviivo.com"],
-    "LuxuryRes": ["luxuryres.com"],
-    "FreeToBook": ["freetobook.com", "portal.freetobook.com"],
-    "Checkfront": ["checkfront.com"],
-    "Beds24": ["beds24.com"],
-    "Hotelogix": ["hotelogix.com"],
-    "inngenius": ["inngenius.com"],
-    "Sirvoy": ["sirvoy.com"],
-    "HotelRunner": ["hotelrunner.com"],
-    "Amenitiz": ["amenitiz.io", "amenitiz.com"],
-    "Hostaway": ["hostaway.com"],
-    "Guesty": ["guesty.com"],
-    "Hospitable": ["hospitable.com"],
-    "Lodgable": ["lodgable.com"],
-    "HomHero": ["homhero.com.au", "api.homhero.com.au", "images.prod.homhero"],
-    "Streamline": ["streamlinevrs.com", "resortpro"],
-    "Triptease": ["triptease.io", "triptease.com", "onboard.triptease"],
-    "Yelp Reservations": ["yelp.com/reservations"],
-    "Pegasus": ["pegasus.io", "pegs.io"],
-    "TravelTripper / Pegasus": ["traveltrip.com"],
-    "OwnerReservations": ["ownerreservations.com", "secure.ownerreservations.com"],
-    "GuestRoomGenie": ["guestroomgenie.com", "secure.guestroomgenie.com"],
-    "Beyond Pricing": ["beyondpricing.com", "beacon.beyondpricing.com"],
-    "HotelKey": ["hotelkeyapp.com", "booking.hotelkeyapp.com"],
-    "Preno": ["prenohq.com", "bookdirect.prenohq.com"],
-    "Channel Manager AU": ["channelmanager.com.au", "app.channelmanager.com.au"],
-    "OfficialBookings": ["officialbookings.com"],
-    "BookingMood": ["bookingmood.com", "widget.bookingmood.com"],
-    "Seekda / KUBE": ["seekda.com", "kube.seekda.com", "booking.seekda.com"],
-    "StayDirectly": ["staydirectly.com"],
-    "Rentrax": ["rentrax.io"],
-    "Profitroom": ["profitroom.com", "booking.profitroom.com"],
-    "Avvio": ["avvio.com", "booking.avvio.com"],
-    "Net Affinity": ["netaffinity.com", "booking.netaffinity.com"],
-    "Simplotel": ["simplotel.com", "booking.simplotel.com"],
-    "Cubilis": ["cubilis.com", "booking.cubilis.com"],
-    "Cendyn": ["cendyn.com", "booking.cendyn.com"],
-    "BookLogic": ["booklogic.net", "booking.booklogic.net"],
-    "RateTiger": ["ratetiger.com", "booking.ratetiger.com"],
-    "D-Edge": ["d-edge.com", "availpro.com", "booking-ede.com"],
-    "BookAssist": ["bookassist.com", "booking.bookassist.org"],
-    "GuestCentric": ["guestcentric.com", "booking.guestcentric.com"],
-    "Vertical Booking": ["verticalbooking.com", "book.verticalbooking.com"],
-    "Busy Rooms": ["busyrooms.com", "booking.busyrooms.com"],
-    "myHotel.io": ["myhotel.io"],
-    "HotelSpider": ["hotelspider.com", "be.hotelspider.com"],
-    "Staah": ["staah.com", "booking.staah.com"],
-    "AxisRooms": ["axisrooms.com", "booking.axisrooms.com"],
-    "E4jConnect / VikBooking": ["e4jconnect.com", "vikbooking.com"],
-    "Apaleo": ["apaleo.com", "app.apaleo.com"],
-    "Clock PMS": ["clock-software.com", "booking.clock-pms.com"],
-    "Protel": ["protel.net", "onity.com"],
-    "Frontdesk Anywhere": ["frontdeskanywhere.com", "booking.frontdeskanywhere.com"],
-    "HotelTime": ["hoteltime.com"],
-    "StayNTouch": ["stayntouch.com", "rover.stayntouch.com"],
-    "Oracle Opera": ["oracle.com/opera", "opera-hotel.com"],
-    "Infor HMS": ["infor.com"],
-    "RoomCloud": ["roomcloud.net"],
-    "Oaky": ["oaky.com"],
-    "Revinate": ["revinate.com"],
-    "TrustYou": ["trustyou.com"],
-    "Escapia": ["escapia.com", "homeaway.escapia.com"],
-    "LiveRez": ["liverez.com", "secure.liverez.com"],
-    "Barefoot": ["barefoot.com", "barefoot.systems"],
-    "Track": ["trackhs.com", "reserve.trackhs.com"],
-    "Streamline VRS": ["streamlinevrs.com"],
-    "iGMS": ["igms.com"],
-    "Smoobu": ["smoobu.com", "login.smoobu.com"],
-    "Tokeet": ["tokeet.com"],
-    "365Villas": ["365villas.com"],
-    "Rentals United": ["rentalsunited.com"],
-    "BookingSync": ["bookingsync.com"],
-    "JANIIS": ["janiis.com", "secure.janiis.com"],
-    "Quibble": ["quibblerm.com"],
-    "HiRUM": ["hirum.com.au", "book.hirum.com.au"],
-    "iBooked": ["ibooked.net.au", "secure.ibooked.net.au"],
-    "Seekom": ["seekom.com", "book.seekom.com"],
-    "ResPax": ["respax.com", "app.respax.com"],
-    "BookingCenter": ["bookingcenter.com"],
-    "RezExpert": ["rezexpert.com"],
-    "SuperControl": ["supercontrol.co.uk", "members.supercontrol.co.uk"],
-    "Anytime Booking": ["anytimebooking.eu", "anytimebooking.co.uk"],
-    "Elina PMS": ["elinapms.com"],
-    "Guestline": ["guestline.com", "booking.guestline.com"],
-    "Nonius": ["nonius.com"],
-    "Visual Matrix": ["visualmatrix.com", "pms.visualmatrix.com"],
-    "AutoClerk": ["autoclerk.com"],
-    "MSI": ["msisolutions.com"],
-    "SkyTouch": ["skytouch.com", "pms.skytouch.com"],
-    "RoomKeyPMS": ["roomkeypms.com", "secure.roomkeypms.com"],
-}
+# Module-level cache for engine patterns (loaded from booking_engines table)
+_engine_patterns_cache: Dict[str, List[str]] = {}
+
+
+async def load_engine_patterns() -> Dict[str, List[str]]:
+    """Load booking engine patterns from database.
+
+    Returns cached patterns if already loaded, otherwise fetches from DB.
+    Patterns map engine name -> list of domain patterns.
+    """
+    global _engine_patterns_cache
+
+    if _engine_patterns_cache:
+        return _engine_patterns_cache
+
+    try:
+        from services.leadgen import repo
+        _engine_patterns_cache = await repo.get_engine_patterns()
+        logger.info(f"Loaded {len(_engine_patterns_cache)} booking engine patterns from database")
+    except Exception as e:
+        logger.warning(f"Failed to load engine patterns from DB: {e}. Using empty patterns.")
+        _engine_patterns_cache = {}
+
+    return _engine_patterns_cache
+
+
+def get_engine_patterns() -> Dict[str, List[str]]:
+    """Get the current engine patterns (must call load_engine_patterns first)."""
+    return _engine_patterns_cache
 
 # Skip big chains and junk domains
 SKIP_CHAIN_DOMAINS = [
@@ -290,7 +194,7 @@ class EngineDetector:
         """Check if domain matches a known booking engine."""
         if not domain:
             return ("", "")
-        for engine_name, patterns in ENGINE_PATTERNS.items():
+        for engine_name, patterns in get_engine_patterns().items():
             for pat in patterns:
                 if pat in domain:
                     return (engine_name, pat)
@@ -303,7 +207,7 @@ class EngineDetector:
             return ("unknown", "", "no_url")
 
         url_lower = url.lower()
-        for engine_name, patterns in ENGINE_PATTERNS.items():
+        for engine_name, patterns in get_engine_patterns().items():
             for pat in patterns:
                 if pat in url_lower:
                     return (engine_name, pat, "url_pattern_match")
@@ -1102,7 +1006,7 @@ class HotelProcessor:
                     domains_found.add(domain.lower())
 
             for domain in domains_found:
-                for engine_name, patterns in ENGINE_PATTERNS.items():
+                for engine_name, patterns in get_engine_patterns().items():
                     for pat in patterns:
                         if pat.lower() in domain:
                             self._log(f"    [HTML SCAN] Found domain '{domain}' -> {engine_name}")
@@ -1297,7 +1201,7 @@ class HotelProcessor:
                     link_domain = item['domain']
 
                     is_known_engine = False
-                    for eng_name, patterns in ENGINE_PATTERNS.items():
+                    for eng_name, patterns in get_engine_patterns().items():
                         if any(pat in link_domain for pat in patterns):
                             is_known_engine = True
                             break
@@ -1509,7 +1413,7 @@ class HotelProcessor:
             if not frame_url or frame_url.startswith("about:"):
                 continue
 
-            for engine_name, patterns in ENGINE_PATTERNS.items():
+            for engine_name, patterns in get_engine_patterns().items():
                 for pat in patterns:
                     if pat in frame_url.lower():
                         return (engine_name, pat, frame_url)
@@ -1538,6 +1442,9 @@ class BatchDetector:
         """
         if not hotels:
             return []
+
+        # Load engine patterns from database (cached after first load)
+        await load_engine_patterns()
 
         results: List[DetectionResult] = []
 

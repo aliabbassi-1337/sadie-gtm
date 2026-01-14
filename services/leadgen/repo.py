@@ -127,6 +127,27 @@ async def get_booking_engine_by_name(name: str) -> Optional[BookingEngine]:
         return None
 
 
+async def get_all_booking_engines() -> List[BookingEngine]:
+    """Get all active booking engines with domain patterns.
+
+    Returns list of BookingEngine models for pattern matching.
+    """
+    async with get_conn() as conn:
+        results = await queries.get_all_booking_engines(conn)
+        return [BookingEngine.model_validate(dict(row)) for row in results]
+
+
+async def get_engine_patterns() -> dict:
+    """Get booking engine patterns as a dict for detector.
+
+    Returns:
+        Dict mapping engine name to list of domain patterns.
+        e.g. {"Cloudbeds": ["cloudbeds.com"], "Mews": ["mews.com", "mews.li"]}
+    """
+    engines = await get_all_booking_engines()
+    return {engine.name: engine.domains for engine in engines if engine.domains}
+
+
 async def insert_booking_engine(
     name: str,
     domains: Optional[List[str]] = None,
