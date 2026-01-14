@@ -1,23 +1,12 @@
 -- name: get_hotels_pending_enrichment
 -- Get hotels that need room count enrichment
 -- Criteria: status=1 (detected), has website, not already enriched
+-- Only select columns needed for enrichment
 SELECT
     h.id,
     h.name,
     h.website,
-    h.phone_google,
-    h.phone_website,
-    h.email,
-    h.city,
-    h.state,
-    h.country,
-    h.address,
-    ST_Y(h.location::geometry) AS latitude,
-    ST_X(h.location::geometry) AS longitude,
-    h.rating,
-    h.review_count,
     h.status,
-    h.source,
     h.created_at,
     h.updated_at
 FROM hotels h
@@ -33,6 +22,7 @@ LIMIT :limit;
 -- Atomically claim hotels for enrichment (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple workers grab different rows
 -- Sets status=2 (enriching) to mark as claimed
+-- Only select columns needed for enrichment
 UPDATE hotels
 SET status = 2, updated_at = CURRENT_TIMESTAMP
 WHERE id IN (
@@ -49,19 +39,7 @@ RETURNING
     id,
     name,
     website,
-    phone_google,
-    phone_website,
-    email,
-    city,
-    state,
-    country,
-    address,
-    ST_Y(location::geometry) AS latitude,
-    ST_X(location::geometry) AS longitude,
-    rating,
-    review_count,
     status,
-    source,
     created_at,
     updated_at;
 
@@ -118,23 +96,13 @@ WHERE id = :hotel_id;
 -- name: get_hotels_pending_proximity
 -- Get hotels that need customer proximity calculation
 -- Criteria: has location, not already in hotel_customer_proximity
+-- Only select columns needed for proximity calculation
 SELECT
     h.id,
     h.name,
-    h.website,
-    h.phone_google,
-    h.phone_website,
-    h.email,
-    h.city,
-    h.state,
-    h.country,
-    h.address,
     ST_Y(h.location::geometry) AS latitude,
     ST_X(h.location::geometry) AS longitude,
-    h.rating,
-    h.review_count,
     h.status,
-    h.source,
     h.created_at,
     h.updated_at
 FROM hotels h
@@ -146,18 +114,13 @@ LIMIT :limit;
 
 -- name: get_all_existing_customers
 -- Get all existing customers with location for proximity calculation
+-- Only select columns needed
 SELECT
     id,
     name,
-    sadie_hotel_id,
-    address,
-    city,
-    state,
-    country,
     ST_Y(location::geometry) AS latitude,
     ST_X(location::geometry) AS longitude,
     status,
-    go_live_date,
     created_at
 FROM existing_customers
 WHERE location IS NOT NULL
