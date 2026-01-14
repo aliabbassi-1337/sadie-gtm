@@ -1,8 +1,9 @@
 """Repository for leadgen service database operations."""
 
-from typing import List, Optional
+from typing import Optional, List
 from db.client import queries, get_conn
 from db.models.hotel import Hotel
+from db.models.booking_engine import BookingEngine
 
 BATCH_SIZE = 50
 
@@ -62,6 +63,139 @@ async def delete_hotel(hotel_id: int) -> None:
         await queries.delete_hotel(conn, hotel_id=hotel_id)
 
 
+async def get_hotels_pending_detection(limit: int = 100) -> List[Hotel]:
+    """Get hotels that need booking engine detection.
+
+    Criteria:
+    - status = 0 (scraped)
+    - website is not null
+    - not a big chain (Marriott, Hilton, IHG, Hyatt, Wyndham, etc.)
+    """
+    async with get_conn() as conn:
+        results = await queries.get_hotels_pending_detection(conn, limit=limit)
+        return [Hotel.model_validate(dict(row)) for row in results]
+
+
+async def claim_hotels_for_detection(limit: int = 100) -> List[Hotel]:
+    """Atomically claim hotels for processing (multi-worker safe).
+
+    Uses FOR UPDATE SKIP LOCKED so multiple workers can run concurrently
+    without grabbing the same hotels. Sets status=10 (processing).
+
+    Returns list of claimed hotels.
+    """
+    async with get_conn() as conn:
+        results = await queries.claim_hotels_for_detection(conn, limit=limit)
+        return [Hotel.model_validate(dict(row)) for row in results]
+
+
+async def reset_stale_processing_hotels() -> None:
+    """Reset hotels stuck in processing state (status=10) for > 30 min.
+
+    Run this periodically to recover from crashed workers.
+    """
+    async with get_conn() as conn:
+        await queries.reset_stale_processing_hotels(conn)
+
+
+async def update_hotel_status(
+    hotel_id: int,
+    status: int,
+    phone_website: Optional[str] = None,
+    email: Optional[str] = None,
+) -> None:
+    """Update hotel status after detection.
+
+    Status values:
+    - 1 = detected (booking engine found)
+    - 99 = no_booking_engine (dead end)
+    """
+    async with get_conn() as conn:
+        await queries.update_hotel_status(
+            conn,
+            hotel_id=hotel_id,
+            status=status,
+            phone_website=phone_website,
+            email=email,
+        )
+
+
+async def get_booking_engine_by_name(name: str) -> Optional[BookingEngine]:
+    """Get booking engine by name."""
+    async with get_conn() as conn:
+        result = await queries.get_booking_engine_by_name(conn, name=name)
+        if result:
+            return BookingEngine.model_validate(dict(result))
+        return None
+
+
+async def get_all_booking_engines() -> List[BookingEngine]:
+    """Get all active booking engines with domain patterns.
+
+    Returns list of BookingEngine models for pattern matching.
+    """
+    async with get_conn() as conn:
+        results = await queries.get_all_booking_engines(conn)
+        return [BookingEngine.model_validate(dict(row)) for row in results]
+
+
+async def insert_booking_engine(
+    name: str,
+    domains: Optional[List[str]] = None,
+    tier: int = 2,
+) -> int:
+    """Insert a new booking engine and return the ID.
+
+    tier=2 means unknown/discovered engine.
+    """
+    async with get_conn() as conn:
+        result = await queries.insert_booking_engine(
+            conn,
+            name=name,
+            domains=domains,
+            tier=tier,
+        )
+        return result
+
+
+async def insert_hotel_booking_engine(
+    hotel_id: int,
+    booking_engine_id: int,
+    booking_url: Optional[str] = None,
+    detection_method: Optional[str] = None,
+) -> None:
+    """Link hotel to detected booking engine."""
+    async with get_conn() as conn:
+        await queries.insert_hotel_booking_engine(
+            conn,
+            hotel_id=hotel_id,
+            booking_engine_id=booking_engine_id,
+            booking_url=booking_url,
+            detection_method=detection_method,
+        )
+
+
+async def get_hotels_by_ids(hotel_ids: List[int]) -> List[Hotel]:
+    """Get hotels by list of IDs.
+
+    Used by worker to fetch batch of hotels from SQS message.
+    """
+    if not hotel_ids:
+        return []
+    async with get_conn() as conn:
+        results = await queries.get_hotels_by_ids(conn, hotel_ids=hotel_ids)
+        return [Hotel.model_validate(dict(row)) for row in results]
+
+
+async def update_hotels_status_batch(hotel_ids: List[int], status: int) -> None:
+    """Update status for multiple hotels at once.
+
+    Used by enqueue job to mark hotels as enqueued (status=10).
+    """
+    if not hotel_ids:
+        return
+    async with get_conn() as conn:
+        await queries.update_hotels_status_batch(conn, hotel_ids=hotel_ids, status=status)
 async def insert_hotels_bulk(hotels: List[dict]) -> int:
     """
     Insert multiple hotels in batches of 50 and return count of inserted/updated rows.
