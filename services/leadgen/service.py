@@ -118,7 +118,7 @@ class Service(IService):
         logger.info(
             f"Region scrape complete: {stats.hotels_found} found, "
             f"{saved_count} saved, {stats.api_calls} API calls, "
-            f"{stats.cells_searched} cells ({stats.cells_subdivided} subdivided)"
+            f"{stats.cells_searched} cells ({stats.cells_skipped} skipped, {stats.cells_reduced} reduced)"
         )
 
         return saved_count
@@ -156,7 +156,7 @@ class Service(IService):
         logger.info(
             f"State scrape complete ({state}): {stats.hotels_found} found, "
             f"{saved_count} saved, {stats.api_calls} API calls, "
-            f"{stats.cells_searched} cells ({stats.cells_subdivided} subdivided)"
+            f"{stats.cells_searched} cells ({stats.cells_skipped} skipped, {stats.cells_reduced} reduced)"
         )
 
         return saved_count
