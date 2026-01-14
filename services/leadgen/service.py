@@ -63,6 +63,29 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def save_detection_results(self, results: List[DetectionResult]) -> tuple:
+        """
+        Save detection results to database.
+        Returns (detected_count, error_count) tuple.
+        """
+        pass
+
+    @abstractmethod
+    async def claim_hotels_for_detection(self, limit: int = 100) -> List:
+        """
+        Atomically claim hotels for processing (multi-worker safe).
+        Returns list of claimed Hotel models.
+        """
+        pass
+
+    @abstractmethod
+    async def reset_stale_processing_hotels(self) -> None:
+        """
+        Reset hotels stuck in processing state (status=10) for > 30 min.
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self, detection_config: DetectionConfig = None) -> None:
@@ -180,3 +203,32 @@ class Service(IService):
         """
         engines = await repo.get_all_booking_engines()
         return {engine.name: engine.domains for engine in engines if engine.domains}
+
+    async def save_detection_results(self, results: List[DetectionResult]) -> tuple:
+        """Save detection results to database.
+
+        Returns (detected_count, error_count) tuple.
+        """
+        detected = 0
+        errors = 0
+
+        for result in results:
+            try:
+                await self._save_detection_result(result)
+                if result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "unknown_booking_api"):
+                    detected += 1
+                elif result.error:
+                    errors += 1
+            except Exception as e:
+                logger.error(f"Error saving result for hotel {result.hotel_id}: {e}")
+                errors += 1
+
+        return (detected, errors)
+
+    async def claim_hotels_for_detection(self, limit: int = 100) -> List:
+        """Atomically claim hotels for processing (multi-worker safe)."""
+        return await repo.claim_hotels_for_detection(limit=limit)
+
+    async def reset_stale_processing_hotels(self) -> None:
+        """Reset hotels stuck in processing state (status=10) for > 30 min."""
+        await repo.reset_stale_processing_hotels()

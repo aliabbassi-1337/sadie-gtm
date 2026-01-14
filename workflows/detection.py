@@ -32,7 +32,6 @@ from typing import List
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.leadgen import repo
 from services.leadgen.service import Service
 from services.leadgen.detector import DetectionConfig, DetectionResult, BatchDetector, set_engine_patterns
 
@@ -82,58 +81,8 @@ async def process_batch(hotels: List, concurrency: int, debug: bool) -> List[Det
     return await detector.detect_batch(hotel_dicts)
 
 
-async def save_results(results: List[DetectionResult]) -> tuple:
-    """Save detection results to database. Returns (detected, errors) counts."""
-    detected = 0
-    errors = 0
-
-    for result in results:
-        try:
-            if result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "unknown_booking_api"):
-                # Found a booking engine
-                engine = await repo.get_booking_engine_by_name(result.booking_engine)
-                if engine:
-                    engine_id = engine.id
-                else:
-                    engine_id = await repo.insert_booking_engine(
-                        name=result.booking_engine,
-                        domains=[result.booking_engine_domain] if result.booking_engine_domain else None,
-                        tier=2,
-                    )
-
-                await repo.insert_hotel_booking_engine(
-                    hotel_id=result.hotel_id,
-                    booking_engine_id=engine_id,
-                    booking_url=result.booking_url or None,
-                    detection_method=result.detection_method or None,
-                )
-
-                await repo.update_hotel_status(
-                    hotel_id=result.hotel_id,
-                    status=1,
-                    phone_website=result.phone_website or None,
-                    email=result.email or None,
-                )
-                detected += 1
-            else:
-                # No booking engine found - status 99
-                await repo.update_hotel_status(
-                    hotel_id=result.hotel_id,
-                    status=99,
-                    phone_website=result.phone_website or None,
-                    email=result.email or None,
-                )
-                if result.error:
-                    errors += 1
-
-        except Exception as e:
-            logger.error(f"Error saving result for hotel {result.hotel_id}: {e}")
-            errors += 1
-
-    return detected, errors
-
-
 async def worker_loop(
+    service: Service,
     concurrency: int,
     batch_size: int,
     debug: bool,
@@ -143,6 +92,7 @@ async def worker_loop(
     Worker mode: continuously claim and process batches until queue is empty.
 
     Args:
+        service: LeadGen service instance
         concurrency: Parallel browser contexts
         batch_size: Hotels per batch
         debug: Enable debug logging
@@ -158,7 +108,7 @@ async def worker_loop(
 
     while True:
         # Claim a batch of hotels atomically
-        hotels = await repo.claim_hotels_for_detection(limit=batch_size)
+        hotels = await service.claim_hotels_for_detection(limit=batch_size)
 
         if not hotels:
             logger.info(f"Worker {worker_id}: No more hotels to process")
@@ -170,8 +120,8 @@ async def worker_loop(
         # Process the batch
         results = await process_batch(hotels, concurrency, debug)
 
-        # Save results
-        detected, errors = await save_results(results)
+        # Save results via service
+        detected, errors = await service.save_detection_results(results)
 
         total_processed += len(results)
         total_detected += detected
@@ -201,6 +151,7 @@ async def worker_loop(
 
 
 async def single_run(
+    service: Service,
     limit: int,
     concurrency: int,
     batch_size: int,
@@ -210,7 +161,7 @@ async def single_run(
     Single run mode: process up to `limit` hotels, then exit.
     """
     # Get all pending hotels up to limit
-    all_hotels = await repo.get_hotels_pending_detection(limit=limit)
+    all_hotels = await service.get_hotels_pending_detection(limit=limit)
     total_hotels = len(all_hotels)
 
     if not all_hotels:
@@ -231,7 +182,7 @@ async def single_run(
         logger.info(f"Processing batch {batch_num}: {len(batch)} hotels")
 
         results = await process_batch(batch, concurrency, debug)
-        detected, errors = await save_results(results)
+        detected, errors = await service.save_detection_results(results)
 
         total_detected += detected
         total_errors += errors
@@ -266,13 +217,16 @@ async def run(
     """Initialize DB and run workflow."""
     await init_db()
     try:
-        # Load engine patterns from database via service
+        # Create service instance
         service = Service()
+
+        # Load engine patterns from database via service
         patterns = await service.get_engine_patterns()
         set_engine_patterns(patterns)
 
         if worker:
             await worker_loop(
+                service=service,
                 concurrency=concurrency,
                 batch_size=batch_size,
                 debug=debug,
@@ -280,6 +234,7 @@ async def run(
             )
         else:
             await single_run(
+                service=service,
                 limit=limit,
                 concurrency=concurrency,
                 batch_size=batch_size,
@@ -392,7 +347,8 @@ Examples:
     if args.reset_stale:
         async def reset():
             await init_db()
-            await repo.reset_stale_processing_hotels()
+            service = Service()
+            await service.reset_stale_processing_hotels()
             logger.info("Reset stale processing hotels (status=10 -> 0)")
             await close_db()
         asyncio.run(reset())
