@@ -1,10 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Dict, List, Tuple
 
 from loguru import logger
 
 from services.leadgen import repo
 from services.leadgen.detector import BatchDetector, DetectionConfig, DetectionResult
+from db.models.hotel import Hotel
 
 
 class IService(ABC):
@@ -41,7 +42,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def get_hotels_pending_detection(self, limit: int = 100) -> List:
+    async def get_hotels_pending_detection(self, limit: int = 100) -> List[Hotel]:
         """
         Get hotels that need booking engine detection.
         Returns list of Hotel models.
@@ -56,7 +57,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def get_engine_patterns(self) -> dict:
+    async def get_engine_patterns(self) -> Dict[str, List[str]]:
         """
         Get booking engine patterns for detection.
         Returns dict mapping engine name to list of domain patterns.
@@ -64,7 +65,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def save_detection_results(self, results: List[DetectionResult]) -> tuple:
+    async def save_detection_results(self, results: List[DetectionResult]) -> Tuple[int, int]:
         """
         Save detection results to database.
         Returns (detected_count, error_count) tuple.
@@ -72,7 +73,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def claim_hotels_for_detection(self, limit: int = 100) -> List:
+    async def claim_hotels_for_detection(self, limit: int = 100) -> List[Hotel]:
         """
         Atomically claim hotels for processing (multi-worker safe).
         Returns list of claimed Hotel models.
@@ -186,7 +187,7 @@ class Service(IService):
         except Exception as e:
             logger.error(f"Error saving detection result for hotel {result.hotel_id}: {e}")
 
-    async def get_hotels_pending_detection(self, limit: int = 100) -> List:
+    async def get_hotels_pending_detection(self, limit: int = 100) -> List[Hotel]:
         """Get hotels that need booking engine detection."""
         return await repo.get_hotels_pending_detection(limit=limit)
 
@@ -195,7 +196,7 @@ class Service(IService):
         hotels = await repo.get_hotels_pending_detection(limit=10000)
         return len(hotels)
 
-    async def get_engine_patterns(self) -> dict:
+    async def get_engine_patterns(self) -> Dict[str, List[str]]:
         """Get booking engine patterns for detection.
 
         Returns dict mapping engine name to list of domain patterns.
@@ -204,7 +205,7 @@ class Service(IService):
         engines = await repo.get_all_booking_engines()
         return {engine.name: engine.domains for engine in engines if engine.domains}
 
-    async def save_detection_results(self, results: List[DetectionResult]) -> tuple:
+    async def save_detection_results(self, results: List[DetectionResult]) -> Tuple[int, int]:
         """Save detection results to database.
 
         Returns (detected_count, error_count) tuple.
@@ -225,7 +226,7 @@ class Service(IService):
 
         return (detected, errors)
 
-    async def claim_hotels_for_detection(self, limit: int = 100) -> List:
+    async def claim_hotels_for_detection(self, limit: int = 100) -> List[Hotel]:
         """Atomically claim hotels for processing (multi-worker safe)."""
         return await repo.claim_hotels_for_detection(limit=limit)
 
