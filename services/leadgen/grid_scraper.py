@@ -186,6 +186,7 @@ class ScrapeStats(BaseModel):
     cells_reduced: int = 0  # Cells with partial coverage (fewer queries)
     duplicates_skipped: int = 0
     chains_skipped: int = 0
+    out_of_bounds: int = 0  # Hotels outside scrape region
 
 
 class ScrapeEstimate(BaseModel):
@@ -219,6 +220,8 @@ class GridScraper:
         self._seen_locations: Set[Tuple[float, float]] = set()  # (lat, lng) rounded to ~100m
         self._stats = ScrapeStats()
         self._out_of_credits = False
+        # Scrape bounds for filtering out-of-region results
+        self._bounds: Optional[Tuple[float, float, float, float]] = None  # (lat_min, lat_max, lng_min, lng_max)
 
     async def scrape_region(
         self,
@@ -353,6 +356,10 @@ class GridScraper:
         self._stats = ScrapeStats()
         self._out_of_credits = False
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        # Store bounds for filtering out-of-region results (with 10% buffer)
+        lat_buffer = (lat_max - lat_min) * 0.1
+        lng_buffer = (lng_max - lng_min) * 0.1
+        self._bounds = (lat_min - lat_buffer, lat_max + lat_buffer, lng_min - lng_buffer, lng_max + lng_buffer)
 
         hotels: List[ScrapedHotel] = []
 
@@ -610,6 +617,14 @@ class GridScraper:
         if lat and lng:
             loc_key = (round(lat, 3), round(lng, 3))  # ~111m precision
             self._seen_locations.add(loc_key)
+
+            # Filter out-of-bounds results (Paris hotels when scraping Miami)
+            if self._bounds:
+                lat_min, lat_max, lng_min, lng_max = self._bounds
+                if not (lat_min <= lat <= lat_max and lng_min <= lng <= lng_max):
+                    self._stats.out_of_bounds += 1
+                    logger.debug(f"SKIP out-of-bounds: {name} at ({lat:.4f}, {lng:.4f})")
+                    return None
 
         # Skip chains by name
         for chain in SKIP_CHAINS:
