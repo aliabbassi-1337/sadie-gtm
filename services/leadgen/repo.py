@@ -137,17 +137,6 @@ async def get_all_booking_engines() -> List[BookingEngine]:
         return [BookingEngine.model_validate(dict(row)) for row in results]
 
 
-async def get_engine_patterns() -> dict:
-    """Get booking engine patterns as a dict for detector.
-
-    Returns:
-        Dict mapping engine name to list of domain patterns.
-        e.g. {"Cloudbeds": ["cloudbeds.com"], "Mews": ["mews.com", "mews.li"]}
-    """
-    engines = await get_all_booking_engines()
-    return {engine.name: engine.domains for engine in engines if engine.domains}
-
-
 async def insert_booking_engine(
     name: str,
     domains: Optional[List[str]] = None,

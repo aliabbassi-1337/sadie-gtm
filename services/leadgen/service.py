@@ -55,6 +55,14 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def get_engine_patterns(self) -> dict:
+        """
+        Get booking engine patterns for detection.
+        Returns dict mapping engine name to list of domain patterns.
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self, detection_config: DetectionConfig = None) -> None:
@@ -163,3 +171,12 @@ class Service(IService):
         """Count hotels waiting for detection (status=0)."""
         hotels = await repo.get_hotels_pending_detection(limit=10000)
         return len(hotels)
+
+    async def get_engine_patterns(self) -> dict:
+        """Get booking engine patterns for detection.
+
+        Returns dict mapping engine name to list of domain patterns.
+        e.g. {"Cloudbeds": ["cloudbeds.com"], "Mews": ["mews.com", "mews.li"]}
+        """
+        engines = await repo.get_all_booking_engines()
+        return {engine.name: engine.domains for engine in engines if engine.domains}
