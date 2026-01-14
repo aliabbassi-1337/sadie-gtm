@@ -33,7 +33,7 @@ from loguru import logger
 
 from db.client import init_db, close_db
 from services.leadgen import repo
-from services.leadgen.detector import DetectionConfig, DetectionResult, BatchDetector
+from services.leadgen.detector import DetectionConfig, DetectionResult, BatchDetector, set_engine_patterns
 
 
 # RAM-based presets
@@ -265,6 +265,10 @@ async def run(
     """Initialize DB and run workflow."""
     await init_db()
     try:
+        # Load engine patterns from database
+        patterns = await repo.get_engine_patterns()
+        set_engine_patterns(patterns)
+
         if worker:
             await worker_loop(
                 concurrency=concurrency,

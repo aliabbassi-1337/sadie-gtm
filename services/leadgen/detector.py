@@ -36,38 +36,26 @@ class DetectionConfig(BaseModel):
 
 
 # =============================================================================
-# ENGINE PATTERNS - Loaded from database at runtime
+# ENGINE PATTERNS - Injected at runtime from database
 # =============================================================================
 
-# Module-level cache for engine patterns (loaded from booking_engines table)
-_engine_patterns_cache: Dict[str, List[str]] = {}
+# Module-level cache for engine patterns (set by caller before detection)
+_engine_patterns: Dict[str, List[str]] = {}
 
 
-async def load_engine_patterns() -> Dict[str, List[str]]:
-    """Load booking engine patterns from database.
+def set_engine_patterns(patterns: Dict[str, List[str]]) -> None:
+    """Set the engine patterns to use for detection.
 
-    Returns cached patterns if already loaded, otherwise fetches from DB.
-    Patterns map engine name -> list of domain patterns.
+    Called by workflow/service after fetching from database.
     """
-    global _engine_patterns_cache
-
-    if _engine_patterns_cache:
-        return _engine_patterns_cache
-
-    try:
-        from services.leadgen import repo
-        _engine_patterns_cache = await repo.get_engine_patterns()
-        logger.info(f"Loaded {len(_engine_patterns_cache)} booking engine patterns from database")
-    except Exception as e:
-        logger.warning(f"Failed to load engine patterns from DB: {e}. Using empty patterns.")
-        _engine_patterns_cache = {}
-
-    return _engine_patterns_cache
+    global _engine_patterns
+    _engine_patterns = patterns
+    logger.info(f"Loaded {len(_engine_patterns)} booking engine patterns")
 
 
 def get_engine_patterns() -> Dict[str, List[str]]:
-    """Get the current engine patterns (must call load_engine_patterns first)."""
-    return _engine_patterns_cache
+    """Get the current engine patterns."""
+    return _engine_patterns
 
 # Skip big chains and junk domains
 SKIP_CHAIN_DOMAINS = [
@@ -1442,9 +1430,6 @@ class BatchDetector:
         """
         if not hotels:
             return []
-
-        # Load engine patterns from database (cached after first load)
-        await load_engine_patterns()
 
         results: List[DetectionResult] = []
 
