@@ -66,9 +66,17 @@ SKIP_CHAIN_DOMAINS = [
 ]
 
 SKIP_JUNK_DOMAINS = [
+    # Social media
     "facebook.com", "instagram.com", "twitter.com", "youtube.com", "tiktok.com",
-    "linkedin.com", "yelp.com", "tripadvisor.com", "google.com",
+    "linkedin.com",
+    # Review sites
+    "yelp.com", "tripadvisor.com", "google.com",
+    # Major OTAs
     "booking.com", "expedia.com", "hotels.com", "airbnb.com", "vrbo.com",
+    # Meta-search / aggregators (detected via location mismatch analysis)
+    "bluepillow.com", "vio.com", "wowotrip.com", "trivago.com", "kayak.com",
+    "priceline.com", "agoda.com", "hostelworld.com", "hotwire.com",
+    # Government / parks
     "dnr.", "parks.", "recreation.", ".gov", ".edu", ".mil",
 ]
 
@@ -937,8 +945,8 @@ class HotelProcessor:
                     result.booking_engine_domain = ""
                     result.error = "junk_booking_url"
 
-            if not result.booking_url and result.booking_engine in ("", "unknown"):
-                result.error = "no_booking_found"
+            # Note: no_booking_found is not an error - it's a valid outcome
+            # Don't set result.error for this case
 
             self._log(f"  Engine: {result.booking_engine} ({result.booking_engine_domain or 'n/a'})")
 
