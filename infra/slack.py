@@ -66,26 +66,23 @@ def send_message(
         return False
 
 
-def send_export_notification(
-    location: str,
-    lead_count: int,
-    s3_uri: str,
+def send_error(
+    workflow: str,
+    error: str,
     channel: str = "#leads",
 ) -> bool:
-    """Send a formatted export notification.
+    """Send an error notification to Slack.
 
     Args:
-        location: City or state name
-        lead_count: Number of leads exported
-        s3_uri: S3 URI of the exported file
+        workflow: Name of the workflow that failed
+        error: Error message
         channel: Slack channel
 
     Returns:
         True if sent successfully
     """
-    message = f"""*Lead Export Complete*
-• Location: {location}
-• Leads: {lead_count}
-• File: `{s3_uri}`"""
-
+    message = (
+        f":x: *{workflow} Failed*\n"
+        f"```{error}```"
+    )
     return send_message(message, channel)

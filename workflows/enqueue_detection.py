@@ -35,6 +35,11 @@ async def run(limit: int = 1000, batch_size: int = 20, notify: bool = False):
                 f"• Hotels enqueued: {count}\n"
                 f"• Batch size: {batch_size}"
             )
+    except Exception as e:
+        logger.error(f"Enqueue failed: {e}")
+        if notify:
+            slack.send_error("Detection Enqueue", str(e))
+        raise
     finally:
         await close_db()
 

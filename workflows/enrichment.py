@@ -72,6 +72,11 @@ async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int 
                 f"• Mode: {mode}"
             )
 
+    except Exception as e:
+        logger.error(f"Room count enrichment failed: {e}")
+        if notify:
+            slack.send_error("Room Count Enrichment", str(e))
+        raise
     finally:
         await close_db()
 
@@ -109,6 +114,11 @@ async def run_proximity(limit: int, max_distance_km: float, notify: bool = False
                 f"• Max distance: {max_distance_km}km"
             )
 
+    except Exception as e:
+        logger.error(f"Proximity calculation failed: {e}")
+        if notify:
+            slack.send_error("Proximity Calculation", str(e))
+        raise
     finally:
         await close_db()
 

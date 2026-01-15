@@ -233,6 +233,11 @@ async def worker_loop(
                 f"• Errors: {total_errors}"
             )
 
+    except Exception as e:
+        logger.error(f"Detection consumer failed: {e}")
+        if notify:
+            slack.send_error("Detection Consumer", str(e))
+        raise
     finally:
         await close_db()
 

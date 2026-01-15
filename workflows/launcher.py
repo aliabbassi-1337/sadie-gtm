@@ -117,6 +117,11 @@ async def launch_batch(limit: int, notify: bool = False) -> None:
                 f"• Total launched (all time): {total_launched}"
             )
 
+    except Exception as e:
+        logger.error(f"Launch failed: {e}")
+        if notify:
+            slack.send_error("Hotel Launch", str(e))
+        raise
     finally:
         await close_db()
 

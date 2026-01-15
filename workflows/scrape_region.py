@@ -110,6 +110,11 @@ async def scrape_region_workflow(
             )
 
         return count
+    except Exception as e:
+        logger.error(f"Scrape failed: {e}")
+        if notify:
+            slack.send_error("Region Scrape", str(e))
+        raise
     finally:
         await close_db()
 
@@ -131,6 +136,11 @@ async def scrape_state_workflow(state: str, cell_size_km: float, notify: bool = 
             )
 
         return count
+    except Exception as e:
+        logger.error(f"State scrape failed: {e}")
+        if notify:
+            slack.send_error("State Scrape", str(e))
+        raise
     finally:
         await close_db()
 

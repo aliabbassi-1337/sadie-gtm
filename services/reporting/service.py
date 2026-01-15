@@ -208,12 +208,13 @@ class Service(IService):
         channel: str = "#leads",
     ) -> bool:
         """Send export notification to Slack."""
-        return slack.send_export_notification(
-            location=location,
-            lead_count=lead_count,
-            s3_uri=s3_uri,
-            channel=channel,
+        message = (
+            f"*Lead Export Complete*\n"
+            f"• Location: {location}\n"
+            f"• Leads: {lead_count}\n"
+            f"• File: `{s3_uri}`"
         )
+        return slack.send_message(message, channel)
 
     def _create_workbook(
         self,
