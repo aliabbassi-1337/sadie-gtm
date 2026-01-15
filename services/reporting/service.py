@@ -13,6 +13,7 @@ from openpyxl.utils import get_column_letter
 from services.reporting import repo
 from db.models.reporting import HotelLead, CityStats, EngineCount, ReportStats
 from infra.s3 import upload_file
+from infra import slack
 
 
 class IService(ABC):
@@ -39,6 +40,20 @@ class IService(ABC):
         """Export all cities in a state plus state aggregate.
 
         Returns list of S3 URIs for all uploaded reports.
+        """
+        pass
+
+    @abstractmethod
+    def send_slack_notification(
+        self,
+        location: str,
+        lead_count: int,
+        s3_uri: str,
+        channel: str = "#leads",
+    ) -> bool:
+        """Send export notification to Slack.
+
+        Returns True if sent successfully.
         """
         pass
 
@@ -141,6 +156,21 @@ class Service(IService):
 
         logger.info(f"Exported {len(uploaded_uris)} reports for {state}")
         return uploaded_uris
+
+    def send_slack_notification(
+        self,
+        location: str,
+        lead_count: int,
+        s3_uri: str,
+        channel: str = "#leads",
+    ) -> bool:
+        """Send export notification to Slack."""
+        return slack.send_export_notification(
+            location=location,
+            lead_count=lead_count,
+            s3_uri=s3_uri,
+            channel=channel,
+        )
 
     def _create_workbook(
         self,

@@ -5,20 +5,21 @@ Generates Excel reports for hotel leads and uploads to S3.
 
 Usage:
     # Export a single city
-    uv run python workflows/export.py --city "Miami Beach" --state Florida
+    uv run python workflows/export.py --city "Miami Beach" --state FL
 
     # Export all cities in a state plus state aggregate
-    uv run python workflows/export.py --state Florida
+    uv run python workflows/export.py --state FL
 
     # Export a city without uploading to S3 (local file only)
-    uv run python workflows/export.py --city Miami --state Florida --local
+    uv run python workflows/export.py --city Miami --state FL --local
+
+    # Export and send Slack notification
+    uv run python workflows/export.py --city Miami --state FL --notify
 """
 
 import sys
 import asyncio
 import argparse
-import tempfile
-import os
 
 from loguru import logger
 
@@ -31,6 +32,7 @@ async def export_city_workflow(
     state: str,
     country: str = "USA",
     local_only: bool = False,
+    notify: bool = False,
 ) -> str:
     """Export a single city report."""
     await init_db()
@@ -61,8 +63,21 @@ async def export_city_workflow(
             logger.info(f"Exported to local file: {filename}")
             return filename
         else:
+            # Get lead count for notification
+            from services.reporting import repo
+            leads = await repo.get_leads_for_city(city, state)
+            lead_count = len(leads)
+
             s3_uri = await service.export_city(city, state, country)
             logger.info(f"Exported to S3: {s3_uri}")
+
+            if notify:
+                service.send_slack_notification(
+                    location=f"{city}, {state}",
+                    lead_count=lead_count,
+                    s3_uri=s3_uri,
+                )
+
             return s3_uri
 
     finally:
@@ -73,6 +88,7 @@ async def export_state_workflow(
     state: str,
     country: str = "USA",
     local_only: bool = False,
+    notify: bool = False,
 ) -> list:
     """Export all cities in a state plus state aggregate."""
     await init_db()
@@ -102,8 +118,21 @@ async def export_state_workflow(
             logger.info(f"Exported to local file: {filename}")
             return [filename]
         else:
+            # Get lead count for notification
+            from services.reporting import repo
+            leads = await repo.get_leads_for_state(state)
+            lead_count = len(leads)
+
             uris = await service.export_state_with_cities(state, country)
             logger.info(f"Exported {len(uris)} reports to S3")
+
+            if notify:
+                service.send_slack_notification(
+                    location=f"{state} (all cities)",
+                    lead_count=lead_count,
+                    s3_uri=f"{len(uris)} files uploaded",
+                )
+
             return uris
 
     finally:
@@ -117,13 +146,16 @@ def main():
     parser.add_argument("--city", type=str, help="City name (e.g., 'Miami Beach')")
 
     # State export
-    parser.add_argument("--state", type=str, help="State name (e.g., 'Florida')")
+    parser.add_argument("--state", type=str, help="State name (e.g., 'FL')")
 
     # Country
     parser.add_argument("--country", type=str, default="USA", help="Country (default: USA)")
 
     # Local only (no S3 upload)
     parser.add_argument("--local", action="store_true", help="Save locally instead of uploading to S3")
+
+    # Slack notification
+    parser.add_argument("--notify", action="store_true", help="Send Slack notification after export")
 
     args = parser.parse_args()
 
@@ -138,6 +170,7 @@ def main():
             args.state,
             args.country,
             args.local,
+            args.notify,
         ))
         print(f"\nExported: {result}")
 
@@ -147,6 +180,7 @@ def main():
             args.state,
             args.country,
             args.local,
+            args.notify,
         ))
         print(f"\nExported {len(results)} reports:")
         for r in results:
