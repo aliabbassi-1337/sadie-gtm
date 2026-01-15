@@ -76,45 +76,38 @@ async def get_hotels_pending_detection(limit: int = 100) -> List[Hotel]:
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
-async def claim_hotels_for_detection(limit: int = 100) -> List[Hotel]:
-    """Atomically claim hotels for processing (multi-worker safe).
-
-    Uses FOR UPDATE SKIP LOCKED so multiple workers can run concurrently
-    without grabbing the same hotels. Sets status=10 (processing).
-
-    Returns list of claimed hotels.
-    """
-    async with get_conn() as conn:
-        results = await queries.claim_hotels_for_detection(conn, limit=limit)
-        return [Hotel.model_validate(dict(row)) for row in results]
-
-
-async def reset_stale_processing_hotels() -> None:
-    """Reset hotels stuck in processing state (status=10) for > 30 min.
-
-    Run this periodically to recover from crashed workers.
-    """
-    async with get_conn() as conn:
-        await queries.reset_stale_processing_hotels(conn)
-
-
 async def update_hotel_status(
     hotel_id: int,
     status: int,
     phone_website: Optional[str] = None,
     email: Optional[str] = None,
 ) -> None:
-    """Update hotel status after detection.
+    """Update hotel status (used for rejection statuses).
 
     Status values:
-    - 1 = detected (booking engine found)
-    - 99 = no_booking_engine (dead end)
+    - -2 = location_mismatch (rejected)
+    - -1 = no_booking_engine (rejected)
     """
     async with get_conn() as conn:
         await queries.update_hotel_status(
             conn,
             hotel_id=hotel_id,
             status=status,
+            phone_website=phone_website,
+            email=email,
+        )
+
+
+async def update_hotel_contact_info(
+    hotel_id: int,
+    phone_website: Optional[str] = None,
+    email: Optional[str] = None,
+) -> None:
+    """Update hotel contact info without changing status."""
+    async with get_conn() as conn:
+        await queries.update_hotel_contact_info(
+            conn,
+            hotel_id=hotel_id,
             phone_website=phone_website,
             email=email,
         )
@@ -160,11 +153,15 @@ async def insert_booking_engine(
 
 async def insert_hotel_booking_engine(
     hotel_id: int,
-    booking_engine_id: int,
+    booking_engine_id: Optional[int] = None,
     booking_url: Optional[str] = None,
     detection_method: Optional[str] = None,
+    status: int = 1,
 ) -> None:
-    """Link hotel to detected booking engine."""
+    """Link hotel to detected booking engine.
+
+    status: -1=failed (non-retriable), 1=success (default)
+    """
     async with get_conn() as conn:
         await queries.insert_hotel_booking_engine(
             conn,
@@ -172,6 +169,7 @@ async def insert_hotel_booking_engine(
             booking_engine_id=booking_engine_id,
             booking_url=booking_url,
             detection_method=detection_method,
+            status=status,
         )
 
 
@@ -190,7 +188,8 @@ async def get_hotels_by_ids(hotel_ids: List[int]) -> List[Hotel]:
 async def update_hotels_status_batch(hotel_ids: List[int], status: int) -> None:
     """Update status for multiple hotels at once.
 
-    Used by enqueue job to mark hotels as enqueued (status=10).
+    Note: With simplified status system, this is only used for batch rejections.
+    Detection/enrichment progress is tracked by presence of records.
     """
     if not hotel_ids:
         return

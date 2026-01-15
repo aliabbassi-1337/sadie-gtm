@@ -11,7 +11,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 from services.reporting import repo
-from db.models.reporting import HotelLead, CityStats, EngineCount, ReportStats
+from db.models.reporting import HotelLead, CityStats, EngineCount, ReportStats, LaunchableHotel
 from infra.s3 import upload_file
 from infra import slack
 
@@ -57,6 +57,49 @@ class IService(ABC):
         """
         pass
 
+    # =========================================================================
+    # LAUNCHER METHODS
+    # =========================================================================
+
+    @abstractmethod
+    async def get_launchable_hotels(self, limit: int = 100) -> List[LaunchableHotel]:
+        """Get hotels ready to be launched (fully enriched with all data).
+
+        A hotel is launchable when it has:
+        - status = 0 (pending)
+        - A record in hotel_booking_engines
+        - A record in hotel_room_count (with status=1)
+        - A record in hotel_customer_proximity
+        """
+        pass
+
+    @abstractmethod
+    async def get_launchable_count(self) -> int:
+        """Count hotels ready to be launched."""
+        pass
+
+    @abstractmethod
+    async def launch_hotels(self, hotel_ids: List[int]) -> int:
+        """Atomically claim and launch specific hotels (multi-worker safe).
+
+        Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
+        Returns the number of hotels actually launched.
+        """
+        pass
+
+    @abstractmethod
+    async def launch_ready(self, limit: int = 100) -> int:
+        """Atomically claim and launch ready hotels (multi-worker safe).
+
+        Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
+        Returns the number of hotels launched.
+        """
+        pass
+
+    @abstractmethod
+    async def get_launched_count(self) -> int:
+        """Count hotels that have been launched."""
+        pass
 
 class Service(IService):
     """Implementation of the reporting service."""
@@ -355,3 +398,47 @@ class Service(IService):
         sheet.column_dimensions["C"].width = 5
         sheet.column_dimensions["D"].width = 28
         sheet.column_dimensions["E"].width = 15
+
+    # =========================================================================
+    # LAUNCHER METHODS
+    # =========================================================================
+
+    async def get_launchable_hotels(self, limit: int = 100) -> List[LaunchableHotel]:
+        """Get hotels ready to be launched (fully enriched with all data)."""
+        return await repo.get_launchable_hotels(limit=limit)
+
+    async def get_launchable_count(self) -> int:
+        """Count hotels ready to be launched."""
+        return await repo.get_launchable_count()
+
+    async def launch_hotels(self, hotel_ids: List[int]) -> int:
+        """Atomically claim and launch specific hotels (multi-worker safe).
+
+        Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
+        Returns the number of hotels actually launched.
+        """
+        if not hotel_ids:
+            return 0
+
+        launched_ids = await repo.launch_hotels(hotel_ids)
+        if launched_ids:
+            logger.info(f"Launched {len(launched_ids)} hotels: {launched_ids}")
+        return len(launched_ids)
+
+    async def launch_ready(self, limit: int = 100) -> int:
+        """Atomically claim and launch ready hotels (multi-worker safe).
+
+        Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
+        Returns the number of hotels launched.
+        """
+        launched_ids = await repo.launch_ready_hotels(limit=limit)
+        if launched_ids:
+            logger.info(f"Launched {len(launched_ids)} hotels: {launched_ids}")
+        else:
+            logger.info("No hotels ready to launch")
+        return len(launched_ids)
+
+    async def get_launched_count(self) -> int:
+        """Count hotels that have been launched."""
+        return await repo.get_launched_count()
+

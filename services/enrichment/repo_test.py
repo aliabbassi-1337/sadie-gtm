@@ -16,20 +16,21 @@ from services.enrichment.repo import (
 from services.leadgen.repo import (
     insert_hotel,
     delete_hotel,
-    update_hotel_status,
+    insert_booking_engine,
+    insert_hotel_booking_engine,
 )
 
 
 @pytest.mark.asyncio
 async def test_insert_and_get_room_count():
     """Test inserting and retrieving room count."""
-    # Insert test hotel with status=1 (detected)
+    # Insert test hotel (status doesn't matter for this CRUD test)
     hotel_id = await insert_hotel(
         name="Test Enrichment Hotel",
         website="https://test-enrichment.com",
         city="Miami",
         state="Florida",
-        status=1,  # detected
+        status=0,  # pending
         source="test",
     )
 
@@ -65,13 +66,13 @@ async def test_get_room_count_not_found():
 @pytest.mark.asyncio
 async def test_insert_room_count_upsert():
     """Test inserting room count updates on conflict."""
-    # Insert test hotel
+    # Insert test hotel (status doesn't matter for this CRUD test)
     hotel_id = await insert_hotel(
         name="Test Upsert Hotel",
         website="https://test-upsert.com",
         city="Miami",
         state="Florida",
-        status=1,
+        status=0,  # pending
         source="test",
     )
 
@@ -105,14 +106,26 @@ async def test_insert_room_count_upsert():
 @pytest.mark.asyncio
 async def test_get_pending_enrichment_count():
     """Test counting hotels pending enrichment."""
-    # Insert test hotel with status=1 (detected) and no room count
+    # Insert test hotel with status=0 (pending) and no room count
     hotel_id = await insert_hotel(
         name="Test Pending Enrichment",
         website="https://test-pending.com",
         city="Miami",
         state="Florida",
-        status=1,
+        status=0,  # pending - new status system
         source="test",
+    )
+
+    # Add booking engine record (required for enrichment queries)
+    booking_engine_id = await insert_booking_engine(
+        name="Test Enrichment Engine",
+        domains=["testenrichment.com"],
+        tier=1,
+    )
+    await insert_hotel_booking_engine(
+        hotel_id=hotel_id,
+        booking_engine_id=booking_engine_id,
+        detection_method="test",
     )
 
     # Get count - should include our new hotel
@@ -133,7 +146,7 @@ async def test_get_pending_enrichment_count():
 
     # Cleanup
     await delete_room_count(hotel_id)
-    await delete_hotel(hotel_id)
+    await delete_hotel(hotel_id)  # CASCADE deletes hotel_booking_engines
 
 
 # ============================================================================
@@ -144,7 +157,7 @@ async def test_get_pending_enrichment_count():
 @pytest.mark.asyncio
 async def test_insert_and_get_customer_proximity():
     """Test inserting and retrieving customer proximity."""
-    # Insert test hotel with location
+    # Insert test hotel with location (status doesn't matter for this CRUD test)
     hotel_id = await insert_hotel(
         name="Test Proximity Hotel",
         website="https://test-proximity.com",
@@ -152,7 +165,7 @@ async def test_insert_and_get_customer_proximity():
         state="Florida",
         latitude=25.7617,
         longitude=-80.1918,
-        status=1,
+        status=0,  # pending
         source="test",
     )
 
@@ -201,8 +214,29 @@ async def test_get_pending_proximity_count():
         state="Florida",
         latitude=25.7617,
         longitude=-80.1918,
-        status=1,
+        status=0,  # pending - new status system
         source="test",
+    )
+
+    # Add booking engine record (required for proximity queries)
+    booking_engine_id = await insert_booking_engine(
+        name="Test Proximity Engine",
+        domains=["testproximity.com"],
+        tier=1,
+    )
+    await insert_hotel_booking_engine(
+        hotel_id=hotel_id,
+        booking_engine_id=booking_engine_id,
+        detection_method="test",
+    )
+
+    # Add room count with status=1 (required for proximity - must be successfully enriched)
+    await insert_room_count(
+        hotel_id=hotel_id,
+        room_count=50,
+        source="test",
+        confidence=Decimal("1.0"),
+        status=1,  # success
     )
 
     # Get count - should include our new hotel
@@ -210,4 +244,5 @@ async def test_get_pending_proximity_count():
     assert count >= 1
 
     # Cleanup
-    await delete_hotel(hotel_id)
+    await delete_room_count(hotel_id)
+    await delete_hotel(hotel_id)  # CASCADE deletes hotel_booking_engines

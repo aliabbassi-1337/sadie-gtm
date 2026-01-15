@@ -82,9 +82,10 @@ def test_create_workbook_empty_leads():
     # Check leads sheet has headers
     leads_sheet = workbook["Leads"]
     assert leads_sheet.cell(row=1, column=1).value == "Hotel"
-    assert leads_sheet.cell(row=1, column=2).value == "Booking Engine"
-    assert leads_sheet.cell(row=1, column=3).value == "Room Count"
-    assert leads_sheet.cell(row=1, column=4).value == "Proximity"
+    assert leads_sheet.cell(row=1, column=2).value == "Website"
+    assert leads_sheet.cell(row=1, column=3).value == "Booking Engine"
+    assert leads_sheet.cell(row=1, column=4).value == "Room Count"
+    assert leads_sheet.cell(row=1, column=5).value == "Proximity"
 
 
 @pytest.mark.no_db
@@ -95,6 +96,7 @@ def test_create_workbook_with_leads():
         HotelLead(
             id=1,
             hotel_name="Hotel A",
+            website="https://hotela.com",
             booking_engine_name="SynXis",
             room_count=50,
             nearest_customer_name="Customer Hotel",
@@ -103,6 +105,7 @@ def test_create_workbook_with_leads():
         HotelLead(
             id=2,
             hotel_name="Hotel B",
+            website="https://hotelb.com",
             booking_engine_name="Cloudbeds",
             room_count=None,
             nearest_customer_name=None,
@@ -119,15 +122,16 @@ def test_create_workbook_with_leads():
 
     leads_sheet = workbook["Leads"]
     # Row 1 is headers, row 2 is first lead
+    # Columns: Hotel, Website, Booking Engine, Room Count, Proximity
     assert leads_sheet.cell(row=2, column=1).value == "Hotel A"
-    assert leads_sheet.cell(row=2, column=2).value == "SynXis"
-    assert leads_sheet.cell(row=2, column=3).value == 50
-    assert leads_sheet.cell(row=2, column=4).value == "Nearest: Customer Hotel (2.5km)"
+    assert leads_sheet.cell(row=2, column=3).value == "SynXis"
+    assert leads_sheet.cell(row=2, column=4).value == 50
+    assert leads_sheet.cell(row=2, column=5).value == "Nearest: Customer Hotel (2.5km)"
 
     assert leads_sheet.cell(row=3, column=1).value == "Hotel B"
-    assert leads_sheet.cell(row=3, column=2).value == "Cloudbeds"
-    assert leads_sheet.cell(row=3, column=3).value == ""
+    assert leads_sheet.cell(row=3, column=3).value == "Cloudbeds"
     assert leads_sheet.cell(row=3, column=4).value == ""
+    assert leads_sheet.cell(row=3, column=5).value == ""
 
 
 @pytest.mark.no_db
@@ -194,7 +198,7 @@ async def test_export_city_uploads_to_s3(mock_repo, mock_upload):
     # Verify S3 upload was called with correct key
     mock_upload.assert_called_once()
     call_args = mock_upload.call_args
-    assert call_args[0][1] == "USA/Florida/Miami.xlsx"
+    assert call_args[0][1] == "HotelLeadGen/USA/Florida/Miami.xlsx"
     assert result == "s3://sadie-gtm/USA/Florida/Miami.xlsx"
 
 
@@ -214,7 +218,7 @@ async def test_export_state_uploads_to_s3(mock_repo, mock_upload):
 
     mock_upload.assert_called_once()
     call_args = mock_upload.call_args
-    assert call_args[0][1] == "USA/Florida/Florida.xlsx"
+    assert call_args[0][1] == "HotelLeadGen/USA/Florida/Florida.xlsx"
     assert result == "s3://sadie-gtm/USA/Florida/Florida.xlsx"
 
 

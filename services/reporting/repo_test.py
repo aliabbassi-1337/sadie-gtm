@@ -23,14 +23,14 @@ async def test_get_leads_for_city_empty():
 
 @pytest.mark.asyncio
 async def test_get_leads_for_city_with_data():
-    """Test getting leads for a city with detected hotels."""
-    # Insert a test hotel with status=1 (detected)
+    """Test getting leads for a city with launched hotels."""
+    # Insert a test hotel with status=1 (launched)
     hotel_id = await insert_hotel(
         name="Test Reporting Hotel",
         website="https://testreporting.com",
         city="TestCity",
         state="TestState",
-        status=1,  # detected
+        status=1,  # launched
         source="test",
     )
 
@@ -122,14 +122,14 @@ async def test_get_cities_in_state_empty():
 
 @pytest.mark.asyncio
 async def test_get_cities_in_state_with_data():
-    """Test getting cities in a state with detected hotels."""
-    # Insert test hotels in different cities with status=1
+    """Test getting cities in a state with launched hotels."""
+    # Insert test hotels in different cities with status=1 (launched)
     hotel_id_1 = await insert_hotel(
         name="City Test Hotel A",
         website="https://citytest1.com",
         city="CityA",
         state="CitiesTestState",
-        status=1,
+        status=1,  # launched
         source="test",
     )
     hotel_id_2 = await insert_hotel(
@@ -137,7 +137,7 @@ async def test_get_cities_in_state_with_data():
         website="https://citytest2.com",
         city="CityB",
         state="CitiesTestState",
-        status=1,
+        status=1,  # launched
         source="test",
     )
 

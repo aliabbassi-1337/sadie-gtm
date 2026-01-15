@@ -91,21 +91,6 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def claim_hotels_for_detection(self, limit: int = 100) -> List[Hotel]:
-        """
-        Atomically claim hotels for processing (multi-worker safe).
-        Returns list of claimed Hotel models.
-        """
-        pass
-
-    @abstractmethod
-    async def reset_stale_processing_hotels(self) -> None:
-        """
-        Reset hotels stuck in processing state (status=10) for > 30 min.
-        """
-        pass
-
-    @abstractmethod
     async def get_hotels_by_ids(self, hotel_ids: List[int]) -> List[Hotel]:
         """
         Get hotels by list of IDs.
@@ -117,7 +102,8 @@ class IService(ABC):
     async def enqueue_hotels_for_detection(self, limit: int = 1000, batch_size: int = 20) -> int:
         """
         Enqueue hotels for detection via SQS.
-        Queries status=0 hotels, sends to SQS in batches, sets status=10.
+        Queries hotels with status=0 and no hotel_booking_engines record.
+        Detection tracked by hotel_booking_engines presence, not status.
         Returns count of hotels enqueued.
         """
         pass
@@ -303,6 +289,24 @@ class Service(IService):
                 )
                 return
 
+            # Handle non-retriable errors (timeout, precheck_failed, etc.)
+            # Create a hotel_booking_engines record with status=-1 to prevent infinite retry
+            if result.error and result.error not in ("location_mismatch",):
+                await repo.insert_hotel_booking_engine(
+                    hotel_id=result.hotel_id,
+                    booking_engine_id=None,
+                    detection_method=f"error:{result.error}",
+                    status=-1,  # Failed, non-retriable
+                )
+                # Save contact info if we got any
+                if result.phone_website or result.email:
+                    await repo.update_hotel_contact_info(
+                        hotel_id=result.hotel_id,
+                        phone_website=result.phone_website or None,
+                        email=result.email or None,
+                    )
+                return
+
             if result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "unknown_booking_api"):
                 # Found a booking engine
                 # Get or create booking engine record
@@ -317,21 +321,24 @@ class Service(IService):
                         tier=2,
                     )
 
-                # Link hotel to booking engine
+                # Link hotel to booking engine (this marks detection as complete)
                 await repo.insert_hotel_booking_engine(
                     hotel_id=result.hotel_id,
                     booking_engine_id=engine_id,
                     booking_url=result.booking_url or None,
                     detection_method=result.detection_method or None,
+                    status=1,  # Success
                 )
 
-                # Update hotel status to detected
-                await repo.update_hotel_status(
-                    hotel_id=result.hotel_id,
-                    status=HotelStatus.DETECTED,
-                    phone_website=result.phone_website or None,
-                    email=result.email or None,
-                )
+                # Save phone/email but don't change status - hotel stays at PENDING (0)
+                # Detection completion is tracked by hotel_booking_engines record
+                # Launcher will set status=1 when all enrichments are complete
+                if result.phone_website or result.email:
+                    await repo.update_hotel_contact_info(
+                        hotel_id=result.hotel_id,
+                        phone_website=result.phone_website or None,
+                        email=result.email or None,
+                    )
             else:
                 # No booking engine found
                 await repo.update_hotel_status(
@@ -388,14 +395,6 @@ class Service(IService):
 
         return (detected, errors)
 
-    async def claim_hotels_for_detection(self, limit: int = 100) -> List[Hotel]:
-        """Atomically claim hotels for processing (multi-worker safe)."""
-        return await repo.claim_hotels_for_detection(limit=limit)
-
-    async def reset_stale_processing_hotels(self) -> None:
-        """Reset hotels stuck in processing state (status=10) for > 30 min."""
-        await repo.reset_stale_processing_hotels()
-
     async def get_hotels_by_ids(self, hotel_ids: List[int]) -> List[Hotel]:
         """Get hotels by list of IDs."""
         return await repo.get_hotels_by_ids(hotel_ids=hotel_ids)
@@ -403,12 +402,15 @@ class Service(IService):
     async def enqueue_hotels_for_detection(self, limit: int = 1000, batch_size: int = 20) -> int:
         """Enqueue hotels for detection via SQS.
 
-        Queries status=0 hotels, sends to SQS in batches, sets status=10.
+        Queries hotels with status=0 and no hotel_booking_engines record.
+        Sends to SQS in batches. Does NOT update status - detection is tracked
+        by presence of hotel_booking_engines record.
+
         Returns count of hotels enqueued.
         """
         from infra.sqs import send_messages_batch, get_queue_url
 
-        # Get hotels pending detection
+        # Get hotels pending detection (status=0, no booking engine record)
         hotels = await repo.get_hotels_pending_detection(limit=limit)
         if not hotels:
             return 0
@@ -426,25 +428,8 @@ class Service(IService):
         sent = send_messages_batch(queue_url, messages)
         logger.info(f"Sent {sent} messages to SQS ({len(hotel_ids)} hotels)")
 
-        # Update status to 10 (enqueued)
-        await repo.update_hotels_status_batch(hotel_ids=hotel_ids, status=10)
-
+        # No status update needed - detection is tracked by hotel_booking_engines record
         return len(hotel_ids)
-    async def detect_booking_engines(self, limit: int = 100) -> int:
-        """
-        Detect booking engines for hotels with status=0 (scraped).
-
-        TODO: Integrate detect.py script
-
-        Args:
-            limit: Maximum number of hotels to process
-
-        Returns:
-            Number of hotels processed
-        """
-        # TODO: Integrate detect.py script
-        logger.warning("detect_booking_engines not yet implemented")
-        return 0
 
     def estimate_region(
         self,

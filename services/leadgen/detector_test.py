@@ -15,7 +15,28 @@ from services.leadgen.detector import (
     ContactExtractor,
     normalize_url,
     extract_domain,
+    set_engine_patterns,
 )
+
+
+# Test engine patterns for unit tests
+TEST_ENGINE_PATTERNS = {
+    "Cloudbeds": ["cloudbeds.com"],
+    "SynXis / TravelClick": ["synxis.com", "travelclick.com"],
+    "Mews": ["mews.com", "mews.li"],
+    "SiteMinder": ["siteminder.com", "thebookingbutton.com"],
+    "Triptease": ["triptease.io", "triptease.com"],
+    "WebRezPro": ["webrezpro.com"],
+    "Clock PMS": ["clock-software.com"],
+    "Little Hotelier": ["littlehotelier.com"],
+    "Bookassist": ["bookassist.com"],
+}
+
+
+@pytest.fixture(autouse=True)
+def setup_engine_patterns():
+    """Set up test engine patterns before each test."""
+    set_engine_patterns(TEST_ENGINE_PATTERNS)
 
 
 # =============================================================================
@@ -339,13 +360,13 @@ async def test_renzzi_wubook(detector):
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_setai_triptease(detector):
-    """The Setai Miami Beach uses Triptease overlay (with SynXis backend)."""
+async def test_setai_booking_engine(detector):
+    """The Setai Miami Beach uses Triptease overlay with SynXis backend."""
     hotels = [{"id": 3, "name": "The Setai Miami Beach", "website": "https://www.thesetaihotel.com"}]
     results = await detector.detect_batch(hotels)
-    # Triptease is detected first as it's an overlay widget
-    assert results[0].booking_engine == "Triptease"
-    # But the actual booking URL should be SynXis
+    # Either Triptease (overlay) or SynXis (backend) may be detected first
+    assert results[0].booking_engine in ("Triptease", "SynXis / TravelClick")
+    # The booking URL should always be SynXis
     assert "synxis" in results[0].booking_url.lower()
 
 

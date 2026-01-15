@@ -10,10 +10,9 @@ from db.models.hotel_customer_proximity import HotelCustomerProximity
 
 
 async def get_hotels_pending_enrichment(limit: int = 100) -> List[Hotel]:
-    """Get hotels that need room count enrichment.
+    """Get hotels that need room count enrichment (read-only, for status display).
 
     Criteria:
-    - status = 1 (detected)
     - has website
     - not already in hotel_room_count table
     """
@@ -25,27 +24,27 @@ async def get_hotels_pending_enrichment(limit: int = 100) -> List[Hotel]:
 async def claim_hotels_for_enrichment(limit: int = 100) -> List[Hotel]:
     """Atomically claim hotels for enrichment (multi-worker safe).
 
-    Uses FOR UPDATE SKIP LOCKED so multiple workers can run concurrently
-    without grabbing the same hotels. Sets status=2 (enriching).
+    Inserts status=-1 (processing) records into hotel_room_count.
+    Uses ON CONFLICT DO NOTHING so only one worker claims each hotel.
 
-    Returns list of claimed hotels.
+    Returns list of successfully claimed hotels.
     """
     async with get_conn() as conn:
         results = await queries.claim_hotels_for_enrichment(conn, limit=limit)
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
-async def reset_stale_enriching_hotels() -> None:
-    """Reset hotels stuck in enriching state (status=2) for > 30 min.
+async def reset_stale_enrichment_claims() -> None:
+    """Reset claims stuck in processing state (status=-1) for > 30 min.
 
     Run this periodically to recover from crashed workers.
     """
     async with get_conn() as conn:
-        await queries.reset_stale_enriching_hotels(conn)
+        await queries.reset_stale_enrichment_claims(conn)
 
 
 async def get_pending_enrichment_count() -> int:
-    """Count hotels waiting for enrichment (status=1, not yet enriched)."""
+    """Count hotels waiting for enrichment (has website, not yet in hotel_room_count)."""
     async with get_conn() as conn:
         result = await queries.get_pending_enrichment_count(conn)
         return result["count"] if result else 0
@@ -53,11 +52,19 @@ async def get_pending_enrichment_count() -> int:
 
 async def insert_room_count(
     hotel_id: int,
-    room_count: int,
+    room_count: Optional[int],
     source: Optional[str] = None,
     confidence: Optional[Decimal] = None,
+    status: int = 0,
 ) -> int:
     """Insert room count for a hotel.
+
+    Args:
+        hotel_id: The hotel ID
+        room_count: The room count (can be None for failed enrichment)
+        source: Source of the data (regex, groq, etc)
+        confidence: Confidence score
+        status: 0=failed, 1=success
 
     Returns the hotel_room_count ID.
     """
@@ -68,6 +75,7 @@ async def insert_room_count(
             room_count=room_count,
             source=source,
             confidence=confidence,
+            status=status,
         )
         return result
 
@@ -85,19 +93,6 @@ async def delete_room_count(hotel_id: int) -> None:
     """Delete room count for a hotel (for testing)."""
     async with get_conn() as conn:
         await queries.delete_room_count(conn, hotel_id=hotel_id)
-
-
-async def update_hotel_enrichment_status(hotel_id: int, status: int) -> None:
-    """Update hotel status after enrichment.
-
-    Status values:
-    - 3 = enriched (room count found)
-    - 1 = detected (reset back if enrichment failed)
-    """
-    async with get_conn() as conn:
-        await queries.update_hotel_enrichment_status(
-            conn, hotel_id=hotel_id, status=status
-        )
 
 
 # ============================================================================

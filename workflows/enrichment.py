@@ -2,17 +2,22 @@
 
 USAGE:
 
-1. Room count enrichment:
+1. Room count enrichment (fast, paid tier - 15 concurrent requests):
    uv run python workflows/enrichment.py room-counts --limit 100
 
-2. Customer proximity calculation:
+2. Room count enrichment (slow, free tier - sequential):
+   uv run python workflows/enrichment.py room-counts --limit 100 --free-tier
+
+3. Customer proximity calculation:
    uv run python workflows/enrichment.py proximity --limit 100 --max-distance 100
 
-3. Check status:
+4. Check status:
    uv run python workflows/enrichment.py status
 
 NOTES:
 - Room count enrichment uses Groq API (requires ROOM_COUNT_ENRICHER_AGENT_GROQ_KEY in .env)
+- Default mode uses paid tier rate limits (1000 RPM, 15 concurrent requests)
+- Use --free-tier for slow sequential mode (30 RPM)
 - Customer proximity uses PostGIS for efficient spatial queries
 - Both operations are idempotent (can be re-run safely)
 """
@@ -31,7 +36,7 @@ from db.client import init_db, close_db
 from services.enrichment.service import Service
 
 
-async def run_room_counts(limit: int) -> None:
+async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int = 15) -> None:
     """Run room count enrichment."""
     await init_db()
     try:
@@ -45,8 +50,13 @@ async def run_room_counts(limit: int) -> None:
             logger.info("No hotels pending enrichment")
             return
 
-        logger.info(f"Starting room count enrichment (limit={limit})...")
-        count = await service.enrich_room_counts(limit=limit)
+        mode = "free tier (sequential)" if free_tier else f"paid tier ({concurrency} concurrent)"
+        logger.info(f"Starting room count enrichment (limit={limit}, {mode})...")
+        count = await service.enrich_room_counts(
+            limit=limit,
+            free_tier=free_tier,
+            concurrency=concurrency,
+        )
 
         logger.info("=" * 60)
         logger.info("ROOM COUNT ENRICHMENT COMPLETE")
@@ -137,6 +147,17 @@ Examples:
         default=100,
         help="Max hotels to process (default: 100)"
     )
+    room_parser.add_argument(
+        "--free-tier",
+        action="store_true",
+        help="Use slow sequential mode for free tier (30 RPM). Default is fast paid tier (1000 RPM)."
+    )
+    room_parser.add_argument(
+        "--concurrency", "-c",
+        type=int,
+        default=15,
+        help="Max concurrent requests in paid tier mode (default: 15)"
+    )
 
     # Proximity command
     prox_parser = subparsers.add_parser(
@@ -162,8 +183,13 @@ Examples:
     args = parser.parse_args()
 
     if args.command == "room-counts":
-        logger.info(f"Running room count enrichment (limit={args.limit})")
-        asyncio.run(run_room_counts(limit=args.limit))
+        mode = "free tier" if args.free_tier else f"paid tier ({args.concurrency} concurrent)"
+        logger.info(f"Running room count enrichment (limit={args.limit}, {mode})")
+        asyncio.run(run_room_counts(
+            limit=args.limit,
+            free_tier=args.free_tier,
+            concurrency=args.concurrency,
+        ))
     elif args.command == "proximity":
         logger.info(f"Running proximity calculation (limit={args.limit}, max_distance={args.max_distance}km)")
         asyncio.run(run_proximity(limit=args.limit, max_distance_km=args.max_distance))

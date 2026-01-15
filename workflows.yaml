@@ -13,8 +13,8 @@ workflows:
   #   schedule: "*/5 * * * *"  # Every 5 minutes
   #   enabled: true
 
-  # launcher:
-  #   description: Mark scored hotels as live based on quality criteria
-  #   command: uv run main.py launcher
-  #   schedule: "0 8 * * *"  # Daily at 8am
-  #   enabled: true
+  launcher:
+    description: Launch fully enriched hotels (mark as live)
+    command: uv run python workflows/launcher.py launch-all
+    schedule: "*/5 * * * *"  # Every 5 minutes
+    enabled: true
