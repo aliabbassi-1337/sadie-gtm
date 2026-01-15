@@ -33,6 +33,7 @@ from loguru import logger
 
 from db.client import init_db, close_db
 from services.reporting.service import Service
+from infra import slack
 
 
 async def show_status() -> None:
@@ -86,7 +87,7 @@ async def preview_launchable(limit: int) -> None:
         await close_db()
 
 
-async def launch_batch(limit: int) -> None:
+async def launch_batch(limit: int, notify: bool = False) -> None:
     """Launch a batch of hotels (multi-worker safe)."""
     await init_db()
     try:
@@ -97,13 +98,24 @@ async def launch_batch(limit: int) -> None:
         # Atomically claim and launch hotels (safe for multiple EC2 instances)
         count = await service.launch_ready(limit=limit)
 
+        pending = await service.get_launchable_count()
+        total_launched = await service.get_launched_count()
+
         logger.info("=" * 60)
         logger.info("LAUNCH COMPLETE")
         logger.info("=" * 60)
         logger.info(f"Hotels launched this batch: {count}")
-        logger.info(f"Hotels still pending: {await service.get_launchable_count()}")
-        logger.info(f"Total launched (all time): {await service.get_launched_count()}")
+        logger.info(f"Hotels still pending: {pending}")
+        logger.info(f"Total launched (all time): {total_launched}")
         logger.info("=" * 60)
+
+        if notify and count > 0:
+            slack.send_message(
+                f"*Hotel Launch Complete*\n"
+                f"• Hotels launched: {count}\n"
+                f"• Still pending: {pending}\n"
+                f"• Total launched (all time): {total_launched}"
+            )
 
     finally:
         await close_db()
@@ -162,6 +174,11 @@ Notes:
         default=100,
         help="Max hotels to launch per batch (default: 100)"
     )
+    launch_parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send Slack notification after launch"
+    )
 
     # Keep launch-all as alias for backwards compatibility
     subparsers.add_parser(
@@ -176,9 +193,9 @@ Notes:
     elif args.command == "preview":
         asyncio.run(preview_launchable(limit=args.limit))
     elif args.command == "launch":
-        asyncio.run(launch_batch(limit=args.limit))
+        asyncio.run(launch_batch(limit=args.limit, notify=args.notify))
     elif args.command == "launch-all":
-        asyncio.run(launch_batch(limit=10000))
+        asyncio.run(launch_batch(limit=10000, notify=True))
     else:
         parser.print_help()
 
