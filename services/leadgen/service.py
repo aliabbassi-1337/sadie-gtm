@@ -91,22 +91,6 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def claim_hotels_for_detection(self, limit: int = 100) -> List[Hotel]:
-        """
-        Atomically claim hotels for processing (multi-worker safe).
-        Returns list of claimed Hotel models.
-        """
-        pass
-
-    @abstractmethod
-    async def reset_stale_processing_hotels(self) -> None:
-        """
-        DEPRECATED: No longer needed with new status system.
-        Detection is tracked by hotel_booking_engines records.
-        """
-        pass
-
-    @abstractmethod
     async def get_hotels_by_ids(self, hotel_ids: List[int]) -> List[Hotel]:
         """
         Get hotels by list of IDs.
@@ -391,18 +375,6 @@ class Service(IService):
                 errors += 1
 
         return (detected, errors)
-
-    async def claim_hotels_for_detection(self, limit: int = 100) -> List[Hotel]:
-        """Atomically claim hotels for processing (multi-worker safe)."""
-        return await repo.claim_hotels_for_detection(limit=limit)
-
-    async def reset_stale_processing_hotels(self) -> None:
-        """DEPRECATED: No longer needed with new status system.
-
-        Previously reset hotels stuck in status=10 (processing).
-        Now detection is tracked by hotel_booking_engines records, not status.
-        """
-        logger.warning("reset_stale_processing_hotels is deprecated - no action taken")
 
     async def get_hotels_by_ids(self, hotel_ids: List[int]) -> List[Hotel]:
         """Get hotels by list of IDs."""

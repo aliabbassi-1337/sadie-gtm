@@ -76,29 +76,6 @@ async def get_hotels_pending_detection(limit: int = 100) -> List[Hotel]:
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
-async def claim_hotels_for_detection(limit: int = 100) -> List[Hotel]:
-    """Atomically claim hotels for processing (multi-worker safe).
-
-    Uses FOR UPDATE SKIP LOCKED so multiple workers can run concurrently
-    without grabbing the same hotels. Updates updated_at timestamp.
-    Detection completion is tracked by hotel_booking_engines record.
-
-    Returns list of claimed hotels.
-    """
-    async with get_conn() as conn:
-        results = await queries.claim_hotels_for_detection(conn, limit=limit)
-        return [Hotel.model_validate(dict(row)) for row in results]
-
-
-async def reset_stale_processing_hotels() -> None:
-    """DEPRECATED: No longer needed with new status system.
-
-    Previously reset hotels stuck in status=10 (processing).
-    Now detection is tracked by hotel_booking_engines records.
-    """
-    pass
-
-
 async def update_hotel_status(
     hotel_id: int,
     status: int,
