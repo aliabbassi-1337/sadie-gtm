@@ -27,6 +27,7 @@ from db.client import init_db, close_db
 from services.leadgen.service import Service
 from services.leadgen.detector import DetectionConfig, BatchDetector, set_engine_patterns
 from infra.sqs import receive_messages, delete_message, get_queue_url, get_queue_attributes
+from infra import slack
 
 
 # RAM-based presets
@@ -121,6 +122,7 @@ async def worker_loop(
     batch_concurrency: int = 5,
     debug: bool = False,
     max_messages: int = 0,
+    notify: bool = False,
 ):
     """Main worker loop - poll SQS and process messages.
 
@@ -129,6 +131,7 @@ async def worker_loop(
         batch_concurrency: Concurrent hotels within each batch
         debug: Enable debug logging
         max_messages: Max messages to process (0 = unlimited)
+        notify: Send Slack notification on completion
     """
     global shutdown_requested
 
@@ -219,6 +222,22 @@ async def worker_loop(
             logger.info(f"Hit rate:           {total_detected / total_processed * 100:.1f}%")
         logger.info("=" * 60)
 
+        # Send Slack notification
+        if notify and total_processed > 0:
+            hit_rate = total_detected / total_processed * 100 if total_processed > 0 else 0
+            slack.send_message(
+                f"*Detection Consumer Complete*\n"
+                f"• Hotels processed: {total_processed}\n"
+                f"• Engines detected: {total_detected}\n"
+                f"• Hit rate: {hit_rate:.1f}%\n"
+                f"• Errors: {total_errors}"
+            )
+
+    except Exception as e:
+        logger.error(f"Detection consumer failed: {e}")
+        if notify:
+            slack.send_error("Detection Consumer", str(e))
+        raise
     finally:
         await close_db()
 
@@ -277,6 +296,11 @@ Environment:
         action="store_true",
         help="Enable debug logging"
     )
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send Slack notification on completion"
+    )
 
     args = parser.parse_args()
 
@@ -307,6 +331,7 @@ Environment:
         batch_concurrency=batch_concurrency,
         debug=args.debug,
         max_messages=args.max_messages,
+        notify=args.notify,
     ))
 
 

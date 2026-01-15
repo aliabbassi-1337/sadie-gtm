@@ -18,15 +18,28 @@ from loguru import logger
 
 from db.client import init_db, close_db
 from services.leadgen.service import Service
+from infra import slack
 
 
-async def run(limit: int = 1000, batch_size: int = 20):
+async def run(limit: int = 1000, batch_size: int = 20, notify: bool = False):
     """Enqueue hotels for detection."""
     await init_db()
     try:
         service = Service()
         count = await service.enqueue_hotels_for_detection(limit=limit, batch_size=batch_size)
         logger.info(f"Enqueued {count} hotels for detection")
+
+        if notify and count > 0:
+            slack.send_message(
+                f"*Detection Queue Updated*\n"
+                f"• Hotels enqueued: {count}\n"
+                f"• Batch size: {batch_size}"
+            )
+    except Exception as e:
+        logger.error(f"Enqueue failed: {e}")
+        if notify:
+            slack.send_error("Detection Enqueue", str(e))
+        raise
     finally:
         await close_db()
 
@@ -63,11 +76,16 @@ Environment:
         default=20,
         help="Hotels per SQS message (default: 20)"
     )
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send Slack notification after enqueue"
+    )
 
     args = parser.parse_args()
 
     logger.info(f"Enqueuing up to {args.limit} hotels (batch_size={args.batch_size})")
-    asyncio.run(run(limit=args.limit, batch_size=args.batch_size))
+    asyncio.run(run(limit=args.limit, batch_size=args.batch_size, notify=args.notify))
 
 
 if __name__ == "__main__":

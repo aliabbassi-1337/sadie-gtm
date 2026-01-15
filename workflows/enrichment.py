@@ -34,9 +34,10 @@ from loguru import logger
 
 from db.client import init_db, close_db
 from services.enrichment.service import Service
+from infra import slack
 
 
-async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int = 15) -> None:
+async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int = 15, notify: bool = False) -> None:
     """Run room count enrichment."""
     await init_db()
     try:
@@ -64,11 +65,23 @@ async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int 
         logger.info(f"Hotels enriched: {count}")
         logger.info("=" * 60)
 
+        if notify and count > 0:
+            slack.send_message(
+                f"*Room Count Enrichment Complete*\n"
+                f"• Hotels enriched: {count}\n"
+                f"• Mode: {mode}"
+            )
+
+    except Exception as e:
+        logger.error(f"Room count enrichment failed: {e}")
+        if notify:
+            slack.send_error("Room Count Enrichment", str(e))
+        raise
     finally:
         await close_db()
 
 
-async def run_proximity(limit: int, max_distance_km: float) -> None:
+async def run_proximity(limit: int, max_distance_km: float, notify: bool = False) -> None:
     """Run customer proximity calculation."""
     await init_db()
     try:
@@ -94,6 +107,18 @@ async def run_proximity(limit: int, max_distance_km: float) -> None:
         logger.info(f"Hotels with nearby customers: {count}")
         logger.info("=" * 60)
 
+        if notify and count > 0:
+            slack.send_message(
+                f"*Proximity Calculation Complete*\n"
+                f"• Hotels processed: {count}\n"
+                f"• Max distance: {max_distance_km}km"
+            )
+
+    except Exception as e:
+        logger.error(f"Proximity calculation failed: {e}")
+        if notify:
+            slack.send_error("Proximity Calculation", str(e))
+        raise
     finally:
         await close_db()
 
@@ -158,6 +183,11 @@ Examples:
         default=15,
         help="Max concurrent requests in paid tier mode (default: 15)"
     )
+    room_parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send Slack notification after enrichment"
+    )
 
     # Proximity command
     prox_parser = subparsers.add_parser(
@@ -176,6 +206,11 @@ Examples:
         default=100.0,
         help="Max distance in km to search for customers (default: 100)"
     )
+    prox_parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send Slack notification after calculation"
+    )
 
     # Status command
     subparsers.add_parser("status", help="Show enrichment status")
@@ -189,10 +224,11 @@ Examples:
             limit=args.limit,
             free_tier=args.free_tier,
             concurrency=args.concurrency,
+            notify=args.notify,
         ))
     elif args.command == "proximity":
         logger.info(f"Running proximity calculation (limit={args.limit}, max_distance={args.max_distance}km)")
-        asyncio.run(run_proximity(limit=args.limit, max_distance_km=args.max_distance))
+        asyncio.run(run_proximity(limit=args.limit, max_distance_km=args.max_distance, notify=args.notify))
     elif args.command == "status":
         asyncio.run(show_status())
     else:

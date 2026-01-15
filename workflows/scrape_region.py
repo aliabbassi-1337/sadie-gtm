@@ -62,6 +62,7 @@ from loguru import logger
 
 from db.client import init_db, close_db
 from services.leadgen.service import Service, ScrapeEstimate, CITY_COORDINATES
+from infra import slack
 
 
 def print_estimate(estimate: ScrapeEstimate, region_name: str):
@@ -90,6 +91,8 @@ async def scrape_region_workflow(
     center_lng: float,
     radius_km: float,
     cell_size_km: float,
+    region_name: str = "Region",
+    notify: bool = False,
 ) -> int:
     """Scrape hotels in a circular region."""
     await init_db()
@@ -98,12 +101,25 @@ async def scrape_region_workflow(
         service = Service()
         count = await service.scrape_region(center_lat, center_lng, radius_km, cell_size_km)
         logger.info(f"Scrape complete: {count} hotels saved to database")
+
+        if notify and count > 0:
+            slack.send_message(
+                f"*Scrape Complete*\n"
+                f"• Region: {region_name}\n"
+                f"• Hotels scraped: {count}"
+            )
+
         return count
+    except Exception as e:
+        logger.error(f"Scrape failed: {e}")
+        if notify:
+            slack.send_error("Region Scrape", str(e))
+        raise
     finally:
         await close_db()
 
 
-async def scrape_state_workflow(state: str, cell_size_km: float) -> int:
+async def scrape_state_workflow(state: str, cell_size_km: float, notify: bool = False) -> int:
     """Scrape hotels in a state."""
     await init_db()
 
@@ -111,7 +127,20 @@ async def scrape_state_workflow(state: str, cell_size_km: float) -> int:
         service = Service()
         count = await service.scrape_state(state, cell_size_km)
         logger.info(f"Scrape complete: {count} hotels saved to database")
+
+        if notify and count > 0:
+            slack.send_message(
+                f"*Scrape Complete*\n"
+                f"• State: {state.title()}\n"
+                f"• Hotels scraped: {count}"
+            )
+
         return count
+    except Exception as e:
+        logger.error(f"State scrape failed: {e}")
+        if notify:
+            slack.send_error("State Scrape", str(e))
+        raise
     finally:
         await close_db()
 
@@ -140,6 +169,9 @@ def main():
     # Debug logging
     parser.add_argument("--debug", action="store_true", help="Enable debug logging (shows filtered hotels)")
 
+    # Slack notification
+    parser.add_argument("--notify", action="store_true", help="Send Slack notification after scrape")
+
     args = parser.parse_args()
 
     # Configure logging
@@ -160,21 +192,23 @@ def main():
             estimate = service.estimate_region(lat, lng, args.radius_km, cell_size)
             print_estimate(estimate, f"City: {args.city.replace('_', ' ').title()} r={args.radius_km}km cell={cell_size}km")
         else:
-            asyncio.run(scrape_region_workflow(lat, lng, args.radius_km, cell_size))
+            region_name = args.city.replace('_', ' ').title()
+            asyncio.run(scrape_region_workflow(lat, lng, args.radius_km, cell_size, region_name, args.notify))
 
     elif args.state:
         if args.estimate:
             estimate = service.estimate_state(args.state, cell_size)
             print_estimate(estimate, f"State: {args.state.title()} cell={cell_size}km")
         else:
-            asyncio.run(scrape_state_workflow(args.state, cell_size))
+            asyncio.run(scrape_state_workflow(args.state, cell_size, args.notify))
 
     elif args.center_lat and args.center_lng:
         if args.estimate:
             estimate = service.estimate_region(args.center_lat, args.center_lng, args.radius_km, cell_size)
             print_estimate(estimate, f"Region: ({args.center_lat}, {args.center_lng}) r={args.radius_km}km cell={cell_size}km")
         else:
-            asyncio.run(scrape_region_workflow(args.center_lat, args.center_lng, args.radius_km, cell_size))
+            region_name = f"({args.center_lat}, {args.center_lng})"
+            asyncio.run(scrape_region_workflow(args.center_lat, args.center_lng, args.radius_km, cell_size, region_name, args.notify))
 
     else:
         parser.error("Provide --city, --state, or --center-lat and --center-lng")
