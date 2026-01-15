@@ -937,8 +937,8 @@ class HotelProcessor:
                     result.booking_engine_domain = ""
                     result.error = "junk_booking_url"
 
-            if not result.booking_url and result.booking_engine in ("", "unknown"):
-                result.error = "no_booking_found"
+            # Note: no_booking_found is not an error - it's a valid outcome
+            # Don't set result.error for this case
 
             self._log(f"  Engine: {result.booking_engine} ({result.booking_engine_domain or 'n/a'})")
 

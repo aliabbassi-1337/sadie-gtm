@@ -53,7 +53,7 @@ INSERT INTO booking_engines (name, domains, tier) VALUES
 ('Streamline', ARRAY['streamlinevrs.com', 'resortpro'], 1),
 ('Triptease', ARRAY['triptease.io', 'triptease.com', 'onboard.triptease'], 1),
 ('Yelp Reservations', ARRAY['yelp.com/reservations'], 1),
-('Pegasus', ARRAY['pegasus.io', 'pegs.io'], 1),
+('Pegasus', ARRAY['pegasus.io', 'pegs.io', 'pegsbe.com'], 1),
 ('TravelTripper / Pegasus', ARRAY['traveltrip.com'], 1),
 ('OwnerReservations', ARRAY['ownerreservations.com', 'secure.ownerreservations.com'], 1),
 ('GuestRoomGenie', ARRAY['guestroomgenie.com', 'secure.guestroomgenie.com'], 1),
