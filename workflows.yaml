@@ -1,6 +1,6 @@
 # Workflow definitions for Sadie GTM
 #
-# Pipeline: Scrape → Enqueue → Detect (EC2) → Enrich (EC2) → Launch (EC2) → Export
+# Pipeline: Scrape (local) → Enqueue → Detect (EC2) → Enrich (EC2) → Launch (EC2) → Export
 #
 # Status values:
 #   -2 = location_mismatch (rejected)
@@ -11,11 +11,13 @@
 # =============================================================================
 # LOCAL WORKFLOWS (run on your machine)
 # =============================================================================
+# Scraping stays local to control Serper API rate limits
 local:
   scraper:
     description: Scrape hotels from Serper for a region
     command: uv run python workflows/scrape_region.py
     # Example: uv run python workflows/scrape_region.py "Florida" "USA"
+    # Note: Keep local to control Serper rate limits
 
   enqueue_detection:
     description: Queue scraped hotels to SQS for detection workers
@@ -26,12 +28,18 @@ local:
     command: uv run python workflows/export.py --all-states
     # TODO: Add Slack slash command integration
 
+  status:
+    description: Check pipeline status (pending, processing, launched counts)
+    command: uv run python workflows/launcher.py status
+
 # =============================================================================
 # EC2 WORKFLOWS (auto-start on instance boot via systemd/cron)
 # =============================================================================
+# These run automatically when you start EC2 instances
+# Configure once in AMI, then just start/stop instances as needed
 ec2:
   detection_consumer:
-    description: Poll SQS and process hotel detection
+    description: Poll SQS and process hotel detection (parallelizable)
     command: uv run python workflows/detection_consumer.py --concurrency 6
     type: systemd  # Runs continuously while instance is up
 
