@@ -77,18 +77,28 @@ async def get_launchable_count() -> int:
         return result["count"] if result else 0
 
 
-async def launch_hotels(hotel_ids: List[int]) -> None:
-    """Mark hotels as launched (status=1)."""
+async def launch_hotels(hotel_ids: List[int]) -> List[int]:
+    """Atomically claim and launch specific hotels (multi-worker safe).
+
+    Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
+    Returns list of hotel IDs that were actually launched.
+    """
     if not hotel_ids:
-        return
+        return []
     async with get_conn() as conn:
-        await queries.launch_hotels(conn, hotel_ids=hotel_ids)
+        results = await queries.launch_hotels(conn, hotel_ids=hotel_ids)
+        return [row["id"] for row in results]
 
 
-async def launch_all_ready_hotels() -> None:
-    """Mark ALL ready hotels as launched (status=1)."""
+async def launch_ready_hotels(limit: int = 100) -> List[int]:
+    """Atomically claim and launch ready hotels (multi-worker safe).
+
+    Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
+    Returns list of hotel IDs that were launched.
+    """
     async with get_conn() as conn:
-        await queries.launch_all_ready_hotels(conn)
+        results = await queries.launch_ready_hotels(conn, limit=limit)
+        return [row["id"] for row in results]
 
 
 async def get_launched_count() -> int:

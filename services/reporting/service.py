@@ -65,16 +65,18 @@ class IService(ABC):
 
     @abstractmethod
     async def launch_hotels(self, hotel_ids: List[int]) -> int:
-        """Mark specific hotels as launched (status=1).
+        """Atomically claim and launch specific hotels (multi-worker safe).
 
+        Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
         Returns the number of hotels actually launched.
         """
         pass
 
     @abstractmethod
-    async def launch_all_ready(self) -> int:
-        """Mark ALL ready hotels as launched (status=1).
+    async def launch_ready(self, limit: int = 100) -> int:
+        """Atomically claim and launch ready hotels (multi-worker safe).
 
+        Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
         Returns the number of hotels launched.
         """
         pass
@@ -381,33 +383,31 @@ class Service(IService):
         return await repo.get_launchable_count()
 
     async def launch_hotels(self, hotel_ids: List[int]) -> int:
-        """Mark specific hotels as launched (status=1)."""
+        """Atomically claim and launch specific hotels (multi-worker safe).
+
+        Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
+        Returns the number of hotels actually launched.
+        """
         if not hotel_ids:
             return 0
 
-        # Get count before to determine how many will be launched
-        launchable = await repo.get_launchable_hotels(limit=len(hotel_ids) + 100)
-        launchable_ids = {h.id for h in launchable}
-        valid_ids = [hid for hid in hotel_ids if hid in launchable_ids]
+        launched_ids = await repo.launch_hotels(hotel_ids)
+        if launched_ids:
+            logger.info(f"Launched {len(launched_ids)} hotels: {launched_ids}")
+        return len(launched_ids)
 
-        if not valid_ids:
-            return 0
+    async def launch_ready(self, limit: int = 100) -> int:
+        """Atomically claim and launch ready hotels (multi-worker safe).
 
-        await repo.launch_hotels(valid_ids)
-        logger.info(f"Launched {len(valid_ids)} hotels")
-        return len(valid_ids)
-
-    async def launch_all_ready(self) -> int:
-        """Mark ALL ready hotels as launched (status=1)."""
-        count_before = await repo.get_launchable_count()
-
-        if count_before == 0:
+        Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently.
+        Returns the number of hotels launched.
+        """
+        launched_ids = await repo.launch_ready_hotels(limit=limit)
+        if launched_ids:
+            logger.info(f"Launched {len(launched_ids)} hotels: {launched_ids}")
+        else:
             logger.info("No hotels ready to launch")
-            return 0
-
-        await repo.launch_all_ready_hotels()
-        logger.info(f"Launched {count_before} hotels")
-        return count_before
+        return len(launched_ids)
 
     async def get_launched_count(self) -> int:
         """Count hotels that have been launched."""

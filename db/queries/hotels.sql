@@ -455,12 +455,11 @@ INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0;
 
--- name: launch_hotels!
--- Mark hotels as launched (status=1)
--- Only launches hotels that meet all criteria
-UPDATE hotels
-SET status = 1, updated_at = CURRENT_TIMESTAMP
-WHERE id IN (
+-- name: launch_hotels
+-- Atomically claim and launch hotels (multi-worker safe)
+-- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
+-- Returns launched hotel IDs for logging/tracking
+WITH claimed AS (
     SELECT h.id
     FROM hotels h
     INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
@@ -468,20 +467,32 @@ WHERE id IN (
     INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
       AND h.id = ANY(:hotel_ids)
-);
-
--- name: launch_all_ready_hotels!
--- Mark ALL ready hotels as launched (status=1)
+    FOR UPDATE OF h SKIP LOCKED
+)
 UPDATE hotels
 SET status = 1, updated_at = CURRENT_TIMESTAMP
-WHERE id IN (
+WHERE id IN (SELECT id FROM claimed)
+RETURNING id;
+
+-- name: launch_ready_hotels
+-- Atomically claim and launch up to :limit ready hotels (multi-worker safe)
+-- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
+-- Returns launched hotel IDs for logging/tracking
+WITH claimed AS (
     SELECT h.id
     FROM hotels h
     INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
     INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
     INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
-);
+    ORDER BY h.id
+    LIMIT :limit
+    FOR UPDATE OF h SKIP LOCKED
+)
+UPDATE hotels
+SET status = 1, updated_at = CURRENT_TIMESTAMP
+WHERE id IN (SELECT id FROM claimed)
+RETURNING id;
 
 -- name: get_launched_count^
 -- Count hotels that have been launched (status=1)

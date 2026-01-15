@@ -6,7 +6,7 @@ from services.reporting.repo import (
     get_launchable_hotels,
     get_launchable_count,
     launch_hotels,
-    launch_all_ready_hotels,
+    launch_ready_hotels,
     get_launched_count,
 )
 from services.reporting.service import Service
@@ -332,31 +332,34 @@ async def test_launch_hotels_ignores_incomplete():
 
 
 # ============================================================================
-# REPO TESTS - launch_all_ready_hotels
+# REPO TESTS - launch_ready_hotels
 # ============================================================================
 
 
 @pytest.mark.asyncio
-async def test_launch_all_ready_hotels():
-    """Test launching all ready hotels at once."""
+async def test_launch_ready_hotels():
+    """Test launching ready hotels with limit (multi-worker safe)."""
     hotel_ids = []
     try:
         # Create multiple launchable hotels
         for i in range(2):
             hotel_id = await create_launchable_hotel(
-                name=f"Test Launch All Hotel {i}",
-                city="LaunchAllCity",
-                state="LaunchAllState",
+                name=f"Test Launch Ready Hotel {i}",
+                city="LaunchReadyCity",
+                state="LaunchReadyState",
             )
             hotel_ids.append(hotel_id)
 
-        # Launch all ready hotels
-        await launch_all_ready_hotels()
+        # Launch ready hotels with limit
+        launched_ids = await launch_ready_hotels(limit=100)
 
         # Verify our test hotels are launched
         for hotel_id in hotel_ids:
             hotel = await get_hotel_by_id(hotel_id)
             assert hotel.status == 1, f"Hotel {hotel_id} should be launched"
+
+        # Verify returned IDs include our hotels
+        assert all(hid in launched_ids for hid in hotel_ids)
 
     except Exception as e:
         if "existing_customers" in str(e) or "violates foreign key" in str(e):
@@ -461,11 +464,11 @@ async def test_service_launch_hotels_invalid():
 
 
 @pytest.mark.asyncio
-async def test_service_launch_all_ready():
-    """Test service layer launch_all_ready."""
+async def test_service_launch_ready():
+    """Test service layer launch_ready (multi-worker safe)."""
     service = Service()
     # Just verify it doesn't error - count depends on existing data
-    count = await service.launch_all_ready()
+    count = await service.launch_ready(limit=100)
     assert isinstance(count, int)
     assert count >= 0
 

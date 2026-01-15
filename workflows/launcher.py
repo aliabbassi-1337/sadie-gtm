@@ -8,10 +8,7 @@ USAGE:
 2. Preview launchable hotels:
    uv run python workflows/launcher.py preview --limit 50
 
-3. Launch all ready hotels:
-   uv run python workflows/launcher.py launch-all
-
-4. Launch specific batch:
+3. Launch a batch of ready hotels:
    uv run python workflows/launcher.py launch --limit 100
 
 NOTES:
@@ -21,7 +18,7 @@ NOTES:
   - A record in hotel_room_count with status=1 (successful enrichment)
   - A record in hotel_customer_proximity (has proximity)
 - Launching sets the hotel status to 1 (live)
-- This operation is idempotent (safe to re-run)
+- Uses FOR UPDATE SKIP LOCKED for multi-worker safety (can run on multiple EC2 instances)
 """
 
 import sys
@@ -90,53 +87,21 @@ async def preview_launchable(limit: int) -> None:
 
 
 async def launch_batch(limit: int) -> None:
-    """Launch a batch of hotels."""
+    """Launch a batch of hotels (multi-worker safe)."""
     await init_db()
     try:
         service = Service()
 
-        # Get launchable hotels
-        hotels = await service.get_launchable_hotels(limit=limit)
+        logger.info(f"Attempting to launch up to {limit} hotels...")
 
-        if not hotels:
-            logger.info("No hotels ready to launch")
-            return
-
-        hotel_ids = [h.id for h in hotels]
-        logger.info(f"Launching {len(hotel_ids)} hotels...")
-
-        count = await service.launch_hotels(hotel_ids)
+        # Atomically claim and launch hotels (safe for multiple EC2 instances)
+        count = await service.launch_ready(limit=limit)
 
         logger.info("=" * 60)
         logger.info("LAUNCH COMPLETE")
         logger.info("=" * 60)
-        logger.info(f"Hotels launched: {count}")
-        logger.info("=" * 60)
-
-    finally:
-        await close_db()
-
-
-async def launch_all() -> None:
-    """Launch all ready hotels."""
-    await init_db()
-    try:
-        service = Service()
-
-        # Get count before
-        launchable = await service.get_launchable_count()
-        if launchable == 0:
-            logger.info("No hotels ready to launch")
-            return
-
-        logger.info(f"Launching all {launchable} ready hotels...")
-
-        count = await service.launch_all_ready()
-
-        logger.info("=" * 60)
-        logger.info("LAUNCH ALL COMPLETE")
-        logger.info("=" * 60)
-        logger.info(f"Hotels launched: {count}")
+        logger.info(f"Hotels launched this batch: {count}")
+        logger.info(f"Hotels still pending: {await service.get_launchable_count()}")
         logger.info(f"Total launched (all time): {await service.get_launched_count()}")
         logger.info("=" * 60)
 
@@ -156,11 +121,16 @@ Examples:
   # Preview launchable hotels
   uv run python workflows/launcher.py preview --limit 50
 
-  # Launch a batch of hotels
-  uv run python workflows/launcher.py launch --limit 100
+  # Launch a batch of hotels (default 100)
+  uv run python workflows/launcher.py launch
 
-  # Launch ALL ready hotels
-  uv run python workflows/launcher.py launch-all
+  # Launch more hotels at once
+  uv run python workflows/launcher.py launch --limit 500
+
+Notes:
+  - Uses FOR UPDATE SKIP LOCKED for multi-worker safety
+  - Safe to run on multiple EC2 instances concurrently
+  - Each instance will claim different hotels (no duplicates)
         """
     )
 
@@ -184,19 +154,19 @@ Examples:
     # Launch command (batch)
     launch_parser = subparsers.add_parser(
         "launch",
-        help="Launch a batch of ready hotels"
+        help="Launch a batch of ready hotels (multi-worker safe)"
     )
     launch_parser.add_argument(
         "--limit", "-l",
         type=int,
         default=100,
-        help="Max hotels to launch (default: 100)"
+        help="Max hotels to launch per batch (default: 100)"
     )
 
-    # Launch-all command
+    # Keep launch-all as alias for backwards compatibility
     subparsers.add_parser(
         "launch-all",
-        help="Launch ALL ready hotels at once"
+        help="Launch all ready hotels (alias for 'launch --limit 10000')"
     )
 
     args = parser.parse_args()
@@ -208,7 +178,7 @@ Examples:
     elif args.command == "launch":
         asyncio.run(launch_batch(limit=args.limit))
     elif args.command == "launch-all":
-        asyncio.run(launch_all())
+        asyncio.run(launch_batch(limit=10000))
     else:
         parser.print_help()
 
