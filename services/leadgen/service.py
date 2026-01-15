@@ -393,8 +393,12 @@ class Service(IService):
         return await repo.claim_hotels_for_detection(limit=limit)
 
     async def reset_stale_processing_hotels(self) -> None:
-        """Reset hotels stuck in processing state (status=10) for > 30 min."""
-        await repo.reset_stale_processing_hotels()
+        """DEPRECATED: No longer needed with new status system.
+
+        Previously reset hotels stuck in status=10 (processing).
+        Now detection is tracked by hotel_booking_engines records, not status.
+        """
+        logger.warning("reset_stale_processing_hotels is deprecated - no action taken")
 
     async def get_hotels_by_ids(self, hotel_ids: List[int]) -> List[Hotel]:
         """Get hotels by list of IDs."""
@@ -403,12 +407,15 @@ class Service(IService):
     async def enqueue_hotels_for_detection(self, limit: int = 1000, batch_size: int = 20) -> int:
         """Enqueue hotels for detection via SQS.
 
-        Queries status=0 hotels, sends to SQS in batches, sets status=10.
+        Queries hotels with status=0 and no hotel_booking_engines record.
+        Sends to SQS in batches. Does NOT update status - detection is tracked
+        by presence of hotel_booking_engines record.
+
         Returns count of hotels enqueued.
         """
         from infra.sqs import send_messages_batch, get_queue_url
 
-        # Get hotels pending detection
+        # Get hotels pending detection (status=0, no booking engine record)
         hotels = await repo.get_hotels_pending_detection(limit=limit)
         if not hotels:
             return 0
@@ -426,9 +433,7 @@ class Service(IService):
         sent = send_messages_batch(queue_url, messages)
         logger.info(f"Sent {sent} messages to SQS ({len(hotel_ids)} hotels)")
 
-        # Update status to 10 (enqueued)
-        await repo.update_hotels_status_batch(hotel_ids=hotel_ids, status=10)
-
+        # No status update needed - detection is tracked by hotel_booking_engines record
         return len(hotel_ids)
     async def detect_booking_engines(self, limit: int = 100) -> int:
         """
