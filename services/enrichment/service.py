@@ -83,15 +83,15 @@ class Service(IService):
             log("Error: ROOM_COUNT_ENRICHER_AGENT_GROQ_KEY not found in .env")
             return 0
 
-        # Get hotels pending enrichment
-        hotels = await repo.get_hotels_pending_enrichment(limit=limit)
+        # Claim hotels for enrichment (multi-worker safe)
+        hotels = await repo.claim_hotels_for_enrichment(limit=limit)
 
         if not hotels:
             log("No hotels pending enrichment")
             return 0
 
         mode = "free tier (sequential)" if free_tier else f"paid tier ({concurrency} concurrent)"
-        log(f"Processing {len(hotels)} hotels for enrichment ({mode})")
+        log(f"Claimed {len(hotels)} hotels for enrichment ({mode})")
 
         async def process_hotel(client: httpx.AsyncClient, hotel, semaphore: asyncio.Semaphore = None):
             """Process a single hotel, optionally with semaphore."""

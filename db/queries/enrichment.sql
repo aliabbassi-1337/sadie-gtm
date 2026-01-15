@@ -1,7 +1,6 @@
 -- name: get_hotels_pending_enrichment
--- Get hotels that need room count enrichment
+-- Get hotels that need room count enrichment (read-only, for status display)
 -- Criteria: has website, not already in hotel_room_count
--- Only select columns needed for enrichment
 SELECT
     h.id,
     h.name,
@@ -15,6 +14,37 @@ WHERE h.website IS NOT NULL
   AND hrc.id IS NULL
 ORDER BY h.updated_at DESC
 LIMIT :limit;
+
+-- name: claim_hotels_for_enrichment
+-- Atomically claim hotels for enrichment (multi-worker safe)
+-- Inserts status=-1 (processing) records, returns claimed hotel IDs
+-- Uses ON CONFLICT DO NOTHING so only one worker claims each hotel
+WITH pending AS (
+    SELECT h.id, h.name, h.website, h.created_at, h.updated_at
+    FROM hotels h
+    LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
+    WHERE h.website IS NOT NULL
+      AND h.website != ''
+      AND hrc.id IS NULL
+    ORDER BY h.updated_at DESC
+    LIMIT :limit
+),
+claimed AS (
+    INSERT INTO hotel_room_count (hotel_id, status)
+    SELECT id, -1 FROM pending
+    ON CONFLICT (hotel_id) DO NOTHING
+    RETURNING hotel_id
+)
+SELECT p.id, p.name, p.website, p.created_at, p.updated_at
+FROM pending p
+JOIN claimed c ON p.id = c.hotel_id;
+
+-- name: reset_stale_enrichment_claims!
+-- Reset claims stuck in processing state (status=-1) for more than N minutes
+-- Run this periodically to recover from crashed workers
+DELETE FROM hotel_room_count
+WHERE status = -1
+  AND enriched_at < NOW() - INTERVAL '30 minutes';
 
 -- name: get_pending_enrichment_count^
 -- Count hotels waiting for enrichment (has website, not yet in hotel_room_count)

@@ -10,7 +10,7 @@ from db.models.hotel_customer_proximity import HotelCustomerProximity
 
 
 async def get_hotels_pending_enrichment(limit: int = 100) -> List[Hotel]:
-    """Get hotels that need room count enrichment.
+    """Get hotels that need room count enrichment (read-only, for status display).
 
     Criteria:
     - has website
@@ -19,6 +19,28 @@ async def get_hotels_pending_enrichment(limit: int = 100) -> List[Hotel]:
     async with get_conn() as conn:
         results = await queries.get_hotels_pending_enrichment(conn, limit=limit)
         return [Hotel.model_validate(dict(row)) for row in results]
+
+
+async def claim_hotels_for_enrichment(limit: int = 100) -> List[Hotel]:
+    """Atomically claim hotels for enrichment (multi-worker safe).
+
+    Inserts status=-1 (processing) records into hotel_room_count.
+    Uses ON CONFLICT DO NOTHING so only one worker claims each hotel.
+
+    Returns list of successfully claimed hotels.
+    """
+    async with get_conn() as conn:
+        results = await queries.claim_hotels_for_enrichment(conn, limit=limit)
+        return [Hotel.model_validate(dict(row)) for row in results]
+
+
+async def reset_stale_enrichment_claims() -> None:
+    """Reset claims stuck in processing state (status=-1) for > 30 min.
+
+    Run this periodically to recover from crashed workers.
+    """
+    async with get_conn() as conn:
+        await queries.reset_stale_enrichment_claims(conn)
 
 
 async def get_pending_enrichment_count() -> int:
