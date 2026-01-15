@@ -73,8 +73,8 @@ class Service(IService):
             tmp_path = tmp.name
 
         try:
-            # S3 path: {country}/{state}/{city}.xlsx
-            s3_key = f"{country}/{state}/{city}.xlsx"
+            # S3 path: HotelLeadGen/{country}/{state}/{city}.xlsx
+            s3_key = f"HotelLeadGen/{country}/{state}/{city}.xlsx"
             s3_uri = upload_file(tmp_path, s3_key)
             logger.info(f"Uploaded city report to {s3_uri}")
             return s3_uri
@@ -105,8 +105,8 @@ class Service(IService):
             tmp_path = tmp.name
 
         try:
-            # S3 path: {country}/{state}/{state}.xlsx (state aggregate)
-            s3_key = f"{country}/{state}/{state}.xlsx"
+            # S3 path: HotelLeadGen/{country}/{state}/{state}.xlsx (state aggregate)
+            s3_key = f"HotelLeadGen/{country}/{state}/{state}.xlsx"
             s3_uri = upload_file(tmp_path, s3_key)
             logger.info(f"Uploaded state aggregate report to {s3_uri}")
             return s3_uri
