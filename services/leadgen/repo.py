@@ -153,11 +153,15 @@ async def insert_booking_engine(
 
 async def insert_hotel_booking_engine(
     hotel_id: int,
-    booking_engine_id: int,
+    booking_engine_id: Optional[int] = None,
     booking_url: Optional[str] = None,
     detection_method: Optional[str] = None,
+    status: int = 1,
 ) -> None:
-    """Link hotel to detected booking engine."""
+    """Link hotel to detected booking engine.
+
+    status: -1=failed (non-retriable), 1=success (default)
+    """
     async with get_conn() as conn:
         await queries.insert_hotel_booking_engine(
             conn,
@@ -165,6 +169,7 @@ async def insert_hotel_booking_engine(
             booking_engine_id=booking_engine_id,
             booking_url=booking_url,
             detection_method=detection_method,
+            status=status,
         )
 
 

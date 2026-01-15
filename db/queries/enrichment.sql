@@ -11,10 +11,14 @@
 --   -1 = Processing (claimed by worker)
 --    0 = Failed
 --    1 = Success
+--
+-- Status values for hotel_booking_engines.status:
+--   -1 = Failed (non-retriable)
+--    1 = Success
 
 -- name: get_hotels_pending_enrichment
 -- Get hotels that need room count enrichment (read-only, for status display)
--- Criteria: status=0 (pending), detected (in hotel_booking_engines), has website, not in hotel_room_count
+-- Criteria: status=0 (pending), successfully detected (hbe.status=1), has website, not in hotel_room_count
 SELECT
     h.id,
     h.name,
@@ -22,7 +26,7 @@ SELECT
     h.created_at,
     h.updated_at
 FROM hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.status = 0
   AND h.website IS NOT NULL
@@ -38,7 +42,7 @@ LIMIT :limit;
 WITH pending AS (
     SELECT h.id, h.name, h.website, h.created_at, h.updated_at
     FROM hotels h
-    JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+    JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
     WHERE h.status = 0
       AND h.website IS NOT NULL
@@ -65,10 +69,10 @@ WHERE status = -1
   AND enriched_at < NOW() - INTERVAL '30 minutes';
 
 -- name: get_pending_enrichment_count^
--- Count hotels waiting for enrichment (status=0, detected, has website, not in hotel_room_count)
+-- Count hotels waiting for enrichment (status=0, successfully detected, has website, not in hotel_room_count)
 SELECT COUNT(*) AS count
 FROM hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.status = 0
   AND h.website IS NOT NULL
@@ -106,7 +110,7 @@ WHERE hotel_id = :hotel_id;
 
 -- name: get_hotels_pending_proximity
 -- Get hotels that need customer proximity calculation (read-only, for status display)
--- Criteria: status=0 (pending), detected (in hotel_booking_engines), has room count (status=1), has location, not in hotel_customer_proximity
+-- Criteria: status=0 (pending), successfully detected (hbe.status=1), has room count (status=1), has location, not in hotel_customer_proximity
 SELECT
     h.id,
     h.name,
@@ -115,7 +119,7 @@ SELECT
     h.created_at,
     h.updated_at
 FROM hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0
@@ -125,10 +129,10 @@ ORDER BY h.updated_at DESC
 LIMIT :limit;
 
 -- name: get_pending_proximity_count^
--- Count hotels waiting for proximity calculation (status=0, detected, has room count, has location, not in hotel_customer_proximity)
+-- Count hotels waiting for proximity calculation (status=0, successfully detected, has room count, has location, not in hotel_customer_proximity)
 SELECT COUNT(*) AS count
 FROM hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0

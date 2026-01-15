@@ -157,11 +157,13 @@ RETURNING id;
 
 -- name: insert_hotel_booking_engine!
 -- Link hotel to detected booking engine
+-- status: -1=failed (non-retriable), 1=success
 INSERT INTO hotel_booking_engines (
     hotel_id,
     booking_engine_id,
     booking_url,
     detection_method,
+    status,
     detected_at,
     updated_at
 ) VALUES (
@@ -169,13 +171,15 @@ INSERT INTO hotel_booking_engines (
     :booking_engine_id,
     :booking_url,
     :detection_method,
+    :status,
     CURRENT_TIMESTAMP,
     CURRENT_TIMESTAMP
 )
 ON CONFLICT (hotel_id) DO UPDATE SET
-    booking_engine_id = EXCLUDED.booking_engine_id,
-    booking_url = EXCLUDED.booking_url,
-    detection_method = EXCLUDED.detection_method,
+    booking_engine_id = COALESCE(EXCLUDED.booking_engine_id, hotel_booking_engines.booking_engine_id),
+    booking_url = COALESCE(EXCLUDED.booking_url, hotel_booking_engines.booking_url),
+    detection_method = COALESCE(EXCLUDED.detection_method, hotel_booking_engines.detection_method),
+    status = EXCLUDED.status,
     updated_at = CURRENT_TIMESTAMP;
 
 -- name: get_hotels_by_ids
@@ -392,7 +396,7 @@ SELECT
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM hotels h
-INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 INNER JOIN booking_engines be ON hbe.booking_engine_id = be.id
 INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
@@ -405,7 +409,7 @@ LIMIT :limit;
 -- Count hotels ready to be launched (status=0 with all enrichment data)
 SELECT COUNT(*) AS count
 FROM hotels h
-INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0;
@@ -417,7 +421,7 @@ WHERE h.status = 0;
 WITH claimed AS (
     SELECT h.id
     FROM hotels h
-    INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+    INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
     INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
@@ -436,7 +440,7 @@ RETURNING id;
 WITH claimed AS (
     SELECT h.id
     FROM hotels h
-    INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+    INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
     INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0

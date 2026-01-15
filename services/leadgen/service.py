@@ -289,6 +289,24 @@ class Service(IService):
                 )
                 return
 
+            # Handle non-retriable errors (timeout, precheck_failed, etc.)
+            # Create a hotel_booking_engines record with status=-1 to prevent infinite retry
+            if result.error and result.error not in ("location_mismatch",):
+                await repo.insert_hotel_booking_engine(
+                    hotel_id=result.hotel_id,
+                    booking_engine_id=None,
+                    detection_method=f"error:{result.error}",
+                    status=-1,  # Failed, non-retriable
+                )
+                # Save contact info if we got any
+                if result.phone_website or result.email:
+                    await repo.update_hotel_contact_info(
+                        hotel_id=result.hotel_id,
+                        phone_website=result.phone_website or None,
+                        email=result.email or None,
+                    )
+                return
+
             if result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "unknown_booking_api"):
                 # Found a booking engine
                 # Get or create booking engine record
@@ -309,6 +327,7 @@ class Service(IService):
                     booking_engine_id=engine_id,
                     booking_url=result.booking_url or None,
                     detection_method=result.detection_method or None,
+                    status=1,  # Success
                 )
 
                 # Save phone/email but don't change status - hotel stays at PENDING (0)
