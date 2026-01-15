@@ -301,7 +301,7 @@ LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.city = :city
   AND h.state = :state
-  AND h.status = 1
+  AND h.status = 3
 ORDER BY h.name;
 
 -- name: get_leads_for_state
@@ -331,7 +331,7 @@ LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
-  AND h.status = 1
+  AND h.status = 3
 ORDER BY h.city, h.name;
 
 -- name: get_city_stats^
@@ -381,7 +381,7 @@ JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.city = :city
   AND h.state = :state
-  AND h.status = 1
+  AND h.status = 3
 GROUP BY be.name
 ORDER BY hotel_count DESC;
 
@@ -394,15 +394,15 @@ FROM hotels h
 JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.status = 1
+  AND h.status = 3
 GROUP BY be.name
 ORDER BY hotel_count DESC;
 
 -- name: get_cities_in_state
--- Get all cities in a state that have detected hotels
+-- Get all cities in a state that have enriched hotels
 SELECT DISTINCT city
 FROM hotels
 WHERE state = :state
   AND city IS NOT NULL
-  AND status = 1
+  AND status = 3
 ORDER BY city;
