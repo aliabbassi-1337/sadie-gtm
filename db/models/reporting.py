@@ -68,3 +68,20 @@ class ReportStats(BaseModel):
     location_name: str  # City name or State name
     stats: CityStats
     top_engines: List[EngineCount]
+
+
+class LaunchableHotel(BaseModel):
+    """Hotel ready to be launched (fully enriched)."""
+
+    id: int
+    hotel_name: str
+    website: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    booking_engine_name: Optional[str] = None
+    booking_engine_tier: Optional[int] = None
+    room_count: Optional[int] = None
+    nearest_customer_name: Optional[str] = None
+    nearest_customer_distance_km: Optional[Decimal] = None
+
+    model_config = ConfigDict(from_attributes=True)

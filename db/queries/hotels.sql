@@ -79,61 +79,65 @@ WHERE id = :hotel_id;
 
 -- name: get_hotels_pending_detection
 -- Get hotels that need booking engine detection
--- Criteria: status=0 (scraped), website not null, not a big chain
+-- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet
 SELECT
-    id,
-    name,
-    website,
-    phone_google,
-    phone_website,
-    email,
-    city,
-    state,
-    country,
-    address,
-    ST_Y(location::geometry) AS latitude,
-    ST_X(location::geometry) AS longitude,
-    rating,
-    review_count,
-    status,
-    source,
-    created_at,
-    updated_at
-FROM hotels
-WHERE status = 0
-  AND website IS NOT NULL
-  AND website != ''
-  AND LOWER(website) NOT LIKE '%marriott.com%'
-  AND LOWER(website) NOT LIKE '%hilton.com%'
-  AND LOWER(website) NOT LIKE '%ihg.com%'
-  AND LOWER(website) NOT LIKE '%hyatt.com%'
-  AND LOWER(website) NOT LIKE '%wyndham.com%'
-  AND LOWER(website) NOT LIKE '%choicehotels.com%'
-  AND LOWER(website) NOT LIKE '%bestwestern.com%'
-  AND LOWER(website) NOT LIKE '%radissonhotels.com%'
-  AND LOWER(website) NOT LIKE '%accor.com%'
+    h.id,
+    h.name,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.city,
+    h.state,
+    h.country,
+    h.address,
+    ST_Y(h.location::geometry) AS latitude,
+    ST_X(h.location::geometry) AS longitude,
+    h.rating,
+    h.review_count,
+    h.status,
+    h.source,
+    h.created_at,
+    h.updated_at
+FROM hotels h
+LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.status = 0
+  AND hbe.hotel_id IS NULL
+  AND h.website IS NOT NULL
+  AND h.website != ''
+  AND LOWER(h.website) NOT LIKE '%marriott.com%'
+  AND LOWER(h.website) NOT LIKE '%hilton.com%'
+  AND LOWER(h.website) NOT LIKE '%ihg.com%'
+  AND LOWER(h.website) NOT LIKE '%hyatt.com%'
+  AND LOWER(h.website) NOT LIKE '%wyndham.com%'
+  AND LOWER(h.website) NOT LIKE '%choicehotels.com%'
+  AND LOWER(h.website) NOT LIKE '%bestwestern.com%'
+  AND LOWER(h.website) NOT LIKE '%radissonhotels.com%'
+  AND LOWER(h.website) NOT LIKE '%accor.com%'
 LIMIT :limit;
 
 -- name: claim_hotels_for_detection
 -- Atomically claim hotels for processing (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple workers grab different rows
--- Sets status=10 (processing) to mark as claimed
+-- Updates updated_at to mark as being processed
 UPDATE hotels
-SET status = 10, updated_at = CURRENT_TIMESTAMP
+SET updated_at = CURRENT_TIMESTAMP
 WHERE id IN (
-    SELECT id FROM hotels
-    WHERE status = 0
-      AND website IS NOT NULL
-      AND website != ''
-      AND LOWER(website) NOT LIKE '%marriott.com%'
-      AND LOWER(website) NOT LIKE '%hilton.com%'
-      AND LOWER(website) NOT LIKE '%ihg.com%'
-      AND LOWER(website) NOT LIKE '%hyatt.com%'
-      AND LOWER(website) NOT LIKE '%wyndham.com%'
-      AND LOWER(website) NOT LIKE '%choicehotels.com%'
-      AND LOWER(website) NOT LIKE '%bestwestern.com%'
-      AND LOWER(website) NOT LIKE '%radissonhotels.com%'
-      AND LOWER(website) NOT LIKE '%accor.com%'
+    SELECT h.id FROM hotels h
+    LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+    WHERE h.status = 0
+      AND hbe.hotel_id IS NULL
+      AND h.website IS NOT NULL
+      AND h.website != ''
+      AND LOWER(h.website) NOT LIKE '%marriott.com%'
+      AND LOWER(h.website) NOT LIKE '%hilton.com%'
+      AND LOWER(h.website) NOT LIKE '%ihg.com%'
+      AND LOWER(h.website) NOT LIKE '%hyatt.com%'
+      AND LOWER(h.website) NOT LIKE '%wyndham.com%'
+      AND LOWER(h.website) NOT LIKE '%choicehotels.com%'
+      AND LOWER(h.website) NOT LIKE '%bestwestern.com%'
+      AND LOWER(h.website) NOT LIKE '%radissonhotels.com%'
+      AND LOWER(h.website) NOT LIKE '%accor.com%'
     FOR UPDATE SKIP LOCKED
     LIMIT :limit
 )
@@ -156,14 +160,6 @@ RETURNING
     source,
     created_at,
     updated_at;
-
--- name: reset_stale_processing_hotels!
--- Reset hotels stuck in processing state (status=10) for more than N minutes
--- Run this periodically to recover from crashed workers
-UPDATE hotels
-SET status = 0, updated_at = CURRENT_TIMESTAMP
-WHERE status = 10
-  AND updated_at < NOW() - INTERVAL '30 minutes';
 
 -- name: update_hotel_status!
 -- Update hotel status after detection
@@ -275,6 +271,7 @@ ORDER BY count DESC;
 
 -- name: get_leads_for_city
 -- Get hotel leads for a city with booking engine, room count, and nearest customer
+-- Only returns launched hotels (status=1)
 SELECT
     h.id,
     h.name AS hotel_name,
@@ -301,11 +298,12 @@ LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.city = :city
   AND h.state = :state
-  AND h.status = 3
+  AND h.status = 1
 ORDER BY h.name;
 
 -- name: get_leads_for_state
 -- Get hotel leads for an entire state with booking engine, room count, and nearest customer
+-- Only returns launched hotels (status=1)
 SELECT
     h.id,
     h.name AS hotel_name,
@@ -331,7 +329,7 @@ LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
-  AND h.status = 3
+  AND h.status = 1
 ORDER BY h.city, h.name;
 
 -- name: get_city_stats^
@@ -372,7 +370,7 @@ LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state;
 
 -- name: get_top_engines_for_city
--- Get top booking engines for a city
+-- Get top booking engines for a city (launched hotels only)
 SELECT
     be.name AS engine_name,
     COUNT(*) AS hotel_count
@@ -381,12 +379,12 @@ JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.city = :city
   AND h.state = :state
-  AND h.status = 3
+  AND h.status = 1
 GROUP BY be.name
 ORDER BY hotel_count DESC;
 
 -- name: get_top_engines_for_state
--- Get top booking engines for a state
+-- Get top booking engines for a state (launched hotels only)
 SELECT
     be.name AS engine_name,
     COUNT(*) AS hotel_count
@@ -394,15 +392,91 @@ FROM hotels h
 JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.status = 3
+  AND h.status = 1
 GROUP BY be.name
 ORDER BY hotel_count DESC;
 
 -- name: get_cities_in_state
--- Get all cities in a state that have enriched hotels
+-- Get all cities in a state that have launched hotels
 SELECT DISTINCT city
 FROM hotels
 WHERE state = :state
   AND city IS NOT NULL
-  AND status = 3
+  AND status = 1
 ORDER BY city;
+
+-- ============================================================================
+-- LAUNCHER QUERIES
+-- ============================================================================
+-- Status values:
+--   -2 = Location mismatch (rejected)
+--   -1 = No booking engine found (rejected)
+--    0 = Pending/Not ready
+--    1 = Launched and live
+
+-- name: get_launchable_hotels
+-- Get hotels ready to be launched (fully enriched with all data)
+-- Criteria: status=0 (pending), has booking engine, has successful room count (status=1), has proximity
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.website,
+    h.city,
+    h.state,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM hotels h
+INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+INNER JOIN booking_engines be ON hbe.booking_engine_id = be.id
+INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+INNER JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE h.status = 0
+ORDER BY h.state, h.city, h.name
+LIMIT :limit;
+
+-- name: get_launchable_count^
+-- Count hotels ready to be launched (status=0 with all enrichment data)
+SELECT COUNT(*) AS count
+FROM hotels h
+INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+WHERE h.status = 0;
+
+-- name: launch_hotels!
+-- Mark hotels as launched (status=1)
+-- Only launches hotels that meet all criteria
+UPDATE hotels
+SET status = 1, updated_at = CURRENT_TIMESTAMP
+WHERE id IN (
+    SELECT h.id
+    FROM hotels h
+    INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+    INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+    INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+    WHERE h.status = 0
+      AND h.id = ANY(:hotel_ids)
+);
+
+-- name: launch_all_ready_hotels!
+-- Mark ALL ready hotels as launched (status=1)
+UPDATE hotels
+SET status = 1, updated_at = CURRENT_TIMESTAMP
+WHERE id IN (
+    SELECT h.id
+    FROM hotels h
+    INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+    INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+    INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+    WHERE h.status = 0
+);
+
+-- name: get_launched_count^
+-- Count hotels that have been launched (status=1)
+SELECT COUNT(*) AS count
+FROM hotels
+WHERE status = 1;

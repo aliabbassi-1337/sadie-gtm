@@ -11,7 +11,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 from services.reporting import repo
-from db.models.reporting import HotelLead, CityStats, EngineCount, ReportStats
+from db.models.reporting import HotelLead, CityStats, EngineCount, ReportStats, LaunchableHotel
 from infra.s3 import upload_file
 
 
@@ -40,6 +40,48 @@ class IService(ABC):
 
         Returns list of S3 URIs for all uploaded reports.
         """
+        pass
+
+    # =========================================================================
+    # LAUNCHER METHODS
+    # =========================================================================
+
+    @abstractmethod
+    async def get_launchable_hotels(self, limit: int = 100) -> List[LaunchableHotel]:
+        """Get hotels ready to be launched (fully enriched with all data).
+
+        A hotel is launchable when it has:
+        - status = 0 (pending)
+        - A record in hotel_booking_engines
+        - A record in hotel_room_count (with status=1)
+        - A record in hotel_customer_proximity
+        """
+        pass
+
+    @abstractmethod
+    async def get_launchable_count(self) -> int:
+        """Count hotels ready to be launched."""
+        pass
+
+    @abstractmethod
+    async def launch_hotels(self, hotel_ids: List[int]) -> int:
+        """Mark specific hotels as launched (status=1).
+
+        Returns the number of hotels actually launched.
+        """
+        pass
+
+    @abstractmethod
+    async def launch_all_ready(self) -> int:
+        """Mark ALL ready hotels as launched (status=1).
+
+        Returns the number of hotels launched.
+        """
+        pass
+
+    @abstractmethod
+    async def get_launched_count(self) -> int:
+        """Count hotels that have been launched."""
         pass
 
 
@@ -325,3 +367,48 @@ class Service(IService):
         sheet.column_dimensions["C"].width = 5
         sheet.column_dimensions["D"].width = 28
         sheet.column_dimensions["E"].width = 15
+
+    # =========================================================================
+    # LAUNCHER METHODS
+    # =========================================================================
+
+    async def get_launchable_hotels(self, limit: int = 100) -> List[LaunchableHotel]:
+        """Get hotels ready to be launched (fully enriched with all data)."""
+        return await repo.get_launchable_hotels(limit=limit)
+
+    async def get_launchable_count(self) -> int:
+        """Count hotels ready to be launched."""
+        return await repo.get_launchable_count()
+
+    async def launch_hotels(self, hotel_ids: List[int]) -> int:
+        """Mark specific hotels as launched (status=1)."""
+        if not hotel_ids:
+            return 0
+
+        # Get count before to determine how many will be launched
+        launchable = await repo.get_launchable_hotels(limit=len(hotel_ids) + 100)
+        launchable_ids = {h.id for h in launchable}
+        valid_ids = [hid for hid in hotel_ids if hid in launchable_ids]
+
+        if not valid_ids:
+            return 0
+
+        await repo.launch_hotels(valid_ids)
+        logger.info(f"Launched {len(valid_ids)} hotels")
+        return len(valid_ids)
+
+    async def launch_all_ready(self) -> int:
+        """Mark ALL ready hotels as launched (status=1)."""
+        count_before = await repo.get_launchable_count()
+
+        if count_before == 0:
+            logger.info("No hotels ready to launch")
+            return 0
+
+        await repo.launch_all_ready_hotels()
+        logger.info(f"Launched {count_before} hotels")
+        return count_before
+
+    async def get_launched_count(self) -> int:
+        """Count hotels that have been launched."""
+        return await repo.get_launched_count()
