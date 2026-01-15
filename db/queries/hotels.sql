@@ -340,7 +340,7 @@ SELECT
     -- Total counts
     COUNT(*) AS total_scraped,
     COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
-    COUNT(CASE WHEN h.status = 1 THEN 1 END) AS booking_found,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL THEN 1 END) AS booking_found,
     -- Contact info
     COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
     COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
@@ -359,7 +359,7 @@ SELECT
     -- Total counts
     COUNT(*) AS total_scraped,
     COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
-    COUNT(CASE WHEN h.status = 1 THEN 1 END) AS booking_found,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL THEN 1 END) AS booking_found,
     -- Contact info
     COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
     COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,

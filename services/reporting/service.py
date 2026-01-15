@@ -164,7 +164,7 @@ class Service(IService):
     def _populate_leads_sheet(self, sheet, leads: List[HotelLead]) -> None:
         """Populate the leads sheet with hotel data."""
         # Define headers
-        headers = ["Hotel", "Booking Engine", "Room Count", "Proximity"]
+        headers = ["Hotel", "Website", "Booking Engine", "Room Count", "Proximity"]
 
         # Style definitions
         header_font = Font(bold=True, color="FFFFFF")
@@ -190,17 +190,21 @@ class Service(IService):
             # Hotel name
             sheet.cell(row=row, column=1, value=lead.hotel_name).border = thin_border
 
+            # Website
+            website = lead.website or ""
+            sheet.cell(row=row, column=2, value=website).border = thin_border
+
             # Booking engine (just the name, no domain)
             engine_name = lead.booking_engine_name or ""
-            sheet.cell(row=row, column=2, value=engine_name).border = thin_border
+            sheet.cell(row=row, column=3, value=engine_name).border = thin_border
 
             # Room count
             room_count = lead.room_count if lead.room_count else ""
-            sheet.cell(row=row, column=3, value=room_count).border = thin_border
+            sheet.cell(row=row, column=4, value=room_count).border = thin_border
 
             # Proximity: "Nearest: Hotel Name (X.Xkm)"
             proximity = self._format_proximity(lead)
-            sheet.cell(row=row, column=4, value=proximity).border = thin_border
+            sheet.cell(row=row, column=5, value=proximity).border = thin_border
 
         # Auto-adjust column widths
         for col in range(1, len(headers) + 1):
