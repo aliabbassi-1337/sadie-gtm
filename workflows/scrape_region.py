@@ -3,14 +3,55 @@ Workflow: Scrape Region
 =======================
 Scrapes hotels in a given region using the adaptive grid scraper.
 
-Usage:
-    # Estimate costs first
-    uv run python workflows/scrape_region.py --city miami_beach --estimate
-    uv run python workflows/scrape_region.py --state florida --estimate
+USAGE
+-----
 
-    # Run scrape
-    uv run python workflows/scrape_region.py --city miami_beach --radius-km 5
-    uv run python workflows/scrape_region.py --state florida
+1. Scrape entire state:
+    uv run python workflows/scrape_region.py --state florida --estimate  # estimate first
+    uv run python workflows/scrape_region.py --state florida             # run scrape
+
+2. Scrape a built-in city (with radius):
+    uv run python workflows/scrape_region.py --city miami_beach --radius-km 10 --estimate
+    uv run python workflows/scrape_region.py --city miami_beach --radius-km 10
+
+3. Scrape any custom location (by coordinates):
+    uv run python workflows/scrape_region.py --center-lat 25.7617 --center-lng -80.1918 --radius-km 20
+
+4. Debug mode (shows filtered hotels):
+    uv run python workflows/scrape_region.py --city miami_beach --radius-km 10 --debug
+
+AVAILABLE REGIONS
+-----------------
+
+States: florida, california, texas, new_york, tennessee, north_carolina,
+        georgia, arizona, nevada, colorado
+
+Cities: miami_beach, miami, orlando, tampa, los_angeles, san_francisco,
+        new_york, las_vegas
+
+ADDING NEW REGIONS
+------------------
+
+Edit services/leadgen/grid_scraper.py:
+
+    # Add city
+    CITY_COORDINATES = {
+        "chicago": (41.8781, -87.6298),
+        ...
+    }
+
+    # Add state (lat_min, lat_max, lng_min, lng_max)
+    STATE_BOUNDS = {
+        "illinois": (36.970298, 42.508481, -91.513079, -87.019935),
+        ...
+    }
+
+OPTIONS
+-------
+
+--cell-size   Cell size in km (default: 2). Smaller = more thorough but more API calls.
+--estimate    Show cost estimate without running scrape.
+--debug       Enable debug logging (shows skipped hotels).
 """
 
 import sys
