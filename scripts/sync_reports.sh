@@ -32,3 +32,13 @@ aws s3 sync "s3://$S3_BUCKET/$S3_PREFIX" "$ONEDRIVE_PATH" \
 echo ""
 echo "Sync complete!"
 echo "Reports available at: $ONEDRIVE_PATH"
+
+# Restart OneDrive to force cloud sync
+if [[ -z "$DRY_RUN" ]]; then
+    echo ""
+    echo "Restarting OneDrive..."
+    killall OneDrive 2>/dev/null || true
+    sleep 1
+    open -a OneDrive
+    echo "OneDrive restarted - files will sync to cloud shortly"
+fi
