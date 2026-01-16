@@ -9,11 +9,12 @@ from loguru import logger
 from services.leadgen import repo
 from services.leadgen.constants import HotelStatus
 from services.leadgen.detector import BatchDetector, DetectionConfig, DetectionResult
+from services.leadgen.geocoding import CityLocation, geocode_city
 from db.models.hotel import Hotel
 from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, CITY_COORDINATES, DEFAULT_CELL_SIZE_KM
 
 # Re-export for public API
-__all__ = ["IService", "Service", "ScrapeEstimate", "CITY_COORDINATES"]
+__all__ = ["IService", "Service", "ScrapeEstimate", "CITY_COORDINATES", "CityLocation"]
 
 
 class IService(ABC):
@@ -34,7 +35,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False) -> int:
+    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False, aggressive: bool = False) -> int:
         """
         Scrape hotels in an entire state using adaptive grid.
         
@@ -42,6 +43,7 @@ class IService(ABC):
             state: State name (e.g., "florida")
             cell_size_km: Cell size in km (ignored if hybrid=True)
             hybrid: Use variable cell sizes - small near cities, large elsewhere
+            aggressive: Use more aggressive hybrid settings (cheaper, slightly less coverage)
             
         Returns number of hotels found.
         """
@@ -76,7 +78,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False) -> ScrapeEstimate:
+    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False, aggressive: bool = False) -> ScrapeEstimate:
         """Estimate cost for scraping a state."""
         pass
 
@@ -168,7 +170,7 @@ class Service(IService):
 
         return saved_count
 
-    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False) -> int:
+    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False, aggressive: bool = False) -> int:
         """
         Scrape hotels in an entire state using adaptive grid.
         Saves incrementally after each batch so progress isn't lost.
@@ -177,15 +179,21 @@ class Service(IService):
             state: State name (e.g., "florida", "california")
             cell_size_km: Cell size in km (smaller = more thorough, default 2km)
             hybrid: Use variable cell sizes - small near cities, large elsewhere
+            aggressive: Use more aggressive hybrid settings (cheaper, slightly less coverage)
 
         Returns:
             Number of hotels found and saved to database
         """
-        mode = "hybrid" if hybrid else f"{cell_size_km}km cells"
+        if aggressive:
+            mode = "hybrid-aggressive"
+        elif hybrid:
+            mode = "hybrid"
+        else:
+            mode = f"{cell_size_km}km cells"
         logger.info(f"Starting state scrape: {state} ({mode})")
 
         # Initialize scraper
-        scraper = GridScraper(api_key=self._api_key, cell_size_km=cell_size_km, hybrid=hybrid)
+        scraper = GridScraper(api_key=self._api_key, cell_size_km=cell_size_km, hybrid=hybrid or aggressive, aggressive=aggressive)
         source = f"grid_{state.lower().replace(' ', '_')}"
 
         # Track total saved
@@ -449,11 +457,128 @@ class Service(IService):
         """Estimate cost for scraping a circular region."""
         scraper = GridScraper.__new__(GridScraper)  # Skip __init__ validation
         scraper.cell_size_km = cell_size_km
+        scraper.hybrid = False
+        scraper.aggressive = False
         return scraper.estimate_region(center_lat, center_lng, radius_km)
 
-    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False) -> ScrapeEstimate:
+    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False, aggressive: bool = False) -> ScrapeEstimate:
         """Estimate cost for scraping a state."""
         scraper = GridScraper.__new__(GridScraper)  # Skip __init__ validation
         scraper.cell_size_km = cell_size_km
-        scraper.hybrid = hybrid
+        scraper.hybrid = hybrid or aggressive
+        scraper.aggressive = aggressive
+        # Set hybrid parameters
+        if aggressive:
+            from services.leadgen.grid_scraper import HYBRID_AGGRESSIVE_DENSE_RADIUS_KM, HYBRID_AGGRESSIVE_SPARSE_CELL_SIZE_KM
+            scraper.dense_radius_km = HYBRID_AGGRESSIVE_DENSE_RADIUS_KM
+            scraper.sparse_cell_size_km = HYBRID_AGGRESSIVE_SPARSE_CELL_SIZE_KM
+        else:
+            from services.leadgen.grid_scraper import HYBRID_DENSE_RADIUS_KM, HYBRID_SPARSE_CELL_SIZE_KM
+            scraper.dense_radius_km = HYBRID_DENSE_RADIUS_KM
+            scraper.sparse_cell_size_km = HYBRID_SPARSE_CELL_SIZE_KM
         return scraper.estimate_state(state)
+
+    # =========================================================================
+    # TARGET CITIES
+    # =========================================================================
+
+    async def get_target_cities(self, state: str, limit: int = 100) -> List[CityLocation]:
+        """
+        Get target cities for a state from the database.
+        
+        Returns list of CityLocation objects with coordinates and radius.
+        Cities must be added via add_target_city() first.
+        """
+        rows = await repo.get_target_cities_by_state(state, limit=limit)
+        return [
+            CityLocation(
+                name=row["name"],
+                state=row["state"],
+                lat=row["lat"],
+                lng=row["lng"],
+                radius_km=row["radius_km"] or 12.0,
+                population=row["population"],
+                display_name=row["display_name"],
+            )
+            for row in rows
+        ]
+
+    async def add_target_city(
+        self,
+        name: str,
+        state: str,
+        lat: Optional[float] = None,
+        lng: Optional[float] = None,
+        radius_km: Optional[float] = None,
+    ) -> CityLocation:
+        """
+        Add a city to the scrape target list.
+        
+        If lat/lng not provided, geocodes the city using Nominatim API.
+        Stores result in database for future use.
+        
+        Args:
+            name: City name (e.g., "Miami")
+            state: State code (e.g., "FL")
+            lat: Latitude (optional, will geocode if not provided)
+            lng: Longitude (optional, will geocode if not provided)
+            radius_km: Scrape radius (optional, uses default based on city size)
+            
+        Returns:
+            CityLocation with coordinates
+        """
+        # Check if already exists
+        existing = await repo.get_target_city(name, state)
+        if existing:
+            return CityLocation(
+                name=existing["name"],
+                state=existing["state"],
+                lat=existing["lat"],
+                lng=existing["lng"],
+                radius_km=existing["radius_km"] or 12.0,
+                population=existing["population"],
+                display_name=existing["display_name"],
+            )
+        
+        # Geocode if coordinates not provided
+        if lat is None or lng is None:
+            logger.info(f"Geocoding {name}, {state}...")
+            geocoded = await geocode_city(name, state)
+            lat = geocoded.lat
+            lng = geocoded.lng
+            display_name = geocoded.display_name
+            if radius_km is None:
+                radius_km = geocoded.radius_km
+        else:
+            display_name = f"{name}, {state}, USA"
+        
+        if radius_km is None:
+            radius_km = 12.0
+        
+        # Save to database
+        await repo.insert_target_city(
+            name=name,
+            state=state,
+            lat=lat,
+            lng=lng,
+            radius_km=radius_km,
+            display_name=display_name,
+            source="nominatim" if display_name else "manual",
+        )
+        
+        return CityLocation(
+            name=name,
+            state=state,
+            lat=lat,
+            lng=lng,
+            radius_km=radius_km,
+            display_name=display_name,
+        )
+
+    async def remove_target_city(self, name: str, state: str) -> None:
+        """Remove a city from the scrape target list."""
+        await repo.delete_target_city(name, state)
+
+    async def count_target_cities(self, state: str) -> int:
+        """Count how many target cities are configured for a state."""
+        return await repo.count_target_cities_by_state(state)

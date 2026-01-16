@@ -6,6 +6,12 @@ from services.leadgen.repo import (
     insert_hotel,
     delete_hotel,
     insert_hotels_bulk,
+    # Target cities
+    get_target_cities_by_state,
+    get_target_city,
+    insert_target_city,
+    delete_target_city,
+    count_target_cities_by_state,
 )
 
 
@@ -92,3 +98,150 @@ async def test_insert_hotels_bulk_empty():
     """Test bulk insert with empty list."""
     count = await insert_hotels_bulk([])
     assert count == 0
+
+
+# =============================================================================
+# TARGET CITIES TESTS
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_insert_target_city():
+    """Test inserting a target city."""
+    city_id = await insert_target_city(
+        name="Test City",
+        state="TX",
+        lat=30.2672,
+        lng=-97.7431,
+        radius_km=15.0,
+        display_name="Test City, Texas, USA",
+        source="test",
+    )
+    assert city_id > 0
+
+    # Verify it was inserted
+    city = await get_target_city("Test City", "TX")
+    assert city is not None
+    assert city["name"] == "Test City"
+    assert city["state"] == "TX"
+    assert city["lat"] == 30.2672
+    assert city["lng"] == -97.7431
+    assert city["radius_km"] == 15.0
+
+    # Cleanup
+    await delete_target_city("Test City", "TX")
+
+
+@pytest.mark.asyncio
+async def test_get_target_city_not_found():
+    """Test getting a non-existent target city returns None."""
+    city = await get_target_city("NonexistentCity", "XX")
+    assert city is None
+
+
+@pytest.mark.asyncio
+async def test_insert_target_city_upsert():
+    """Test that inserting same city twice updates it."""
+    # First insert
+    await insert_target_city(
+        name="Upsert City",
+        state="TX",
+        lat=30.0,
+        lng=-97.0,
+        radius_km=10.0,
+        source="test",
+    )
+
+    # Second insert with different radius
+    await insert_target_city(
+        name="Upsert City",
+        state="TX",
+        lat=30.0,
+        lng=-97.0,
+        radius_km=20.0,  # Different radius
+        source="test",
+    )
+
+    # Should have updated radius
+    city = await get_target_city("Upsert City", "TX")
+    assert city["radius_km"] == 20.0
+
+    # Cleanup
+    await delete_target_city("Upsert City", "TX")
+
+
+@pytest.mark.asyncio
+async def test_get_target_cities_by_state():
+    """Test getting all target cities for a state."""
+    # Insert test cities
+    await insert_target_city(name="City A", state="ZZ", lat=1.0, lng=1.0, source="test")
+    await insert_target_city(name="City B", state="ZZ", lat=2.0, lng=2.0, source="test")
+    await insert_target_city(name="City C", state="ZZ", lat=3.0, lng=3.0, source="test")
+
+    # Query
+    cities = await get_target_cities_by_state("ZZ", limit=100)
+    assert len(cities) == 3
+    names = {c["name"] for c in cities}
+    assert names == {"City A", "City B", "City C"}
+
+    # Cleanup
+    await delete_target_city("City A", "ZZ")
+    await delete_target_city("City B", "ZZ")
+    await delete_target_city("City C", "ZZ")
+
+
+@pytest.mark.asyncio
+async def test_get_target_cities_by_state_empty():
+    """Test getting cities for a state with no cities."""
+    cities = await get_target_cities_by_state("YY", limit=100)
+    assert cities == []
+
+
+@pytest.mark.asyncio
+async def test_count_target_cities_by_state():
+    """Test counting target cities for a state."""
+    # Insert test cities
+    await insert_target_city(name="Count A", state="WW", lat=1.0, lng=1.0, source="test")
+    await insert_target_city(name="Count B", state="WW", lat=2.0, lng=2.0, source="test")
+
+    count = await count_target_cities_by_state("WW")
+    assert count == 2
+
+    # Cleanup
+    await delete_target_city("Count A", "WW")
+    await delete_target_city("Count B", "WW")
+
+
+@pytest.mark.asyncio
+async def test_delete_target_city():
+    """Test deleting a target city."""
+    # Insert
+    await insert_target_city(name="Delete Me", state="VV", lat=1.0, lng=1.0, source="test")
+
+    # Verify exists
+    city = await get_target_city("Delete Me", "VV")
+    assert city is not None
+
+    # Delete
+    await delete_target_city("Delete Me", "VV")
+
+    # Verify deleted
+    city = await get_target_city("Delete Me", "VV")
+    assert city is None
+
+
+@pytest.mark.asyncio
+async def test_get_target_city_case_insensitive():
+    """Test that city lookup is case-insensitive."""
+    await insert_target_city(name="Case Test", state="UU", lat=1.0, lng=1.0, source="test")
+
+    # Query with different cases
+    city1 = await get_target_city("case test", "uu")
+    city2 = await get_target_city("CASE TEST", "UU")
+    city3 = await get_target_city("Case Test", "Uu")
+
+    assert city1 is not None
+    assert city2 is not None
+    assert city3 is not None
+
+    # Cleanup
+    await delete_target_city("Case Test", "UU")

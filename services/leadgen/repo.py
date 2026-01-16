@@ -258,3 +258,60 @@ async def insert_detection_error(
             error_message=error_message,
             detected_location=detected_location,
         )
+
+
+# =============================================================================
+# SCRAPE TARGET CITIES
+# =============================================================================
+
+async def get_target_cities_by_state(state: str, limit: int = 100) -> List[dict]:
+    """Get all target cities for a state."""
+    async with get_conn() as conn:
+        results = await queries.get_target_cities_by_state(conn, state=state, limit=limit)
+        return [dict(row) for row in results] if results else []
+
+
+async def get_target_city(name: str, state: str) -> Optional[dict]:
+    """Get a specific target city by name and state."""
+    async with get_conn() as conn:
+        result = await queries.get_target_city(conn, name=name, state=state)
+        return dict(result) if result else None
+
+
+async def insert_target_city(
+    name: str,
+    state: str,
+    lat: float,
+    lng: float,
+    radius_km: float = 12.0,
+    population: Optional[int] = None,
+    display_name: Optional[str] = None,
+    source: str = "nominatim",
+) -> int:
+    """Insert or update a target city. Returns the city ID."""
+    async with get_conn() as conn:
+        result = await queries.insert_target_city(
+            conn,
+            name=name,
+            state=state,
+            lat=lat,
+            lng=lng,
+            radius_km=radius_km,
+            population=population,
+            display_name=display_name,
+            source=source,
+        )
+        return result
+
+
+async def delete_target_city(name: str, state: str) -> None:
+    """Delete a target city."""
+    async with get_conn() as conn:
+        await queries.delete_target_city(conn, name=name, state=state)
+
+
+async def count_target_cities_by_state(state: str) -> int:
+    """Count target cities for a state."""
+    async with get_conn() as conn:
+        result = await queries.count_target_cities_by_state(conn, state=state)
+        return result or 0

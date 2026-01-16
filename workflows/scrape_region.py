@@ -123,16 +123,21 @@ async def scrape_region_workflow(
         await close_db()
 
 
-async def scrape_state_workflow(state: str, cell_size_km: float, hybrid: bool = False, notify: bool = True) -> int:
+async def scrape_state_workflow(state: str, cell_size_km: float, hybrid: bool = False, aggressive: bool = False, notify: bool = True) -> int:
     """Scrape hotels in a state."""
     await init_db()
 
     try:
         service = Service()
-        count = await service.scrape_state(state, cell_size_km, hybrid=hybrid)
+        count = await service.scrape_state(state, cell_size_km, hybrid=hybrid, aggressive=aggressive)
         logger.info(f"Scrape complete: {count} hotels saved to database")
 
-        mode = "hybrid" if hybrid else f"{cell_size_km}km cells"
+        if aggressive:
+            mode = "hybrid-aggressive"
+        elif hybrid:
+            mode = "hybrid"
+        else:
+            mode = f"{cell_size_km}km cells"
         if notify and count > 0:
             slack.send_message(
                 f"*Scrape Complete*\n"
@@ -169,6 +174,7 @@ def main():
     # Scraper settings
     parser.add_argument("--cell-size", type=float, default=2.0, help="Cell size in km (default: 2, smaller=denser)")
     parser.add_argument("--hybrid", action="store_true", help="Use variable cell sizes: 2km near cities, 10km elsewhere (state only)")
+    parser.add_argument("--aggressive", action="store_true", help="Aggressive hybrid: 2km within 20km of cities, 15km elsewhere (cheapest)")
 
     # Estimate only
     parser.add_argument("--estimate", action="store_true", help="Only show cost estimate, don't scrape")
@@ -204,11 +210,16 @@ def main():
 
     elif args.state:
         if args.estimate:
-            estimate = service.estimate_state(args.state, cell_size, hybrid=args.hybrid)
-            mode = "hybrid" if args.hybrid else f"cell={cell_size}km"
+            estimate = service.estimate_state(args.state, cell_size, hybrid=args.hybrid, aggressive=args.aggressive)
+            if args.aggressive:
+                mode = "hybrid-aggressive"
+            elif args.hybrid:
+                mode = "hybrid"
+            else:
+                mode = f"cell={cell_size}km"
             print_estimate(estimate, f"State: {args.state.title()} {mode}")
         else:
-            asyncio.run(scrape_state_workflow(args.state, cell_size, hybrid=args.hybrid, notify=not args.no_notify))
+            asyncio.run(scrape_state_workflow(args.state, cell_size, hybrid=args.hybrid, aggressive=args.aggressive, notify=not args.no_notify))
 
     elif args.center_lat and args.center_lng:
         if args.estimate:

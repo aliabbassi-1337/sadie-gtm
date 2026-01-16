@@ -34,4 +34,6 @@ python_functions = "test_*"
 addopts = "-v --strict-markers"
 markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "online: marks tests that hit external APIs (deselect with '-m \"not online\"')",
+    "no_db: marks tests that don't need database connection",
 ]

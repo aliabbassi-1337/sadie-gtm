@@ -91,10 +91,14 @@ CITY_COORDINATES = {
     "aspen": (39.1911, -106.8175),
 }
 
-# Hybrid mode settings
+# Hybrid mode settings (defaults - can be overridden via constructor)
 HYBRID_DENSE_RADIUS_KM = 30.0  # Use small cells within this distance of a city
 HYBRID_DENSE_CELL_SIZE_KM = 2.0  # Cell size for dense areas
 HYBRID_SPARSE_CELL_SIZE_KM = 10.0  # Cell size for sparse areas
+
+# Aggressive hybrid mode (lower cost, slightly less coverage)
+HYBRID_AGGRESSIVE_DENSE_RADIUS_KM = 20.0
+HYBRID_AGGRESSIVE_SPARSE_CELL_SIZE_KM = 15.0
 
 # Adaptive subdivision settings (from context/grid_scraper_adaptive.md)
 DEFAULT_CELL_SIZE_KM = 2.0   # Default cell size (2km works for most areas)
@@ -283,13 +287,22 @@ class ScrapeEstimate(BaseModel):
 class GridScraper:
     """Adaptive grid-based hotel scraper using Serper Maps API."""
 
-    def __init__(self, api_key: Optional[str] = None, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False):
+    def __init__(self, api_key: Optional[str] = None, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False, aggressive: bool = False):
         self.api_key = api_key or os.environ.get("SERPER_API_KEY", "")
         if not self.api_key:
             raise ValueError("No Serper API key. Set SERPER_API_KEY env var or pass api_key.")
 
         self.cell_size_km = cell_size_km
         self.hybrid = hybrid  # Use variable cell sizes based on proximity to cities
+        self.aggressive = aggressive  # Use more aggressive (cheaper) hybrid settings
+        
+        # Set hybrid parameters based on mode
+        if aggressive:
+            self.dense_radius_km = HYBRID_AGGRESSIVE_DENSE_RADIUS_KM
+            self.sparse_cell_size_km = HYBRID_AGGRESSIVE_SPARSE_CELL_SIZE_KM
+        else:
+            self.dense_radius_km = HYBRID_DENSE_RADIUS_KM
+            self.sparse_cell_size_km = HYBRID_SPARSE_CELL_SIZE_KM
         
         # Pick zoom level that covers the cell
         self.zoom_level = 14  # default
@@ -384,7 +397,7 @@ class GridScraper:
             initial_cells = len(cells)
             
             # Count dense vs sparse cells for accurate estimate
-            dense_cells = sum(1 for c in cells if c.size_km <= HYBRID_DENSE_CELL_SIZE_KM + 0.5)
+            dense_cells = sum(1 for c in cells if c.size_km <= HYBRID_DENSE_CELL_SIZE_KM + 1.0)
             sparse_cells = initial_cells - dense_cells
             
             # Dense cells: 3 queries, no subdivision
@@ -553,13 +566,13 @@ class GridScraper:
     ) -> List[GridCell]:
         """Generate grid with variable cell sizes based on proximity to cities.
         
-        - Near cities (within HYBRID_DENSE_RADIUS_KM): use small cells (2km)
-        - Far from cities: use large cells (10km)
+        - Near cities (within dense_radius_km): use small cells (2km)
+        - Far from cities: use large cells (sparse_cell_size_km)
         
         This optimizes cost by using dense coverage only where hotels are likely.
         """
         # First pass: generate coarse grid to classify areas
-        coarse_cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, HYBRID_SPARSE_CELL_SIZE_KM)
+        coarse_cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, self.sparse_cell_size_km)
         
         final_cells = []
         idx = 0
@@ -571,7 +584,7 @@ class GridScraper:
             # Check distance to nearest city
             dist = _distance_to_nearest_city(center_lat, center_lng)
             
-            if dist <= HYBRID_DENSE_RADIUS_KM:
+            if dist <= self.dense_radius_km:
                 # Dense area: subdivide into small cells
                 small_cells = self._generate_grid(
                     coarse_cell.lat_min, coarse_cell.lat_max,
@@ -591,7 +604,8 @@ class GridScraper:
         # Log hybrid grid stats
         dense_count = sum(1 for c in final_cells if c.size_km <= HYBRID_DENSE_CELL_SIZE_KM + 0.5)
         sparse_count = len(final_cells) - dense_count
-        logger.info(f"Hybrid grid: {len(final_cells)} cells ({dense_count} dense @ {HYBRID_DENSE_CELL_SIZE_KM}km, {sparse_count} sparse @ {HYBRID_SPARSE_CELL_SIZE_KM}km)")
+        mode = "aggressive" if self.aggressive else "standard"
+        logger.info(f"Hybrid grid ({mode}): {len(final_cells)} cells ({dense_count} dense @ {HYBRID_DENSE_CELL_SIZE_KM}km, {sparse_count} sparse @ {self.sparse_cell_size_km}km)")
         
         return final_cells
 

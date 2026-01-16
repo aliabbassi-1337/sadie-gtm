@@ -54,6 +54,13 @@ async def get_transaction():
             yield conn
 
 
+def get_pool():
+    """Get the connection pool (must call init_db first)."""
+    if _pool is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    return _pool
+
+
 async def close_db():
     """Gracefully close all connections."""
     global _pool
