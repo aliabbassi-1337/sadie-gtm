@@ -24,3 +24,5 @@ async def setup_db(request):
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "no_db: mark test to skip database setup")
+    config.addinivalue_line("markers", "integration: mark test as integration test (hits external services)")
+    config.addinivalue_line("markers", "online: mark test as online test (hits external APIs)")
