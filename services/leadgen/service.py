@@ -34,9 +34,15 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM) -> int:
+    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False) -> int:
         """
         Scrape hotels in an entire state using adaptive grid.
+        
+        Args:
+            state: State name (e.g., "florida")
+            cell_size_km: Cell size in km (ignored if hybrid=True)
+            hybrid: Use variable cell sizes - small near cities, large elsewhere
+            
         Returns number of hotels found.
         """
         pass
@@ -70,7 +76,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM) -> ScrapeEstimate:
+    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False) -> ScrapeEstimate:
         """Estimate cost for scraping a state."""
         pass
 
@@ -162,7 +168,7 @@ class Service(IService):
 
         return saved_count
 
-    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM) -> int:
+    async def scrape_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False) -> int:
         """
         Scrape hotels in an entire state using adaptive grid.
         Saves incrementally after each batch so progress isn't lost.
@@ -170,14 +176,16 @@ class Service(IService):
         Args:
             state: State name (e.g., "florida", "california")
             cell_size_km: Cell size in km (smaller = more thorough, default 2km)
+            hybrid: Use variable cell sizes - small near cities, large elsewhere
 
         Returns:
             Number of hotels found and saved to database
         """
-        logger.info(f"Starting state scrape: {state}")
+        mode = "hybrid" if hybrid else f"{cell_size_km}km cells"
+        logger.info(f"Starting state scrape: {state} ({mode})")
 
         # Initialize scraper
-        scraper = GridScraper(api_key=self._api_key, cell_size_km=cell_size_km)
+        scraper = GridScraper(api_key=self._api_key, cell_size_km=cell_size_km, hybrid=hybrid)
         source = f"grid_{state.lower().replace(' ', '_')}"
 
         # Track total saved
@@ -443,8 +451,9 @@ class Service(IService):
         scraper.cell_size_km = cell_size_km
         return scraper.estimate_region(center_lat, center_lng, radius_km)
 
-    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM) -> ScrapeEstimate:
+    def estimate_state(self, state: str, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False) -> ScrapeEstimate:
         """Estimate cost for scraping a state."""
         scraper = GridScraper.__new__(GridScraper)  # Skip __init__ validation
         scraper.cell_size_km = cell_size_km
+        scraper.hybrid = hybrid
         return scraper.estimate_state(state)

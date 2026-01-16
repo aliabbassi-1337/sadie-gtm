@@ -10,14 +10,18 @@ USAGE
     uv run python workflows/scrape_region.py --state florida --estimate  # estimate first
     uv run python workflows/scrape_region.py --state florida             # run scrape
 
-2. Scrape a built-in city (with radius):
+2. Scrape state with HYBRID mode (recommended - uses small cells near cities, large elsewhere):
+    uv run python workflows/scrape_region.py --state florida --hybrid --estimate
+    uv run python workflows/scrape_region.py --state florida --hybrid
+
+3. Scrape a built-in city (with radius):
     uv run python workflows/scrape_region.py --city miami_beach --radius-km 10 --estimate
     uv run python workflows/scrape_region.py --city miami_beach --radius-km 10
 
-3. Scrape any custom location (by coordinates):
+4. Scrape any custom location (by coordinates):
     uv run python workflows/scrape_region.py --center-lat 25.7617 --center-lng -80.1918 --radius-km 20
 
-4. Debug mode (shows filtered hotels):
+5. Debug mode (shows filtered hotels):
     uv run python workflows/scrape_region.py --city miami_beach --radius-km 10 --debug
 
 AVAILABLE REGIONS
@@ -26,8 +30,7 @@ AVAILABLE REGIONS
 States: florida, california, texas, new_york, tennessee, north_carolina,
         georgia, arizona, nevada, colorado
 
-Cities: miami_beach, miami, orlando, tampa, los_angeles, san_francisco,
-        new_york, las_vegas
+Cities: 60+ cities across US (see CITY_COORDINATES in grid_scraper.py)
 
 ADDING NEW REGIONS
 ------------------
@@ -50,6 +53,7 @@ OPTIONS
 -------
 
 --cell-size   Cell size in km (default: 2). Smaller = more thorough but more API calls.
+--hybrid      Use variable cell sizes: 2km near cities, 10km elsewhere. Best cost/coverage tradeoff.
 --estimate    Show cost estimate without running scrape.
 --debug       Enable debug logging (shows skipped hotels).
 """
@@ -119,19 +123,21 @@ async def scrape_region_workflow(
         await close_db()
 
 
-async def scrape_state_workflow(state: str, cell_size_km: float, notify: bool = True) -> int:
+async def scrape_state_workflow(state: str, cell_size_km: float, hybrid: bool = False, notify: bool = True) -> int:
     """Scrape hotels in a state."""
     await init_db()
 
     try:
         service = Service()
-        count = await service.scrape_state(state, cell_size_km)
+        count = await service.scrape_state(state, cell_size_km, hybrid=hybrid)
         logger.info(f"Scrape complete: {count} hotels saved to database")
 
+        mode = "hybrid" if hybrid else f"{cell_size_km}km cells"
         if notify and count > 0:
             slack.send_message(
                 f"*Scrape Complete*\n"
                 f"• State: {state.title()}\n"
+                f"• Mode: {mode}\n"
                 f"• Hotels scraped: {count}"
             )
 
@@ -162,6 +168,7 @@ def main():
 
     # Scraper settings
     parser.add_argument("--cell-size", type=float, default=2.0, help="Cell size in km (default: 2, smaller=denser)")
+    parser.add_argument("--hybrid", action="store_true", help="Use variable cell sizes: 2km near cities, 10km elsewhere (state only)")
 
     # Estimate only
     parser.add_argument("--estimate", action="store_true", help="Only show cost estimate, don't scrape")
@@ -197,10 +204,11 @@ def main():
 
     elif args.state:
         if args.estimate:
-            estimate = service.estimate_state(args.state, cell_size)
-            print_estimate(estimate, f"State: {args.state.title()} cell={cell_size}km")
+            estimate = service.estimate_state(args.state, cell_size, hybrid=args.hybrid)
+            mode = "hybrid" if args.hybrid else f"cell={cell_size}km"
+            print_estimate(estimate, f"State: {args.state.title()} {mode}")
         else:
-            asyncio.run(scrape_state_workflow(args.state, cell_size, not args.no_notify))
+            asyncio.run(scrape_state_workflow(args.state, cell_size, hybrid=args.hybrid, notify=not args.no_notify))
 
     elif args.center_lat and args.center_lng:
         if args.estimate:

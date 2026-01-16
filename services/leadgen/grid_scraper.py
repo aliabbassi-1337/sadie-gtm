@@ -19,17 +19,82 @@ load_dotenv()
 
 SERPER_MAPS_URL = "https://google.serper.dev/maps"
 
-# City coordinates for quick lookups
+# City coordinates for quick lookups and hybrid mode density detection
 CITY_COORDINATES = {
+    # Florida
     "miami_beach": (25.7907, -80.1300),
     "miami": (25.7617, -80.1918),
     "orlando": (28.5383, -81.3792),
     "tampa": (27.9506, -82.4572),
+    "fort_lauderdale": (26.1224, -80.1373),
+    "jacksonville": (30.3322, -81.6557),
+    "key_west": (24.5551, -81.7800),
+    "sarasota": (27.3364, -82.5307),
+    "fort_myers": (26.6406, -81.8723),
+    "naples": (26.1420, -81.7948),
+    "west_palm_beach": (26.7153, -80.0534),
+    "daytona_beach": (29.2108, -81.0228),
+    "clearwater": (27.9659, -82.8001),
+    "st_petersburg": (27.7676, -82.6403),
+    "gainesville": (29.6516, -82.3248),
+    "tallahassee": (30.4383, -84.2807),
+    "pensacola": (30.4213, -87.2169),
+    "panama_city": (30.1588, -85.6602),
+    "ocala": (29.1872, -82.1401),
+    "lakeland": (28.0395, -81.9498),
+    # California
     "los_angeles": (34.0522, -118.2437),
     "san_francisco": (37.7749, -122.4194),
+    "san_diego": (32.7157, -117.1611),
+    "sacramento": (38.5816, -121.4944),
+    "san_jose": (37.3382, -121.8863),
+    "fresno": (36.7378, -119.7871),
+    "long_beach": (33.7701, -118.1937),
+    "oakland": (37.8044, -122.2712),
+    "santa_barbara": (34.4208, -119.6982),
+    "palm_springs": (33.8303, -116.5453),
+    # Texas
+    "houston": (29.7604, -95.3698),
+    "dallas": (32.7767, -96.7970),
+    "austin": (30.2672, -97.7431),
+    "san_antonio": (29.4241, -98.4936),
+    "fort_worth": (32.7555, -97.3308),
+    "el_paso": (31.7619, -106.4850),
+    # New York
     "new_york": (40.7128, -74.0060),
+    "buffalo": (42.8864, -78.8784),
+    "albany": (42.6526, -73.7562),
+    # Nevada
     "las_vegas": (36.1699, -115.1398),
+    "reno": (39.5296, -119.8138),
+    # Arizona
+    "phoenix": (33.4484, -112.0740),
+    "tucson": (32.2226, -110.9747),
+    "scottsdale": (33.4942, -111.9261),
+    "sedona": (34.8697, -111.7610),
+    # Tennessee
+    "nashville": (36.1627, -86.7816),
+    "memphis": (35.1495, -90.0490),
+    "gatlinburg": (35.7143, -83.5102),
+    "pigeon_forge": (35.7884, -83.5543),
+    # North Carolina
+    "charlotte": (35.2271, -80.8431),
+    "raleigh": (35.7796, -78.6382),
+    "asheville": (35.5951, -82.5515),
+    # Georgia
+    "atlanta": (33.7490, -84.3880),
+    "savannah": (32.0809, -81.0912),
+    # Colorado
+    "denver": (39.7392, -104.9903),
+    "colorado_springs": (38.8339, -104.8214),
+    "boulder": (40.0150, -105.2705),
+    "aspen": (39.1911, -106.8175),
 }
+
+# Hybrid mode settings
+HYBRID_DENSE_RADIUS_KM = 30.0  # Use small cells within this distance of a city
+HYBRID_DENSE_CELL_SIZE_KM = 2.0  # Cell size for dense areas
+HYBRID_SPARSE_CELL_SIZE_KM = 10.0  # Cell size for sparse areas
 
 # Adaptive subdivision settings (from context/grid_scraper_adaptive.md)
 DEFAULT_CELL_SIZE_KM = 2.0   # Default cell size (2km works for most areas)
@@ -123,6 +188,24 @@ SKIP_DOMAINS = [
 ]
 
 
+def _distance_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Calculate approximate distance in km between two points (Haversine simplified)."""
+    avg_lat = (lat1 + lat2) / 2
+    dlat = (lat2 - lat1) * 111.0
+    dlng = (lng2 - lng1) * 111.0 * math.cos(math.radians(avg_lat))
+    return math.sqrt(dlat * dlat + dlng * dlng)
+
+
+def _distance_to_nearest_city(lat: float, lng: float) -> float:
+    """Calculate distance to nearest city in CITY_COORDINATES."""
+    min_dist = float('inf')
+    for city_lat, city_lng in CITY_COORDINATES.values():
+        dist = _distance_km(lat, lng, city_lat, city_lng)
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
+
+
 class GridCell(BaseModel):
     """A grid cell for searching."""
     lat_min: float
@@ -200,12 +283,14 @@ class ScrapeEstimate(BaseModel):
 class GridScraper:
     """Adaptive grid-based hotel scraper using Serper Maps API."""
 
-    def __init__(self, api_key: Optional[str] = None, cell_size_km: float = DEFAULT_CELL_SIZE_KM):
+    def __init__(self, api_key: Optional[str] = None, cell_size_km: float = DEFAULT_CELL_SIZE_KM, hybrid: bool = False):
         self.api_key = api_key or os.environ.get("SERPER_API_KEY", "")
         if not self.api_key:
             raise ValueError("No Serper API key. Set SERPER_API_KEY env var or pass api_key.")
 
         self.cell_size_km = cell_size_km
+        self.hybrid = hybrid  # Use variable cell sizes based on proximity to cities
+        
         # Pick zoom level that covers the cell
         self.zoom_level = 14  # default
         for size, zoom in sorted(ZOOM_BY_CELL_SIZE.items()):
@@ -293,27 +378,43 @@ class GridScraper:
         width_km = (lng_max - lng_min) * 111.0 * math.cos(math.radians(center_lat))
         region_size_km2 = height_km * width_km
 
-        # Count cells with configured cell size
-        cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, self.cell_size_km)
-        initial_cells = len(cells)
-
-        # For small cells (dense mode), no subdivision expected
-        # For large cells, ~25% subdivide
-        if self.cell_size_km <= 2.0:
-            subdivision_rate = 0.0
+        # Generate cells - use hybrid if enabled
+        if self.hybrid:
+            cells = self._generate_hybrid_grid(lat_min, lat_max, lng_min, lng_max)
+            initial_cells = len(cells)
+            
+            # Count dense vs sparse cells for accurate estimate
+            dense_cells = sum(1 for c in cells if c.size_km <= HYBRID_DENSE_CELL_SIZE_KM + 0.5)
+            sparse_cells = initial_cells - dense_cells
+            
+            # Dense cells: 3 queries, no subdivision
+            # Sparse cells: 4 queries, ~25% subdivision
+            dense_api_calls = dense_cells * 3
+            sparse_subdivided = int(sparse_cells * 0.25 * 4)
+            sparse_api_calls = (sparse_cells + sparse_subdivided) * 4
+            
+            estimated_api_calls = dense_api_calls + sparse_api_calls
+            estimated_total_cells = initial_cells + sparse_subdivided
+            avg_queries_per_cell = estimated_api_calls / max(estimated_total_cells, 1)
         else:
-            subdivision_rate = 0.25
-        subdivided_cells = int(initial_cells * subdivision_rate * 4)
-        estimated_total_cells = initial_cells + subdivided_cells
+            cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, self.cell_size_km)
+            initial_cells = len(cells)
 
-        # Query count depends on cell size:
-        # - Small cells (≤2km, dense mode): 3 diverse queries per cell
-        # - Large cells (>2km): ~4 queries avg (early exit)
-        if self.cell_size_km <= 2.0:
-            avg_queries_per_cell = 3.0
-        else:
-            avg_queries_per_cell = 4.0
-        estimated_api_calls = int(estimated_total_cells * avg_queries_per_cell)
+            # For small cells (dense mode), no subdivision expected
+            # For large cells, ~25% subdivide
+            if self.cell_size_km <= 2.0:
+                subdivision_rate = 0.0
+            else:
+                subdivision_rate = 0.25
+            subdivided_cells = int(initial_cells * subdivision_rate * 4)
+            estimated_total_cells = initial_cells + subdivided_cells
+
+            # Query count depends on cell size
+            if self.cell_size_km <= 2.0:
+                avg_queries_per_cell = 3.0
+            else:
+                avg_queries_per_cell = 4.0
+            estimated_api_calls = int(estimated_total_cells * avg_queries_per_cell)
 
         # Cost: $1 per 1000 credits ($50 plan = 50k credits)
         cost_per_credit = 0.001
@@ -327,7 +428,7 @@ class GridScraper:
         return ScrapeEstimate(
             initial_cells=initial_cells,
             estimated_cells_after_subdivision=estimated_total_cells,
-            avg_queries_per_cell=avg_queries_per_cell,
+            avg_queries_per_cell=round(avg_queries_per_cell, 1),
             estimated_api_calls=estimated_api_calls,
             estimated_cost_usd=round(estimated_cost, 2),
             estimated_hotels=estimated_hotels,
@@ -360,9 +461,13 @@ class GridScraper:
 
         hotels: List[ScrapedHotel] = []
 
-        # Generate grid with configured cell size
-        cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, self.cell_size_km)
-        logger.info(f"Starting scrape: {len(cells)} cells ({self.cell_size_km}km, zoom {self.zoom_level}z)")
+        # Generate grid - use hybrid if enabled, otherwise uniform cell size
+        if self.hybrid:
+            cells = self._generate_hybrid_grid(lat_min, lat_max, lng_min, lng_max)
+            logger.info(f"Starting hybrid scrape: {len(cells)} cells")
+        else:
+            cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, self.cell_size_km)
+            logger.info(f"Starting scrape: {len(cells)} cells ({self.cell_size_km}km, zoom {self.zoom_level}z)")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             self._client = client
@@ -439,6 +544,57 @@ class GridScraper:
                 idx += 1
         return cells
 
+    def _generate_hybrid_grid(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lng_min: float,
+        lng_max: float,
+    ) -> List[GridCell]:
+        """Generate grid with variable cell sizes based on proximity to cities.
+        
+        - Near cities (within HYBRID_DENSE_RADIUS_KM): use small cells (2km)
+        - Far from cities: use large cells (10km)
+        
+        This optimizes cost by using dense coverage only where hotels are likely.
+        """
+        # First pass: generate coarse grid to classify areas
+        coarse_cells = self._generate_grid(lat_min, lat_max, lng_min, lng_max, HYBRID_SPARSE_CELL_SIZE_KM)
+        
+        final_cells = []
+        idx = 0
+        
+        for coarse_cell in coarse_cells:
+            center_lat = coarse_cell.center_lat
+            center_lng = coarse_cell.center_lng
+            
+            # Check distance to nearest city
+            dist = _distance_to_nearest_city(center_lat, center_lng)
+            
+            if dist <= HYBRID_DENSE_RADIUS_KM:
+                # Dense area: subdivide into small cells
+                small_cells = self._generate_grid(
+                    coarse_cell.lat_min, coarse_cell.lat_max,
+                    coarse_cell.lng_min, coarse_cell.lng_max,
+                    HYBRID_DENSE_CELL_SIZE_KM
+                )
+                for cell in small_cells:
+                    cell.index = idx
+                    idx += 1
+                final_cells.extend(small_cells)
+            else:
+                # Sparse area: keep coarse cell
+                coarse_cell.index = idx
+                idx += 1
+                final_cells.append(coarse_cell)
+        
+        # Log hybrid grid stats
+        dense_count = sum(1 for c in final_cells if c.size_km <= HYBRID_DENSE_CELL_SIZE_KM + 0.5)
+        sparse_count = len(final_cells) - dense_count
+        logger.info(f"Hybrid grid: {len(final_cells)} cells ({dense_count} dense @ {HYBRID_DENSE_CELL_SIZE_KM}km, {sparse_count} sparse @ {HYBRID_SPARSE_CELL_SIZE_KM}km)")
+        
+        return final_cells
+
     def _get_cell_coverage(self, cell: GridCell) -> int:
         """Count how many already-seen hotels are within this cell."""
         count = 0
@@ -460,6 +616,9 @@ class GridScraper:
         """
         hotels: List[ScrapedHotel] = []
         hit_limit = False
+        
+        # Get zoom level for this cell (important for hybrid mode with variable cell sizes)
+        cell_zoom = self._get_zoom_for_cell_size(cell.size_km)
 
         # Check if cell already has coverage from adjacent cells
         existing_coverage = self._get_cell_coverage(cell)
@@ -472,7 +631,7 @@ class GridScraper:
             # Cell has some coverage - run reduced queries (just 1)
             self._stats.cells_reduced += 1
             logger.debug(f"REDUCED queries for cell ({cell.center_lat:.3f}, {cell.center_lng:.3f}) - has {existing_coverage} hotels")
-            results = await self._search_serper("hotel", cell.center_lat, cell.center_lng)
+            results = await self._search_serper("hotel", cell.center_lat, cell.center_lng, cell_zoom)
             for place in results:
                 hotel = self._process_place(place)
                 if hotel:
@@ -505,11 +664,12 @@ class GridScraper:
 
         # Dense mode (small cells ≤2km): run 3 diverse queries instead of 12
         # This reduces duplicates significantly while still getting good coverage
-        if self.cell_size_km <= 2.0:
+        # Use cell.size_km for hybrid mode where cells have different sizes
+        if cell.size_km <= 2.5:
             # Pick 3 diverse search types (hotel, motel, inn cover most cases)
             diverse_queries = [all_queries[0], all_queries[3], all_queries[6]]
             results = await asyncio.gather(*[
-                self._search_serper(query, cell.center_lat, cell.center_lng)
+                self._search_serper(query, cell.center_lat, cell.center_lng, cell_zoom)
                 for query in diverse_queries
             ])
             for places in results:
@@ -522,7 +682,7 @@ class GridScraper:
             return hotels, hit_limit
 
         # Sparse mode (large cells): scout first, early exit if sparse
-        scout_results = await self._search_serper(all_queries[0], cell.center_lat, cell.center_lng)
+        scout_results = await self._search_serper(all_queries[0], cell.center_lat, cell.center_lng, cell_zoom)
         scout_count = len(scout_results)
 
         # Process scout results
@@ -544,7 +704,7 @@ class GridScraper:
         # Execute remaining queries concurrently
         if remaining_queries:
             results = await asyncio.gather(*[
-                self._search_serper(query, cell.center_lat, cell.center_lng)
+                self._search_serper(query, cell.center_lat, cell.center_lng, cell_zoom)
                 for query in remaining_queries
             ])
 
@@ -558,15 +718,25 @@ class GridScraper:
 
         return hotels, hit_limit
 
+    def _get_zoom_for_cell_size(self, cell_size_km: float) -> int:
+        """Get appropriate zoom level for a cell size."""
+        for size, zoom in sorted(ZOOM_BY_CELL_SIZE.items()):
+            if cell_size_km <= size:
+                return zoom
+        return 12  # Default for large cells
+
     async def _search_serper(
         self,
         query: str,
         lat: float,
         lng: float,
+        zoom_level: Optional[int] = None,
     ) -> List[dict]:
         """Call Serper Maps API with semaphore for rate limiting."""
         if self._out_of_credits:
             return []
+
+        zoom = zoom_level or self.zoom_level
 
         async with self._semaphore:
             self._stats.api_calls += 1
@@ -575,7 +745,7 @@ class GridScraper:
                 resp = await self._client.post(
                     SERPER_MAPS_URL,
                     headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-                    json={"q": query, "num": 100, "ll": f"@{lat},{lng},{self.zoom_level}z"},
+                    json={"q": query, "num": 100, "ll": f"@{lat},{lng},{zoom}z"},
                 )
 
                 if resp.status_code == 400 and "credits" in resp.text.lower():
