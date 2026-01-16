@@ -37,7 +37,7 @@ async def export_city_workflow(
     state: str,
     country: str = "USA",
     local_only: bool = False,
-    notify: bool = False,
+    notify: bool = True,
 ) -> str:
     """Export a single city report."""
     await init_db()
@@ -93,7 +93,7 @@ async def export_state_workflow(
     state: str,
     country: str = "USA",
     local_only: bool = False,
-    notify: bool = False,
+    notify: bool = True,
 ) -> list:
     """Export all cities in a state plus state aggregate."""
     await init_db()

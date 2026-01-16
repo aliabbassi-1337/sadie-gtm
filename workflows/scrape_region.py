@@ -92,7 +92,7 @@ async def scrape_region_workflow(
     radius_km: float,
     cell_size_km: float,
     region_name: str = "Region",
-    notify: bool = False,
+    notify: bool = True,
 ) -> int:
     """Scrape hotels in a circular region."""
     await init_db()
@@ -119,7 +119,7 @@ async def scrape_region_workflow(
         await close_db()
 
 
-async def scrape_state_workflow(state: str, cell_size_km: float, notify: bool = False) -> int:
+async def scrape_state_workflow(state: str, cell_size_km: float, notify: bool = True) -> int:
     """Scrape hotels in a state."""
     await init_db()
 

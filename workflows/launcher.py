@@ -87,7 +87,7 @@ async def preview_launchable(limit: int) -> None:
         await close_db()
 
 
-async def launch_batch(limit: int, notify: bool = False) -> None:
+async def launch_batch(limit: int, notify: bool = True) -> None:
     """Launch a batch of hotels (multi-worker safe)."""
     await init_db()
     try:

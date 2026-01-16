@@ -21,7 +21,7 @@ from services.leadgen.service import Service
 from infra import slack
 
 
-async def run(limit: int = 1000, batch_size: int = 20, notify: bool = False):
+async def run(limit: int = 1000, batch_size: int = 20, notify: bool = True):
     """Enqueue hotels for detection."""
     await init_db()
     try:

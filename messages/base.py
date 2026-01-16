@@ -2,14 +2,13 @@
 
 This module provides the foundation for type-safe SQS message handling:
 
-- Message: Base dataclass for all SQS messages
+- Message: Base Pydantic model for all SQS messages
 - @handler: Decorator to register async handlers for message types
 - HandlerRegistry: Central registry that maps message types to handlers
 
 Example:
-    @dataclass
     class ScrapeCity(Message):
-        queue = "scrape-queue"
+        queue: ClassVar[str] = "scrape-queue"
         city: str
         state: str
         country: str = "usa"
@@ -21,10 +20,11 @@ Example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, asdict
 from typing import TypeVar, Callable, Awaitable, Type, Any, ClassVar, Optional, Dict, List, Tuple
 from abc import ABC
-import json
+
+from pydantic import BaseModel, ConfigDict
+
 
 # Type variable for message classes
 M = TypeVar("M", bound="Message")
@@ -33,8 +33,7 @@ M = TypeVar("M", bound="Message")
 HandlerFunc = Callable[[M], Awaitable[Any]]
 
 
-@dataclass
-class Message(ABC):
+class Message(BaseModel):
     """Base class for all SQS messages.
 
     Subclasses must define:
@@ -44,39 +43,44 @@ class Message(ABC):
     The message type is automatically serialized as '_type' in the JSON payload.
     """
 
+    model_config = ConfigDict(
+        # Allow extra fields to be ignored during parsing
+        extra="ignore",
+        # Validate on assignment
+        validate_assignment=True,
+    )
+
     # Subclasses must override this
     queue: ClassVar[str] = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Serialize message to dict for SQS.
 
         Includes '_type' field with the class name for deserialization.
         """
-        data = asdict(self)
+        data = self.model_dump()
         data["_type"] = self.__class__.__name__
         return data
 
     def to_json(self) -> str:
         """Serialize message to JSON string."""
+        import json
         return json.dumps(self.to_dict())
 
     @classmethod
-    def from_dict(cls: Type[M], data: dict) -> M:
+    def from_dict(cls: Type[M], data: Dict[str, Any]) -> M:
         """Deserialize message from dict.
 
         Ignores '_type' field and any unknown fields.
         """
-        # Get field names for this class
-        field_names = {f.name for f in fields(cls)}
-
-        # Filter to only known fields, excluding _type
-        filtered = {k: v for k, v in data.items() if k in field_names and k != "_type"}
-
-        return cls(**filtered)
+        # Filter out _type field
+        filtered = {k: v for k, v in data.items() if k != "_type"}
+        return cls.model_validate(filtered)
 
     @classmethod
     def from_json(cls: Type[M], json_str: str) -> M:
         """Deserialize message from JSON string."""
+        import json
         return cls.from_dict(json.loads(json_str))
 
 
@@ -108,7 +112,7 @@ class HandlerRegistry:
         return cls._message_types.get(type_name)
 
     @classmethod
-    def parse_message(cls, data: dict) -> Message:
+    def parse_message(cls, data: Dict[str, Any]) -> Message:
         """Parse a dict into the appropriate Message subclass.
 
         Raises:

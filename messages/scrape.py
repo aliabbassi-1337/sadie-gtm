@@ -7,9 +7,9 @@ Messages:
 These messages enable async, distributed scraping via SQS.
 """
 
-from dataclasses import dataclass
 from typing import ClassVar
 
+from pydantic import Field
 from loguru import logger
 
 from messages.base import Message, handler
@@ -22,7 +22,6 @@ from infra import slack
 SCRAPE_QUEUE = "scrape-queue"
 
 
-@dataclass
 class ScrapeCity(Message):
     """Message to scrape hotels in a city.
 
@@ -40,12 +39,11 @@ class ScrapeCity(Message):
     city: str
     state: str
     country: str = "usa"
-    radius_km: float = 10.0
-    cell_size_km: float = 2.0
+    radius_km: float = Field(default=10.0, gt=0)
+    cell_size_km: float = Field(default=2.0, gt=0)
     notify: bool = True
 
 
-@dataclass
 class ScrapeState(Message):
     """Message to scrape hotels across an entire state.
 
@@ -60,7 +58,7 @@ class ScrapeState(Message):
 
     state: str
     country: str = "usa"
-    cell_size_km: float = 2.0
+    cell_size_km: float = Field(default=2.0, gt=0)
     notify: bool = True
 
 

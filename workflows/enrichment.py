@@ -37,7 +37,7 @@ from services.enrichment.service import Service
 from infra import slack
 
 
-async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int = 15, notify: bool = False) -> None:
+async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int = 15, notify: bool = True) -> None:
     """Run room count enrichment."""
     await init_db()
     try:
@@ -81,7 +81,7 @@ async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int 
         await close_db()
 
 
-async def run_proximity(limit: int, max_distance_km: float, notify: bool = False) -> None:
+async def run_proximity(limit: int, max_distance_km: float, notify: bool = True) -> None:
     """Run customer proximity calculation."""
     await init_db()
     try:

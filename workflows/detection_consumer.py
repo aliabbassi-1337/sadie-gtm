@@ -122,7 +122,7 @@ async def worker_loop(
     batch_concurrency: int = 5,
     debug: bool = False,
     max_messages: int = 0,
-    notify: bool = False,
+    notify: bool = True,
 ):
     """Main worker loop - poll SQS and process messages.
 
