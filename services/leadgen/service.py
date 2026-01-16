@@ -1,5 +1,6 @@
 """LeadGen Service - Scraping and detection pipeline."""
 
+import math
 from abc import ABC, abstractmethod
 from optparse import Option
 from typing import Dict, List, Tuple, Optional
@@ -10,11 +11,48 @@ from services.leadgen import repo
 from services.leadgen.constants import HotelStatus
 from services.leadgen.detector import BatchDetector, DetectionConfig, DetectionResult
 from services.leadgen.geocoding import CityLocation, geocode_city
+from pydantic import BaseModel
+import json
 from db.models.hotel import Hotel
 from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, DEFAULT_CELL_SIZE_KM
 
 # Re-export for public API
-__all__ = ["IService", "Service", "ScrapeEstimate", "CityLocation"]
+__all__ = ["IService", "Service", "ScrapeEstimate", "CityLocation", "ScrapeRegion"]
+
+
+class ScrapeRegion(BaseModel):
+    """A polygon region for targeted scraping."""
+    id: Optional[int] = None
+    name: str
+    state: str
+    region_type: str = "city"  # city, corridor, custom
+    polygon_geojson: Optional[str] = None  # GeoJSON string
+    center_lat: float
+    center_lng: float
+    radius_km: Optional[float] = None
+    cell_size_km: float = 2.0
+    priority: int = 0
+    
+    @property
+    def bounds(self) -> Optional[dict]:
+        """Parse polygon GeoJSON and return bounding box."""
+        if not self.polygon_geojson:
+            return None
+        try:
+            geojson = json.loads(self.polygon_geojson)
+            coords = geojson.get("coordinates", [[]])[0]
+            if not coords:
+                return None
+            lngs = [c[0] for c in coords]
+            lats = [c[1] for c in coords]
+            return {
+                "lat_min": min(lats),
+                "lat_max": max(lats),
+                "lng_min": min(lngs),
+                "lng_max": max(lngs),
+            }
+        except (json.JSONDecodeError, KeyError, IndexError):
+            return None
 
 
 class IService(ABC):
@@ -608,3 +646,265 @@ class Service(IService):
     async def count_target_cities(self, state: str) -> int:
         """Count how many target cities are configured for a state."""
         return await repo.count_target_cities_by_state(state)
+
+    # =========================================================================
+    # SCRAPE REGIONS (Polygon-based scraping)
+    # =========================================================================
+
+    async def get_regions(self, state: str) -> List[ScrapeRegion]:
+        """Get all scrape regions for a state."""
+        rows = await repo.get_regions_by_state(state)
+        return [
+            ScrapeRegion(
+                id=row["id"],
+                name=row["name"],
+                state=row["state"],
+                region_type=row["region_type"],
+                polygon_geojson=row.get("polygon_geojson"),
+                center_lat=row["center_lat"],
+                center_lng=row["center_lng"],
+                radius_km=row.get("radius_km"),
+                cell_size_km=row.get("cell_size_km", 2.0),
+                priority=row.get("priority", 0),
+            )
+            for row in rows
+        ]
+
+    async def get_region(self, name: str, state: str) -> Optional[ScrapeRegion]:
+        """Get a specific region by name and state."""
+        row = await repo.get_region_by_name(name, state)
+        if not row:
+            return None
+        return ScrapeRegion(
+            id=row["id"],
+            name=row["name"],
+            state=row["state"],
+            region_type=row["region_type"],
+            polygon_geojson=row.get("polygon_geojson"),
+            center_lat=row["center_lat"],
+            center_lng=row["center_lng"],
+            radius_km=row.get("radius_km"),
+            cell_size_km=row.get("cell_size_km", 2.0),
+            priority=row.get("priority", 0),
+        )
+
+    async def add_region(
+        self,
+        name: str,
+        state: str,
+        center_lat: float,
+        center_lng: float,
+        radius_km: float,
+        region_type: str = "city",
+        cell_size_km: float = 2.0,
+        priority: int = 0,
+    ) -> ScrapeRegion:
+        """Add a circular region from center point and radius."""
+        region_id = await repo.insert_region(
+            name=name,
+            state=state,
+            center_lat=center_lat,
+            center_lng=center_lng,
+            radius_km=radius_km,
+            region_type=region_type,
+            cell_size_km=cell_size_km,
+            priority=priority,
+        )
+        # Fetch the region to get the generated polygon
+        region = await self.get_region(name, state)
+        return region
+
+    async def add_region_geojson(
+        self,
+        name: str,
+        state: str,
+        polygon_geojson: str,
+        center_lat: float,
+        center_lng: float,
+        region_type: str = "custom",
+        cell_size_km: float = 2.0,
+        priority: int = 0,
+    ) -> ScrapeRegion:
+        """Add a region from a GeoJSON polygon."""
+        await repo.insert_region_geojson(
+            name=name,
+            state=state,
+            polygon_geojson=polygon_geojson,
+            center_lat=center_lat,
+            center_lng=center_lng,
+            region_type=region_type,
+            cell_size_km=cell_size_km,
+            priority=priority,
+        )
+        region = await self.get_region(name, state)
+        return region
+
+    async def remove_region(self, name: str, state: str) -> None:
+        """Remove a region."""
+        await repo.delete_region(name, state)
+
+    async def clear_regions(self, state: str) -> None:
+        """Remove all regions for a state."""
+        await repo.delete_regions_by_state(state)
+
+    async def count_regions(self, state: str) -> int:
+        """Count regions for a state."""
+        return await repo.count_regions_by_state(state)
+
+    async def get_total_region_area(self, state: str) -> float:
+        """Get total area of all regions for a state in km²."""
+        return await repo.get_total_region_area_km2(state)
+
+    async def generate_regions_from_cities(
+        self,
+        state: str,
+        clear_existing: bool = True,
+    ) -> List[ScrapeRegion]:
+        """
+        Generate circular regions from all target cities in a state.
+        Uses each city's radius_km as the region radius.
+        """
+        if clear_existing:
+            await self.clear_regions(state)
+        
+        cities = await self.get_target_cities(state)
+        regions = []
+        
+        for city in cities:
+            radius = city.radius_km or 12.0
+            # Determine cell size based on radius (smaller cells for denser areas)
+            if radius >= 20:
+                cell_size = 2.0  # Large metros
+            elif radius >= 12:
+                cell_size = 1.5  # Medium cities
+            else:
+                cell_size = 1.0  # Small dense areas
+            
+            region = await self.add_region(
+                name=city.name,
+                state=state,
+                center_lat=city.lat,
+                center_lng=city.lng,
+                radius_km=radius,
+                region_type="city",
+                cell_size_km=cell_size,
+                priority=1 if radius >= 20 else 0,  # Major metros first
+            )
+            regions.append(region)
+            logger.info(f"Created region: {city.name} ({radius}km radius, {cell_size}km cells)")
+        
+        return regions
+
+    async def scrape_regions(
+        self,
+        state: str,
+        save_to_db: bool = True,
+    ) -> List[ScrapedHotel]:
+        """
+        Scrape all regions for a state.
+        Each region is scraped with its own cell size.
+        Returns combined list of all hotels.
+        """
+        regions = await self.get_regions(state)
+        if not regions:
+            logger.warning(f"No regions defined for {state}. Use generate_regions_from_cities first.")
+            return []
+        
+        all_hotels = []
+        
+        for region in regions:
+            bounds = region.bounds
+            if not bounds:
+                logger.warning(f"Region {region.name} has no valid bounds, skipping")
+                continue
+            
+            logger.info(
+                f"Scraping region: {region.name} "
+                f"({region.cell_size_km}km cells, priority={region.priority})"
+            )
+            
+            scraper = GridScraper(
+                api_key=self.api_key,
+                min_cell_size_km=region.cell_size_km,
+            )
+            
+            hotels = await scraper.scrape_bounds(
+                lat_min=bounds["lat_min"],
+                lat_max=bounds["lat_max"],
+                lng_min=bounds["lng_min"],
+                lng_max=bounds["lng_max"],
+            )
+            
+            logger.info(f"  Found {len(hotels)} hotels in {region.name}")
+            all_hotels.extend(hotels)
+        
+        # Deduplicate across regions
+        seen_ids = set()
+        unique_hotels = []
+        for hotel in all_hotels:
+            if hotel.google_place_id:
+                if hotel.google_place_id in seen_ids:
+                    continue
+                seen_ids.add(hotel.google_place_id)
+            unique_hotels.append(hotel)
+        
+        logger.info(f"Total unique hotels across all regions: {len(unique_hotels)}")
+        
+        if save_to_db:
+            await self._save_hotels(unique_hotels)
+        
+        return unique_hotels
+
+    async def estimate_regions(self, state: str) -> dict:
+        """
+        Estimate scraping all regions for a state.
+        Returns combined estimate across all regions.
+        """
+        regions = await self.get_regions(state)
+        if not regions:
+            return {
+                "regions": 0,
+                "total_cells": 0,
+                "total_api_calls": 0,
+                "estimated_cost_usd": 0,
+                "total_area_km2": 0,
+                "message": f"No regions defined for {state}",
+            }
+        
+        total_cells = 0
+        total_area = await self.get_total_region_area(state)
+        region_estimates = []
+        
+        for region in regions:
+            bounds = region.bounds
+            if not bounds:
+                continue
+            
+            # Calculate cells manually (simpler than using GridScraper)
+            center_lat = (bounds["lat_min"] + bounds["lat_max"]) / 2
+            height_km = (bounds["lat_max"] - bounds["lat_min"]) * 111.0
+            width_km = (bounds["lng_max"] - bounds["lng_min"]) * 111.0 * math.cos(math.radians(center_lat))
+            
+            cells_x = max(1, int(width_km / region.cell_size_km))
+            cells_y = max(1, int(height_km / region.cell_size_km))
+            region_cells = cells_x * cells_y
+            
+            total_cells += region_cells
+            region_estimates.append({
+                "name": region.name,
+                "cells": region_cells,
+                "cell_size_km": region.cell_size_km,
+            })
+        
+        # Estimate with 2-4x API calls due to adaptive subdivision
+        min_calls = total_cells
+        max_calls = total_cells * 4
+        
+        return {
+            "regions": len(regions),
+            "total_cells": total_cells,
+            "total_api_calls_range": f"{min_calls:,} - {max_calls:,}",
+            "estimated_cost_usd_range": f"${min_calls * 0.0005:.2f} - ${max_calls * 0.0005:.2f}",
+            "total_area_km2": round(total_area, 1),
+            "region_breakdown": region_estimates,
+        }

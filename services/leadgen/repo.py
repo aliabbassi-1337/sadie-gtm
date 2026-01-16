@@ -315,3 +315,113 @@ async def count_target_cities_by_state(state: str) -> int:
     async with get_conn() as conn:
         result = await queries.count_target_cities_by_state(conn, state=state)
         return result or 0
+
+
+# =============================================================================
+# SCRAPE REGIONS (Polygon-based scraping)
+# =============================================================================
+
+async def get_regions_by_state(state: str) -> List[dict]:
+    """Get all scrape regions for a state."""
+    async with get_conn() as conn:
+        results = await queries.get_regions_by_state(conn, state=state)
+        return [dict(row) for row in results] if results else []
+
+
+async def get_region_by_name(name: str, state: str) -> Optional[dict]:
+    """Get a specific region by name and state."""
+    async with get_conn() as conn:
+        result = await queries.get_region_by_name(conn, name=name, state=state)
+        return dict(result) if result else None
+
+
+async def insert_region(
+    name: str,
+    state: str,
+    center_lat: float,
+    center_lng: float,
+    radius_km: float,
+    region_type: str = "city",
+    cell_size_km: float = 2.0,
+    priority: int = 0,
+) -> int:
+    """Insert a region from center point and radius (creates circular polygon)."""
+    async with get_conn() as conn:
+        result = await queries.insert_region(
+            conn,
+            name=name,
+            state=state,
+            region_type=region_type,
+            center_lat=center_lat,
+            center_lng=center_lng,
+            radius_km=radius_km,
+            cell_size_km=cell_size_km,
+            priority=priority,
+        )
+        return result
+
+
+async def insert_region_geojson(
+    name: str,
+    state: str,
+    polygon_geojson: str,
+    center_lat: float,
+    center_lng: float,
+    region_type: str = "custom",
+    cell_size_km: float = 2.0,
+    priority: int = 0,
+) -> int:
+    """Insert a region from raw GeoJSON polygon."""
+    async with get_conn() as conn:
+        result = await queries.insert_region_geojson(
+            conn,
+            name=name,
+            state=state,
+            region_type=region_type,
+            polygon_geojson=polygon_geojson,
+            center_lat=center_lat,
+            center_lng=center_lng,
+            cell_size_km=cell_size_km,
+            priority=priority,
+        )
+        return result
+
+
+async def delete_region(name: str, state: str) -> None:
+    """Delete a region."""
+    async with get_conn() as conn:
+        await queries.delete_region(conn, name=name, state=state)
+
+
+async def delete_regions_by_state(state: str) -> None:
+    """Delete all regions for a state."""
+    async with get_conn() as conn:
+        await queries.delete_regions_by_state(conn, state=state)
+
+
+async def count_regions_by_state(state: str) -> int:
+    """Count regions for a state."""
+    async with get_conn() as conn:
+        result = await queries.count_regions_by_state(conn, state=state)
+        return result or 0
+
+
+async def point_in_any_region(lat: float, lng: float, state: str) -> bool:
+    """Check if a point is within any region for a state."""
+    async with get_conn() as conn:
+        result = await queries.point_in_any_region(conn, lat=lat, lng=lng, state=state)
+        return result or False
+
+
+async def get_region_bounds(region_id: int) -> Optional[dict]:
+    """Get bounding box for a region."""
+    async with get_conn() as conn:
+        result = await queries.get_region_bounds(conn, region_id=region_id)
+        return dict(result) if result else None
+
+
+async def get_total_region_area_km2(state: str) -> float:
+    """Get total area of all regions for a state in km²."""
+    async with get_conn() as conn:
+        result = await queries.get_total_area_km2(conn, state=state)
+        return float(result) if result else 0.0
