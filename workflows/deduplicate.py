@@ -82,7 +82,7 @@ async def get_duplicate_stats() -> Dict:
                 HAVING COUNT(*) > 1
             )
             AND status != $1
-        """, STATUS_DUPLICATE, STATUS_DUPLICATE)
+        """, STATUS_DUPLICATE)
         
         # Duplicate locations (same lat/lng rounded to 4 decimals)
         dup_locations = await conn.fetchval("""
