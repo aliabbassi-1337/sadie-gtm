@@ -93,26 +93,54 @@ SKIP_NON_HOTELS = [
     # Healthcare
     "pharmacy", "hospital", "clinic", "medical", "urgent care", "emergency",
     "dental", "dentist", "doctor", "physician", "health center", "healthcare",
-    "veterinary", "vet clinic", "animal hospital",
+    "veterinary", "vet clinic", "animal hospital", "laboratory",
     # Retail
     "publix", "walmart", "target", "costco", "kroger", "cvs", "walgreens",
     "home depot", "lowe's", "menards", "staples", "office depot",
-    "dollar general", "dollar tree", "family dollar",
-    # Food/Restaurant
+    "dollar general", "dollar tree", "family dollar", "best buy", "apple store",
+    "warby parker", "eyewear", "optical", "mattress",
+    # Restaurants (generic food terms)
+    "restaurant", "grill", "sushi", "pizza", "taco", "burrito", "bbq", "barbecue",
+    "steakhouse", "seafood", "buffet", "diner", "bakery", "deli", "cafe",
+    "bistro", "eatery", "cantina", "tavern", "pub", "brewery", "bar & grill",
+    "ramen", "noodle", "pho", "wings", "wingstop", "wing stop", "hot pot",
+    "korean bbq", "hibachi", "teriyaki", "shawarma", "falafel", "kebab",
+    # Restaurants (chains)
     "mcdonald", "burger king", "wendy's", "taco bell", "chick-fil-a",
     "starbucks", "dunkin", "subway", "pizza hut", "domino's", "papa john",
-    "chipotle", "panera", "olive garden", "applebee", "chili's",
+    "chipotle", "panera", "olive garden", "applebee", "chili's", "ihop",
+    "denny's", "waffle house", "cracker barrel", "outback", "longhorn",
+    "red lobster", "texas roadhouse", "buffalo wild wings", "hooters",
+    "carrabba", "bonefish", "cheesecake factory", "pf chang", "benihana",
+    "sonic drive", "arby's", "popeyes", "five guys", "shake shack",
+    "in-n-out", "whataburger", "jack in the box", "hardee", "carl's jr",
+    "krispy kreme", "baskin", "cold stone", "dairy queen", "culver's",
     # Banks/Finance
     "bank of america", "chase bank", "wells fargo", "citibank", "td bank",
-    "credit union", "atm",
-    # Other non-hotels
-    "gas station", "shell", "chevron", "exxon", "bp ", "speedway",
-    "church", "school", "university", "college", "library",
-    "police", "fire station", "post office", "ups store", "fedex",
-    "car wash", "auto repair", "tire", "jiffy lube", "autozone",
-    "storage", "self storage", "u-haul",
-    "gym", "fitness", "planet fitness", "la fitness", "ymca",
-    "salon", "barber", "nail", "spa ",  # note: "spa " with space to avoid matching "space"
+    "credit union", "atm", "western union", "moneygram", "payday loan",
+    # Gas stations
+    "gas station", "shell", "chevron", "exxon", "bp ", "speedway", "wawa",
+    "sheetz", "racetrac", "quiktrip", "circle k", "7-eleven", "7 eleven",
+    # Religious/Education
+    "church", "temple", "mosque", "synagogue", "chapel",
+    "school", "university", "college", "library", "academy",
+    # Government/Services
+    "police", "fire station", "post office", "ups store", "fedex", "usps",
+    "dmv", "courthouse", "city hall",
+    # Storage/Moving
+    "storage", "self storage", "u-haul", "public storage", "extra space",
+    # Fitness
+    "gym", "fitness", "planet fitness", "la fitness", "ymca", "crossfit",
+    "anytime fitness", "orangetheory", "equinox",
+    # Personal services
+    "salon", "barber", "nail", "spa ", "tattoo", "piercing",
+    # Pet services
+    "pet", "grooming", "doggy", "veterinar", "animal clinic",
+    # Childcare
+    "daycare", "childcare", "preschool", "kindergarten", "learning center",
+    # Entertainment (not hotels)
+    "cinema", "theater", "theatre", "bowling", "arcade", "laser tag",
+    "escape room", "trampoline", "skating rink", "mini golf",
 ]
 
 # Website domains to skip (big chains, aggregators, social media, junk)

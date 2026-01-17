@@ -85,15 +85,26 @@ SKIP_NON_HOTEL_DOMAINS = [
     # Grocery / Retail
     "publix.com", "walmart.com", "target.com", "costco.com", "kroger.com",
     "wholefoodsmarket.com", "amazon.com", "safeway.com", "albertsons.com",
+    "warbyparker.com", "lenscrafters.com",
     # Pharmacy
     "cvs.com", "walgreens.com", "riteaid.com",
-    # Fast food / Restaurants
+    # Restaurants (chains)
     "mcdonalds.com", "starbucks.com", "subway.com", "dominos.com",
     "pizzahut.com", "burgerking.com", "chipotle.com", "tacobell.com",
     "wendys.com", "dunkindonuts.com", "chick-fil-a.com", "papajohns.com",
+    "olivegarden.com", "applebees.com", "chilis.com", "ihop.com", "dennys.com",
+    "wafflehouse.com", "crackerbarrel.com", "outback.com", "longhornsteakhouse.com",
+    "redlobster.com", "texasroadhouse.com", "buffalowildwings.com", "hooters.com",
+    "carrabbas.com", "bonefishgrill.com", "thecheesecakefactory.com", "pfchangs.com",
+    "benihana.com", "shakeshack.com", "in-n-out.com", "whataburger.com",
+    "jackinthebox.com", "hardees.com", "carlsjr.com", "krispykreme.com",
+    "baskinrobbins.com", "coldstonecreamery.com", "dairyqueen.com", "culvers.com",
+    "kfc.com", "popeyes.com", "arbys.com", "fiveguys.com", "sonicdrivein.com",
+    "panerabread.com", "jasonsdeli.com", "potbelly.com", "jimmyjohns.com",
     # Banks
     "bankofamerica.com", "chase.com", "wellsfargo.com", "citibank.com",
     "usbank.com", "capitalone.com", "pnc.com", "tdbank.com",
+    "westernunion.com", "moneygram.com",
     # Home improvement / Electronics
     "homedepot.com", "lowes.com", "bestbuy.com", "apple.com", "microsoft.com",
     # Telecom
@@ -102,14 +113,19 @@ SKIP_NON_HOTEL_DOMAINS = [
     "ups.com", "fedex.com", "usps.com", "dhl.com",
     # Gas stations
     "exxon.com", "shell.com", "bp.com", "chevron.com", "mobil.com",
+    "wawa.com", "sheetz.com", "racetrac.com", "quiktrip.com", "circlek.com",
+    "7-eleven.com",
     # Medical
-    "cvs.com", "walgreens.com", "riteaid.com", "labcorp.com", "questdiagnostics.com",
+    "labcorp.com", "questdiagnostics.com",
     # Storage
     "publicstorage.com", "extraspace.com", "cubesmart.com", "lifestorage.com",
     # Car rental (not hotels)
     "enterprise.com", "hertz.com", "avis.com", "budget.com", "nationalcar.com",
     # Fitness
     "planetfitness.com", "lafitness.com", "24hourfitness.com", "orangetheory.com",
+    "anytimefitness.com", "equinox.com",
+    # Universal/Theme parks (specific pages, not hotels)
+    "universalorlando.com/web/en/us/things-to-do",
 ]
 
 # Non-hotel name keywords to skip
@@ -120,13 +136,27 @@ SKIP_NON_HOTEL_NAMES = [
     # Retail
     "publix", "walmart", "target", "cvs", "walgreens", "kroger", "whole foods",
     "costco", "safeway", "albertsons", "rite aid", "dollar general", "dollar tree",
-    # Food
+    "warby parker", "eyewear", "optical", "mattress",
+    # Restaurants (generic food terms)
+    "restaurant", "grill", "sushi", "pizza", "taco", "burrito", "bbq", "barbecue",
+    "steakhouse", "seafood", "buffet", "diner", "bakery", "deli", "cafe",
+    "bistro", "eatery", "cantina", "tavern", "pub", "brewery", "bar & grill",
+    "ramen", "noodle", "pho", "wings", "wingstop", "hot pot",
+    "korean bbq", "hibachi", "teriyaki", "shawarma", "falafel", "kebab",
+    # Restaurants (chains)
     "mcdonald's", "starbucks", "subway", "domino's", "pizza hut", "burger king",
     "chipotle", "taco bell", "kfc", "wendy's", "dunkin", "chick-fil-a",
     "papa john's", "sonic drive", "arby's", "popeyes", "five guys",
+    "olive garden", "applebee", "chili's", "ihop", "denny's", "waffle house",
+    "cracker barrel", "outback", "longhorn", "red lobster", "texas roadhouse",
+    "buffalo wild wings", "hooters", "carrabba", "bonefish", "cheesecake factory",
+    "pf chang", "benihana", "shake shack", "in-n-out", "whataburger",
+    "jack in the box", "hardee", "carl's jr", "krispy kreme", "baskin",
+    "cold stone", "dairy queen", "culver's",
     # Banks
     "bank of america", "chase bank", "wells fargo", "citibank", "us bank",
     "credit union", "atm", "pnc bank", "td bank", "capital one",
+    "western union", "moneygram", "payday loan",
     # Home / Electronics
     "home depot", "lowe's", "best buy", "apple store", "microsoft store",
     "ace hardware", "menards", "harbor freight",
@@ -136,20 +166,29 @@ SKIP_NON_HOTEL_NAMES = [
     "ups store", "fedex office", "post office", "usps",
     # Gas / Auto
     "gas station", "chevron", "exxon", "shell", "bp", "mobil", "speedway",
+    "wawa", "sheetz", "racetrac", "quiktrip", "circle k", "7-eleven",
     "autozone", "o'reilly auto", "advance auto", "jiffy lube", "valvoline",
     # Religious / Educational
-    "church", "school", "university", "college", "academy", "seminary",
+    "church", "temple", "mosque", "synagogue", "chapel",
+    "school", "university", "college", "academy", "seminary",
     # Fitness / Recreation
     "gym", "fitness", "planet fitness", "la fitness", "24 hour fitness",
-    "ymca", "ywca", "crossfit",
+    "ymca", "ywca", "crossfit", "orangetheory", "equinox", "anytime fitness",
     # Storage / Services
-    "storage", "self storage", "public storage", "u-haul",
+    "storage", "self storage", "public storage", "u-haul", "extra space",
     "laundromat", "dry cleaner", "car wash",
+    # Personal services
+    "salon", "nail", "tattoo", "piercing", "barbershop",
+    # Pet services
+    "pet", "grooming", "doggy", "veterinar", "animal clinic",
+    # Childcare
+    "daycare", "childcare", "preschool", "kindergarten", "learning center",
     # Real estate (not accommodation)
     "apartment", "condo", "real estate", "realty", "property management",
     # Entertainment (not accommodation)
     "museum", "gallery", "library", "zoo", "aquarium", "stadium",
-    "theater", "cinema", "concert hall", "arena", "bowling", "arcade",
+    "theater", "theatre", "cinema", "concert hall", "arena", "bowling", "arcade",
+    "escape room", "trampoline", "skating rink", "mini golf", "laser tag",
     # Government
     "government", "city hall", "courthouse", "police department", "fire station",
     "dmv", "social security", "irs",
