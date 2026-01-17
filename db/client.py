@@ -18,6 +18,11 @@ queries = aiosql.from_path(
 _pool = None
 
 
+async def _init_connection(conn):
+    """Initialize each connection with search_path (works with Supavisor)."""
+    await conn.execute("SET search_path TO sadie_gtm, public")
+
+
 async def init_db():
     """Initialize connection pool once at startup."""
     global _pool
@@ -28,12 +33,12 @@ async def init_db():
             database=os.getenv("SADIE_DB_NAME"),
             user=os.getenv("SADIE_DB_USER"),
             password=os.getenv("SADIE_DB_PASSWORD"),
-            server_settings={'search_path': 'sadie_gtm, public'},
             min_size=1,
-            max_size=3,  # Keep very low: 3 instances × 3 = 9 connections (Supabase limit ~15)
+            max_size=10,  # Transaction pooling mode allows more connections
             command_timeout=60,
             max_inactive_connection_lifetime=300,
             statement_cache_size=0,  # Required for Supavisor transaction mode (port 6543)
+            init=_init_connection,  # Set search_path on each connection init
         )
     return _pool
 
@@ -43,8 +48,6 @@ async def get_conn():
     """Get connection from pool (recommended pattern from asyncpg docs)."""
     pool = await init_db()
     async with pool.acquire() as conn:
-        # Supabase pooler doesn't honor server_settings, set explicitly
-        await conn.execute("SET search_path TO sadie_gtm, public")
         yield conn
 
 
@@ -53,8 +56,6 @@ async def get_transaction():
     """Get connection with transaction context."""
     pool = await init_db()
     async with pool.acquire() as conn:
-        # Supabase pooler doesn't honor server_settings, set explicitly
-        await conn.execute("SET search_path TO sadie_gtm, public")
         async with conn.transaction():
             yield conn
 
