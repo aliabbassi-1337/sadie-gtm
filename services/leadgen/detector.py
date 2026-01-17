@@ -194,6 +194,16 @@ SKIP_NON_HOTEL_NAMES = [
     "dmv", "social security", "irs",
     # Car rental
     "enterprise rent", "hertz", "avis", "budget car", "national car",
+    "sixt", "rent a car", "car rental",
+    # Apartments/Senior Living
+    "apartment", "the palace", "senior living", "assisted living", "nursing home",
+    "retirement", "memory care", "eldercare",
+    # Construction/Services
+    "exteriors", "roofing", "plumbing", "electric", "hvac", "landscaping",
+    "construction", "contractor", "remodeling", "renovation",
+    # Coffee/Food misc
+    "coffee", "bagel", "donut", "smoothie", "juice bar", "ice cream",
+    "frozen yogurt", "cupcake", "cookie",
 ]
 
 

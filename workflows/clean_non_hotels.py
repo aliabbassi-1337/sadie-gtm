@@ -61,6 +61,18 @@ NON_HOTEL_KEYWORDS = [
     "trampoline", "skating rink", "mini golf", "laser tag",
     # Storage
     "storage", "self storage", "u-haul",
+    # Car rental
+    "sixt", "hertz", "avis", "enterprise rent", "budget car", "national car",
+    "rent a car", "car rental",
+    # Apartments/Senior Living (not short-term)
+    "apartment", "the palace", "senior living", "assisted living", "nursing home",
+    "retirement", "memory care", "eldercare",
+    # Construction/Services
+    "exteriors", "roofing", "plumbing", "electric", "hvac", "landscaping",
+    "construction", "contractor", "remodeling", "renovation",
+    # Coffee/Bagel/Food that slipped through
+    "coffee", "bagel", "donut", "smoothie", "juice bar", "ice cream",
+    "frozen yogurt", "cupcake", "cookie",
 ]
 
 
