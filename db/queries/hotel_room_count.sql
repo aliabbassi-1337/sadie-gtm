@@ -25,15 +25,18 @@ LIMIT :limit;
 -- Atomically claim hotels for enrichment (multi-worker safe)
 -- Inserts status=-1 (processing) records, returns claimed hotel IDs
 -- Uses ON CONFLICT DO NOTHING so only one worker claims each hotel
+-- Optional tier filter: pass NULL to include all tiers
 WITH pending AS (
     SELECT h.id, h.name, h.website, h.created_at, h.updated_at
     FROM hotels h
     JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+    JOIN booking_engines be ON hbe.booking_engine_id = be.id
     LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
     WHERE h.status = 0
       AND h.website IS NOT NULL
       AND h.website != ''
       AND hrc.id IS NULL
+      AND (:tier::int IS NULL OR be.tier = :tier)
     LIMIT :limit
 ),
 claimed AS (
@@ -55,14 +58,17 @@ WHERE status = -1
 
 -- name: get_pending_enrichment_count^
 -- Count hotels waiting for enrichment (status=0, successfully detected, has website, not in hotel_room_count)
+-- Optional tier filter: pass NULL to include all tiers
 SELECT COUNT(*) AS count
 FROM hotels h
 JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+JOIN booking_engines be ON hbe.booking_engine_id = be.id
 LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.status = 0
   AND h.website IS NOT NULL
   AND h.website != ''
-  AND hrc.id IS NULL;
+  AND hrc.id IS NULL
+  AND (:tier::int IS NULL OR be.tier = :tier);
 
 -- name: insert_room_count<!
 -- Insert/update room count for a hotel

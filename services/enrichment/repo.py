@@ -21,16 +21,20 @@ async def get_hotels_pending_enrichment(limit: int = 100) -> List[Hotel]:
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
-async def claim_hotels_for_enrichment(limit: int = 100) -> List[Hotel]:
+async def claim_hotels_for_enrichment(limit: int = 100, tier: Optional[int] = None) -> List[Hotel]:
     """Atomically claim hotels for enrichment (multi-worker safe).
 
     Inserts status=-1 (processing) records into hotel_room_count.
     Uses ON CONFLICT DO NOTHING so only one worker claims each hotel.
 
+    Args:
+        limit: Max hotels to claim
+        tier: Only claim hotels with this booking engine tier (1, 2, or 3). None = all tiers.
+
     Returns list of successfully claimed hotels.
     """
     async with get_conn() as conn:
-        results = await queries.claim_hotels_for_enrichment(conn, limit=limit)
+        results = await queries.claim_hotels_for_enrichment(conn, limit=limit, tier=tier)
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
@@ -43,10 +47,14 @@ async def reset_stale_enrichment_claims() -> None:
         await queries.reset_stale_enrichment_claims(conn)
 
 
-async def get_pending_enrichment_count() -> int:
-    """Count hotels waiting for enrichment (has website, not yet in hotel_room_count)."""
+async def get_pending_enrichment_count(tier: Optional[int] = None) -> int:
+    """Count hotels waiting for enrichment (has website, not yet in hotel_room_count).
+    
+    Args:
+        tier: Only count hotels with this booking engine tier (1, 2, or 3). None = all tiers.
+    """
     async with get_conn() as conn:
-        result = await queries.get_pending_enrichment_count(conn)
+        result = await queries.get_pending_enrichment_count(conn, tier=tier)
         return result["count"] if result else 0
 
 

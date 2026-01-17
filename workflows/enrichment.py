@@ -37,26 +37,28 @@ from services.enrichment.service import Service
 from infra import slack
 
 
-async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int = 15, notify: bool = True) -> None:
+async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int = 15, tier: int = None, notify: bool = True) -> None:
     """Run room count enrichment."""
     await init_db()
     try:
         service = Service()
 
         # Get pending count first
-        pending = await service.get_pending_enrichment_count()
-        logger.info(f"Hotels pending room count enrichment: {pending}")
+        pending = await service.get_pending_enrichment_count(tier=tier)
+        tier_label = f"tier {tier}" if tier else "all tiers"
+        logger.info(f"Hotels pending room count enrichment ({tier_label}): {pending}")
 
         if pending == 0:
             logger.info("No hotels pending enrichment")
             return
 
         mode = "free tier (sequential)" if free_tier else f"paid tier ({concurrency} concurrent)"
-        logger.info(f"Starting room count enrichment (limit={limit}, {mode})...")
+        logger.info(f"Starting room count enrichment (limit={limit}, {tier_label}, {mode})...")
         count = await service.enrich_room_counts(
             limit=limit,
             free_tier=free_tier,
             concurrency=concurrency,
+            tier=tier,
         )
 
         logger.info("=" * 60)
@@ -69,6 +71,7 @@ async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int 
             slack.send_message(
                 f"*Room Count Enrichment Complete*\n"
                 f"• Hotels enriched: {count}\n"
+                f"• Tier: {tier_label}\n"
                 f"• Mode: {mode}"
             )
 
@@ -184,6 +187,13 @@ Examples:
         help="Max concurrent requests in paid tier mode (default: 15)"
     )
     room_parser.add_argument(
+        "--tier", "-t",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="Only enrich hotels with this booking engine tier (1=high priority, 2=medium, 3=low). Default: all tiers."
+    )
+    room_parser.add_argument(
         "--no-notify",
         action="store_true",
         help="Disable Slack notification"
@@ -219,11 +229,13 @@ Examples:
 
     if args.command == "room-counts":
         mode = "free tier" if args.free_tier else f"paid tier ({args.concurrency} concurrent)"
-        logger.info(f"Running room count enrichment (limit={args.limit}, {mode})")
+        tier_label = f"tier {args.tier}" if args.tier else "all tiers"
+        logger.info(f"Running room count enrichment (limit={args.limit}, {tier_label}, {mode})")
         asyncio.run(run_room_counts(
             limit=args.limit,
             free_tier=args.free_tier,
             concurrency=args.concurrency,
+            tier=args.tier,
             notify=not args.no_notify,
         ))
     elif args.command == "proximity":

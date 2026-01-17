@@ -60,8 +60,8 @@ ec2:
     type: systemd  # Runs continuously while instance is up
 
   enrichment_room_counts:
-    description: Enrich hotels with room counts via Groq LLM
-    command: uv run python workflows/enrichment.py room-counts --limit 100
+    description: Enrich hotels with room counts via Groq LLM (tier 1 only)
+    command: uv run python workflows/enrichment.py room-counts --limit 100 --tier 1
     schedule: "*/10 * * * *"  # Every 10 min
     type: cron
 

@@ -19,11 +19,16 @@ class IService(ABC):
     """Enrichment Service - Enrich hotel data with room counts and proximity."""
 
     @abstractmethod
-    async def enrich_room_counts(self, limit: int = 100) -> int:
+    async def enrich_room_counts(self, limit: int = 100, tier: int = None) -> int:
         """
         Get room counts for hotels with websites.
         Uses regex extraction first, then falls back to Groq LLM.
         Tracks status in hotel_room_count table (0=failed, 1=success).
+        
+        Args:
+            limit: Max hotels to process
+            tier: Only process hotels with this booking engine tier (1, 2, or 3). None = all tiers.
+            
         Returns number of hotels successfully enriched.
         """
         pass
@@ -42,9 +47,12 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def get_pending_enrichment_count(self) -> int:
+    async def get_pending_enrichment_count(self, tier: int = None) -> int:
         """
         Count hotels waiting for enrichment (has website, not yet processed).
+        
+        Args:
+            tier: Only count hotels with this booking engine tier (1, 2, or 3). None = all tiers.
         """
         pass
 
@@ -65,6 +73,7 @@ class Service(IService):
         limit: int = 100,
         free_tier: bool = False,
         concurrency: int = 15,
+        tier: int = None,
     ) -> int:
         """
         Get room counts for hotels with websites.
@@ -75,6 +84,7 @@ class Service(IService):
             limit: Max hotels to process
             free_tier: If True, use slow sequential mode (30 RPM). Default False (1000 RPM).
             concurrency: Max concurrent requests when not in free_tier mode. Default 15.
+            tier: Only process hotels with this booking engine tier (1, 2, or 3). None = all tiers.
 
         Returns number of hotels successfully enriched.
         """
@@ -84,7 +94,7 @@ class Service(IService):
             return 0
 
         # Claim hotels for enrichment (multi-worker safe)
-        hotels = await repo.claim_hotels_for_enrichment(limit=limit)
+        hotels = await repo.claim_hotels_for_enrichment(limit=limit, tier=tier)
 
         if not hotels:
             log("No hotels pending enrichment")
@@ -206,9 +216,13 @@ class Service(IService):
         )
         return processed_count
 
-    async def get_pending_enrichment_count(self) -> int:
-        """Count hotels waiting for enrichment (has website, not yet in hotel_room_count)."""
-        return await repo.get_pending_enrichment_count()
+    async def get_pending_enrichment_count(self, tier: int = None) -> int:
+        """Count hotels waiting for enrichment (has website, not yet in hotel_room_count).
+        
+        Args:
+            tier: Only count hotels with this booking engine tier (1, 2, or 3). None = all tiers.
+        """
+        return await repo.get_pending_enrichment_count(tier=tier)
 
     async def get_pending_proximity_count(self) -> int:
         """Count hotels waiting for proximity calculation."""
