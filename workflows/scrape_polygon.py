@@ -33,6 +33,7 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 
@@ -50,25 +51,24 @@ async def list_regions(service: Service, state: str) -> None:
     regions = await service.get_regions(state)
     
     if not regions:
-        print(f"\nNo regions configured for {state}.")
-        print(f"Run with --generate to create regions from target cities.")
+        logger.warning(f"No regions configured for {state}.")
+        logger.info("Ingest regions first: uv run python -m workflows.ingest_regions --state {state}")
         return
     
     total_area = await service.get_total_region_area(state)
     
-    print(f"\n{'='*60}")
-    print(f"Scrape Regions for {state}")
-    print(f"{'='*60}")
-    print(f"Total regions: {len(regions)}")
-    print(f"Total area: {total_area:,.1f} km²")
-    print()
-    
-    print(f"{'Name':<25} {'Type':<10} {'Radius':<10} {'Cell Size':<10} {'Priority':<8}")
-    print("-" * 73)
+    logger.info("=" * 60)
+    logger.info(f"Scrape Regions for {state}")
+    logger.info("=" * 60)
+    logger.info(f"Total regions: {len(regions)}")
+    logger.info(f"Total area: {total_area:,.1f} km²")
+    logger.info("")
+    logger.info(f"{'Name':<25} {'Type':<10} {'Radius':<10} {'Cell Size':<10} {'Priority':<8}")
+    logger.info("-" * 73)
     
     for region in regions:
-        radius_str = f"{region.radius_km:.1f} km" if region.radius_km else "custom"
-        print(
+        radius_str = f"{region.radius_km:.1f} km" if region.radius_km else "polygon"
+        logger.info(
             f"{region.name:<25} "
             f"{region.region_type:<10} "
             f"{radius_str:<10} "
@@ -82,22 +82,21 @@ async def estimate_regions(service: Service, state: str) -> None:
     estimate = await service.estimate_regions(state)
     
     if estimate["regions"] == 0:
-        print(f"\n{estimate['message']}")
+        logger.warning(estimate['message'])
         return
     
-    print(f"\n{'='*60}")
-    print(f"Estimate for {state} Region Scraping")
-    print(f"{'='*60}")
-    print(f"Regions: {estimate['regions']}")
-    print(f"Total area: {estimate['total_area_km2']:,.1f} km²")
-    print(f"Total cells: {estimate['total_cells']:,}")
-    print(f"API calls: {estimate['total_api_calls_range']}")
-    print(f"Cost: {estimate['estimated_cost_usd_range']}")
-    print()
-    
-    print("Region breakdown:")
+    logger.info("=" * 60)
+    logger.info(f"Estimate for {state} Region Scraping")
+    logger.info("=" * 60)
+    logger.info(f"Regions: {estimate['regions']}")
+    logger.info(f"Total area: {estimate['total_area_km2']:,.1f} km²")
+    logger.info(f"Total cells: {estimate['total_cells']:,}")
+    logger.info(f"API calls: {estimate['total_api_calls_range']}")
+    logger.info(f"Cost: {estimate['estimated_cost_usd_range']}")
+    logger.info("")
+    logger.info("Region breakdown:")
     for r in estimate["region_breakdown"]:
-        print(f"  • {r['name']}: {r['cells']:,} cells ({r['cell_size_km']}km)")
+        logger.info(f"  • {r['name']}: {r['cells']:,} cells ({r['cell_size_km']}km)")
 
 
 async def scrape_regions(service: Service, state: str) -> None:
@@ -105,17 +104,17 @@ async def scrape_regions(service: Service, state: str) -> None:
     region_count = await service.count_regions(state)
     
     if region_count == 0:
-        print(f"\nNo regions configured for {state}.")
-        print(f"Run with --generate to create regions from target cities.")
+        logger.warning(f"No regions configured for {state}.")
+        logger.info("Ingest regions first: uv run python -m workflows.ingest_regions --state {state}")
         return
     
-    print(f"\nScraping {region_count} regions for {state}...")
+    logger.info(f"Scraping {region_count} regions for {state}...")
     hotels = await service.scrape_regions(state, save_to_db=True)
     
-    print(f"\n{'='*60}")
-    print(f"Scraping Complete")
-    print(f"{'='*60}")
-    print(f"Total unique hotels found: {len(hotels)}")
+    logger.info("=" * 60)
+    logger.info("Scraping Complete")
+    logger.info("=" * 60)
+    logger.info(f"Total unique hotels found: {len(hotels)}")
 
 
 async def add_region(
@@ -137,32 +136,32 @@ async def add_region(
         region_type="custom",
         cell_size_km=cell_size,
     )
-    print(f"\nAdded region: {region.name}")
-    print(f"  Center: ({lat}, {lng})")
-    print(f"  Radius: {radius} km")
-    print(f"  Cell size: {cell_size} km")
+    logger.info(f"Added region: {region.name}")
+    logger.info(f"  Center: ({lat}, {lng})")
+    logger.info(f"  Radius: {radius} km")
+    logger.info(f"  Cell size: {cell_size} km")
 
 
 async def remove_region(service: Service, state: str, name: str) -> None:
     """Remove a region."""
     region = await service.get_region(name, state)
     if not region:
-        print(f"\nRegion '{name}' not found in {state}.")
+        logger.warning(f"Region '{name}' not found in {state}.")
         return
     
     await service.remove_region(name, state)
-    print(f"\nRemoved region: {name}")
+    logger.info(f"Removed region: {name}")
 
 
 async def clear_regions(service: Service, state: str) -> None:
     """Clear all regions for a state."""
     count = await service.count_regions(state)
     if count == 0:
-        print(f"\nNo regions to clear for {state}.")
+        logger.warning(f"No regions to clear for {state}.")
         return
     
     await service.clear_regions(state)
-    print(f"\nCleared {count} regions for {state}.")
+    logger.info(f"Cleared {count} regions for {state}.")
 
 
 async def add_region_from_geojson(
@@ -173,8 +172,6 @@ async def add_region_from_geojson(
     cell_size: float,
 ) -> None:
     """Add a region from a GeoJSON file."""
-    import json
-    
     with open(geojson_path) as f:
         data = json.load(f)
     
@@ -187,7 +184,7 @@ async def add_region_from_geojson(
         geom = data
     
     if geom.get("type") not in ("Polygon", "MultiPolygon"):
-        print(f"Error: GeoJSON must be a Polygon or MultiPolygon, got {geom.get('type')}")
+        logger.error(f"GeoJSON must be a Polygon or MultiPolygon, got {geom.get('type')}")
         return
     
     # Calculate center from coordinates
@@ -211,28 +208,24 @@ async def add_region_from_geojson(
         cell_size_km=cell_size,
     )
     
-    # Calculate area
-    area_km2 = (max(lats) - min(lats)) * 111.0 * (max(lngs) - min(lngs)) * 111.0 * 0.785  # rough
-    
-    print(f"\nAdded custom polygon region: {region.name}")
-    print(f"  Center: ({center_lat:.4f}, {center_lng:.4f})")
-    print(f"  Bounds: lat [{min(lats):.4f}, {max(lats):.4f}], lng [{min(lngs):.4f}, {max(lngs):.4f}]")
-    print(f"  Points: {len(coords)}")
-    print(f"  Cell size: {cell_size} km")
+    logger.info(f"Added custom polygon region: {region.name}")
+    logger.info(f"  Center: ({center_lat:.4f}, {center_lng:.4f})")
+    logger.info(f"  Bounds: lat [{min(lats):.4f}, {max(lats):.4f}], lng [{min(lngs):.4f}, {max(lngs):.4f}]")
+    logger.info(f"  Points: {len(coords)}")
+    logger.info(f"  Cell size: {cell_size} km")
 
 
 async def show_geojson(service: Service, state: str, name: str) -> None:
     """Output GeoJSON for a region (can paste into geojson.io for visualization)."""
     region = await service.get_region(name, state)
     if not region:
-        print(f"\nRegion '{name}' not found in {state}.")
+        logger.warning(f"Region '{name}' not found in {state}.")
         return
     
     if not region.polygon_geojson:
-        print(f"\nRegion '{name}' has no polygon data.")
+        logger.warning(f"Region '{name}' has no polygon data.")
         return
     
-    import json
     geom = json.loads(region.polygon_geojson)
     
     # Wrap in Feature for geojson.io compatibility
@@ -247,9 +240,9 @@ async def show_geojson(service: Service, state: str, name: str) -> None:
         "geometry": geom
     }
     
-    print(f"\n# GeoJSON for {region.name}")
-    print(f"# Paste at https://geojson.io to visualize\n")
-    print(json.dumps(feature, indent=2))
+    logger.info(f"GeoJSON for {region.name}")
+    logger.info("Paste at https://geojson.io to visualize")
+    logger.info(json.dumps(feature, indent=2))
 
 
 async def main():
@@ -292,6 +285,10 @@ Examples:
     args = parser.parse_args()
     state = args.state.upper()
     
+    # Configure logging
+    logger.remove()
+    logger.add(sys.stderr, level="INFO", format="<level>{level: <8}</level> | {message}")
+    
     # Initialize
     await init_db()
     api_key = os.environ.get("SERPER_API_KEY")
@@ -300,7 +297,7 @@ Examples:
         args.remove or args.show_geojson
     )
     if not api_key and not no_api_key_needed:
-        print("Error: SERPER_API_KEY environment variable required for scraping")
+        logger.error("SERPER_API_KEY environment variable required for scraping")
         await close_db()
         sys.exit(1)
     
@@ -323,7 +320,7 @@ Examples:
                 # Add circular region
                 await add_region(service, state, args.add, args.lat, args.lng, args.radius, args.cell_size)
             else:
-                print("Error: Either --geojson or --lat/--lng required when adding a region")
+                logger.error("Either --geojson or --lat/--lng required when adding a region")
                 sys.exit(1)
         elif args.remove:
             await remove_region(service, state, args.remove)

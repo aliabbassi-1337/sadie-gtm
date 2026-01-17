@@ -38,25 +38,23 @@ from services.leadgen.service import Service, ScrapeEstimate
 from infra import slack
 
 
-def print_estimate(estimate: ScrapeEstimate, region_name: str):
-    """Print a formatted cost estimate."""
-    print()
-    print("=" * 60)
-    print(f"COST ESTIMATE: {region_name}")
-    print("=" * 60)
-    print(f"Region size:          {estimate.region_size_km2:,.1f} km²")
-    print(f"Initial cells:        {estimate.initial_cells:,}")
-    print(f"Est. total cells:     {estimate.estimated_cells_after_subdivision:,} (after subdivision)")
-    print(f"Avg queries/cell:     {estimate.avg_queries_per_cell:.1f} (adaptive: 2-12)")
-    print(f"Est. API calls:       {estimate.estimated_api_calls:,}")
-    print(f"Est. cost:            ${estimate.estimated_cost_usd:.2f}")
-    print(f"Est. hotels:          {estimate.estimated_hotels:,}")
-    print()
-    print("Pricing: $1 per 1,000 credits ($50 = 50k credits)")
-    print("Rate limit: 4 queries/second")
-    print(f"Est. time:            ~{estimate.estimated_api_calls / 4 / 60:.1f} minutes")
-    print("=" * 60)
-    print()
+def log_estimate(estimate: ScrapeEstimate, region_name: str):
+    """Log a formatted cost estimate."""
+    logger.info("=" * 60)
+    logger.info(f"COST ESTIMATE: {region_name}")
+    logger.info("=" * 60)
+    logger.info(f"Region size:          {estimate.region_size_km2:,.1f} km²")
+    logger.info(f"Initial cells:        {estimate.initial_cells:,}")
+    logger.info(f"Est. total cells:     {estimate.estimated_cells_after_subdivision:,} (after subdivision)")
+    logger.info(f"Avg queries/cell:     {estimate.avg_queries_per_cell:.1f} (adaptive: 2-12)")
+    logger.info(f"Est. API calls:       {estimate.estimated_api_calls:,}")
+    logger.info(f"Est. cost:            ${estimate.estimated_cost_usd:.2f}")
+    logger.info(f"Est. hotels:          {estimate.estimated_hotels:,}")
+    logger.info("")
+    logger.info("Pricing: $1 per 1,000 credits ($50 = 50k credits)")
+    logger.info("Rate limit: 4 queries/second")
+    logger.info(f"Est. time:            ~{estimate.estimated_api_calls / 4 / 60:.1f} minutes")
+    logger.info("=" * 60)
 
 
 async def scrape_region_workflow(
@@ -125,7 +123,7 @@ def main():
 
     if args.estimate:
         estimate = service.estimate_region(args.lat, args.lng, args.radius_km, args.cell_size)
-        print_estimate(estimate, f"({args.lat}, {args.lng}) r={args.radius_km}km cell={args.cell_size}km")
+        log_estimate(estimate, f"({args.lat}, {args.lng}) r={args.radius_km}km cell={args.cell_size}km")
     else:
         region_name = f"({args.lat}, {args.lng})"
         asyncio.run(scrape_region_workflow(args.lat, args.lng, args.radius_km, args.cell_size, region_name, not args.no_notify))
