@@ -150,12 +150,19 @@ def generate_all() -> None:
     logger.info("Review and deploy with: uv run python scripts/deploy_ec2.py deploy --host <ec2-host>")
 
 
-def deploy(host: str, restart: bool = False) -> None:
+def deploy(host: str, restart: bool = False, key: str = None) -> None:
     """Deploy generated configs to EC2 via SSH."""
     # First generate the files
     generate_all()
     
     logger.info(f"Deploying to {host}...")
+    
+    # Build SSH/SCP args with optional key
+    ssh_args = ["ssh"]
+    scp_args = ["scp"]
+    if key:
+        ssh_args.extend(["-i", key])
+        scp_args.extend(["-i", key])
     
     # Copy generated files
     generated_files = list(OUTPUT_DIR.glob("*"))
@@ -165,14 +172,14 @@ def deploy(host: str, restart: bool = False) -> None:
     
     # Create remote directories
     subprocess.run(
-        ["ssh", host, "sudo mkdir -p /var/log/sadie && sudo chown ubuntu:ubuntu /var/log/sadie"],
+        ssh_args + [host, "sudo mkdir -p /var/log/sadie && sudo chown ubuntu:ubuntu /var/log/sadie"],
         check=True
     )
     
     # Copy files to temp location on remote
     for f in generated_files:
         logger.info(f"  Copying {f.name}...")
-        subprocess.run(["scp", str(f), f"{host}:/tmp/{f.name}"], check=True)
+        subprocess.run(scp_args + [str(f), f"{host}:/tmp/{f.name}"], check=True)
     
     # Move to correct locations and set permissions
     commands = []
@@ -200,7 +207,7 @@ def deploy(host: str, restart: bool = False) -> None:
     # Run commands
     for cmd in commands:
         logger.info(f"  {cmd}")
-        subprocess.run(["ssh", host, cmd], check=True)
+        subprocess.run(ssh_args + [host, cmd], check=True)
     
     # Restart if requested
     if restart:
@@ -208,7 +215,7 @@ def deploy(host: str, restart: bool = False) -> None:
         for f in generated_files:
             if f.suffix == ".service":
                 service_name = f.stem
-                subprocess.run(["ssh", host, f"sudo systemctl restart {service_name}"], check=True)
+                subprocess.run(ssh_args + [host, f"sudo systemctl restart {service_name}"], check=True)
                 logger.info(f"  Restarted {service_name}")
     
     logger.info("")
@@ -235,6 +242,7 @@ def main():
     # Deploy command
     deploy_parser = subparsers.add_parser("deploy", help="Deploy to EC2 via SSH")
     deploy_parser.add_argument("--host", required=True, help="SSH host (e.g., ubuntu@1.2.3.4)")
+    deploy_parser.add_argument("--key", "-i", help="Path to SSH private key (e.g., ~/.ssh/my-key.pem)")
     deploy_parser.add_argument("--restart", action="store_true", help="Restart services after deploy")
     
     args = parser.parse_args()
@@ -246,7 +254,7 @@ def main():
     if args.command == "generate":
         generate_all()
     elif args.command == "deploy":
-        deploy(args.host, args.restart)
+        deploy(args.host, args.restart, args.key)
 
 
 if __name__ == "__main__":
