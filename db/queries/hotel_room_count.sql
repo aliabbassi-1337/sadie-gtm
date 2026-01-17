@@ -14,7 +14,7 @@ SELECT
     h.updated_at
 FROM hotels h
 JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.status = 0
   AND h.website IS NOT NULL
   AND h.website != ''
@@ -31,7 +31,7 @@ WITH pending AS (
     FROM hotels h
     JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     JOIN booking_engines be ON hbe.booking_engine_id = be.id
-    LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
+    LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
     WHERE h.status = 0
       AND h.website IS NOT NULL
       AND h.website != ''
@@ -40,7 +40,7 @@ WITH pending AS (
     LIMIT :limit
 ),
 claimed AS (
-    INSERT INTO hotel_room_count (hotel_id, status)
+    INSERT INTO sadie_gtm.hotel_room_count (hotel_id, status)
     SELECT id, -1 FROM pending
     ON CONFLICT (hotel_id) DO NOTHING
     RETURNING hotel_id
@@ -52,7 +52,7 @@ JOIN claimed c ON p.id = c.hotel_id;
 -- name: reset_stale_enrichment_claims!
 -- Reset claims stuck in processing state (status=-1) for more than N minutes
 -- Run this periodically to recover from crashed workers
-DELETE FROM hotel_room_count
+DELETE FROM sadie_gtm.hotel_room_count
 WHERE status = -1
   AND enriched_at < NOW() - INTERVAL '30 minutes';
 
@@ -63,7 +63,7 @@ SELECT COUNT(*) AS count
 FROM hotels h
 JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 JOIN booking_engines be ON hbe.booking_engine_id = be.id
-LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.status = 0
   AND h.website IS NOT NULL
   AND h.website != ''
@@ -73,7 +73,7 @@ WHERE h.status = 0
 -- name: insert_room_count<!
 -- Insert/update room count for a hotel
 -- status: -1=processing, 0=failed, 1=success
-INSERT INTO hotel_room_count (hotel_id, room_count, source, confidence, status)
+INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, confidence, status)
 VALUES (:hotel_id, :room_count, :source, :confidence, :status)
 ON CONFLICT (hotel_id) DO UPDATE SET
     room_count = EXCLUDED.room_count,
@@ -86,10 +86,10 @@ RETURNING id;
 -- name: get_room_count_by_hotel_id^
 -- Get room count for a specific hotel
 SELECT id, hotel_id, room_count, source, confidence, status, enriched_at
-FROM hotel_room_count
+FROM sadie_gtm.hotel_room_count
 WHERE hotel_id = :hotel_id;
 
 -- name: delete_room_count!
 -- Delete room count for a hotel (for testing)
-DELETE FROM hotel_room_count
+DELETE FROM sadie_gtm.hotel_room_count
 WHERE hotel_id = :hotel_id;

@@ -3,18 +3,18 @@
 -- name: get_target_cities_by_state
 -- Get all target cities for a state
 SELECT id, name, state, lat, lng, radius_km, display_name, source, created_at
-FROM scrape_target_cities
+FROM sadie_gtm.scrape_target_cities
 WHERE UPPER(state) = UPPER(:state);
 
 -- name: get_target_city^
 -- Get a specific target city by name and state (returns single row)
 SELECT id, name, state, lat, lng, radius_km, display_name, source, created_at
-FROM scrape_target_cities
+FROM sadie_gtm.scrape_target_cities
 WHERE LOWER(name) = LOWER(:name) AND UPPER(state) = UPPER(:state);
 
 -- name: insert_target_city$
 -- Insert or update a target city
-INSERT INTO scrape_target_cities (name, state, lat, lng, radius_km, display_name, source)
+INSERT INTO sadie_gtm.scrape_target_cities (name, state, lat, lng, radius_km, display_name, source)
 VALUES (:name, :state, :lat, :lng, :radius_km, :display_name, :source)
 ON CONFLICT (name, state) DO UPDATE SET
     lat = EXCLUDED.lat,
@@ -25,9 +25,9 @@ RETURNING id;
 
 -- name: delete_target_city!
 -- Delete a target city
-DELETE FROM scrape_target_cities
+DELETE FROM sadie_gtm.scrape_target_cities
 WHERE LOWER(name) = LOWER(:name) AND UPPER(state) = UPPER(:state);
 
 -- name: count_target_cities_by_state$
 -- Count target cities for a state
-SELECT COUNT(*) FROM scrape_target_cities WHERE UPPER(state) = UPPER(:state);
+SELECT COUNT(*) FROM sadie_gtm.scrape_target_cities WHERE UPPER(state) = UPPER(:state);

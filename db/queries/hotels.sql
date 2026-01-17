@@ -20,12 +20,12 @@ SELECT
     source,
     created_at,
     updated_at
-FROM hotels
+FROM sadie_gtm.hotels
 WHERE id = :hotel_id;
 
 -- name: insert_hotel<!
 -- Insert a new hotel and return the ID
-INSERT INTO hotels (
+INSERT INTO sadie_gtm.hotels (
     name,
     google_place_id,
     website,
@@ -78,7 +78,7 @@ RETURNING id;
 
 -- name: delete_hotel!
 -- Delete a hotel by ID
-DELETE FROM hotels
+DELETE FROM sadie_gtm.hotels
 WHERE id = :hotel_id;
 
 -- name: get_hotels_pending_detection
@@ -104,7 +104,7 @@ SELECT
     h.source,
     h.created_at,
     h.updated_at
-FROM hotels h
+FROM sadie_gtm.hotels h
 LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
 WHERE h.status = 0
   AND hbe.hotel_id IS NULL
@@ -123,7 +123,7 @@ LIMIT :limit;
 
 -- name: update_hotel_status!
 -- Update hotel status after detection
-UPDATE hotels
+UPDATE sadie_gtm.hotels
 SET status = :status,
     phone_website = COALESCE(:phone_website, phone_website),
     email = COALESCE(:email, email),
@@ -132,7 +132,7 @@ WHERE id = :hotel_id;
 
 -- name: update_hotel_contact_info!
 -- Update hotel contact info without changing status
-UPDATE hotels
+UPDATE sadie_gtm.hotels
 SET phone_website = COALESCE(:phone_website, phone_website),
     email = COALESCE(:email, email),
     updated_at = CURRENT_TIMESTAMP
@@ -160,12 +160,12 @@ SELECT
     source,
     created_at,
     updated_at
-FROM hotels
+FROM sadie_gtm.hotels
 WHERE id = ANY(:hotel_ids);
 
 -- name: update_hotels_status_batch!
 -- Update status for multiple hotels at once (for enqueue job)
-UPDATE hotels
+UPDATE sadie_gtm.hotels
 SET status = :status, updated_at = CURRENT_TIMESTAMP
 WHERE id = ANY(:hotel_ids);
 
@@ -194,12 +194,12 @@ SELECT
     hrc.room_count,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
-FROM hotels h
+FROM sadie_gtm.hotels h
 LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
-LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
-LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
-LEFT JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.city = :city
   AND h.state = :state
   AND h.status = 1;
@@ -225,12 +225,12 @@ SELECT
     hrc.room_count,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
-FROM hotels h
+FROM sadie_gtm.hotels h
 LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
-LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
-LEFT JOIN hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
-LEFT JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
   AND h.status = 1;
 
@@ -244,9 +244,9 @@ SELECT
     COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
     COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
     COUNT(CASE WHEN be.tier = 2 THEN 1 END) AS tier_2_count
-FROM hotels h
+FROM sadie_gtm.hotels h
 LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
-LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.city = :city
   AND h.state = :state;
 
@@ -260,9 +260,9 @@ SELECT
     COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
     COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
     COUNT(CASE WHEN be.tier = 2 THEN 1 END) AS tier_2_count
-FROM hotels h
+FROM sadie_gtm.hotels h
 LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
-LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state;
 
 -- name: get_top_engines_for_city
@@ -270,9 +270,9 @@ WHERE h.state = :state;
 SELECT
     be.name AS engine_name,
     COUNT(*) AS hotel_count
-FROM hotels h
+FROM sadie_gtm.hotels h
 JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
-JOIN booking_engines be ON hbe.booking_engine_id = be.id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.city = :city
   AND h.state = :state
   AND h.status = 1
@@ -283,9 +283,9 @@ GROUP BY be.name;
 SELECT
     be.name AS engine_name,
     COUNT(*) AS hotel_count
-FROM hotels h
+FROM sadie_gtm.hotels h
 JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
-JOIN booking_engines be ON hbe.booking_engine_id = be.id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
   AND h.status = 1
 GROUP BY be.name;
@@ -293,7 +293,7 @@ GROUP BY be.name;
 -- name: get_cities_in_state
 -- Get all cities in a state that have launched hotels
 SELECT DISTINCT city
-FROM hotels
+FROM sadie_gtm.hotels
 WHERE state = :state
   AND city IS NOT NULL
   AND status = 1;
@@ -321,21 +321,21 @@ SELECT
     hrc.room_count,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
-FROM hotels h
+FROM sadie_gtm.hotels h
 INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-INNER JOIN booking_engines be ON hbe.booking_engine_id = be.id
-INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+INNER JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
-INNER JOIN existing_customers ec ON hcp.existing_customer_id = ec.id
+INNER JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.status = 0
 LIMIT :limit;
 
 -- name: get_launchable_count^
 -- Count hotels ready to be launched (status=0 with all enrichment data)
 SELECT COUNT(*) AS count
-FROM hotels h
+FROM sadie_gtm.hotels h
 INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0;
 
@@ -345,15 +345,15 @@ WHERE h.status = 0;
 -- Returns launched hotel IDs for logging/tracking
 WITH claimed AS (
     SELECT h.id
-    FROM hotels h
+    FROM sadie_gtm.hotels h
     INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-    INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+    INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
     INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
       AND h.id = ANY(:hotel_ids)
     FOR UPDATE OF h SKIP LOCKED
 )
-UPDATE hotels
+UPDATE sadie_gtm.hotels
 SET status = 1, updated_at = CURRENT_TIMESTAMP
 WHERE id IN (SELECT id FROM claimed)
 RETURNING id;
@@ -364,15 +364,15 @@ RETURNING id;
 -- Returns launched hotel IDs for logging/tracking
 WITH claimed AS (
     SELECT h.id
-    FROM hotels h
+    FROM sadie_gtm.hotels h
     INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-    INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+    INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
     INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
     FOR UPDATE OF h SKIP LOCKED
     LIMIT :limit
 )
-UPDATE hotels
+UPDATE sadie_gtm.hotels
 SET status = 1, updated_at = CURRENT_TIMESTAMP
 WHERE id IN (SELECT id FROM claimed)
 RETURNING id;
@@ -380,5 +380,5 @@ RETURNING id;
 -- name: get_launched_count^
 -- Count hotels that have been launched (status=1)
 SELECT COUNT(*) AS count
-FROM hotels
+FROM sadie_gtm.hotels
 WHERE status = 1;

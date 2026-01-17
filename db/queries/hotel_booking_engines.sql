@@ -1,7 +1,7 @@
 -- name: insert_hotel_booking_engine!
 -- Link hotel to detected booking engine
 -- status: -1=failed (non-retriable), 1=success
-INSERT INTO hotel_booking_engines (
+INSERT INTO sadie_gtm.hotel_booking_engines (
     hotel_id,
     booking_engine_id,
     booking_url,

@@ -7,7 +7,7 @@ SELECT
     ST_X(location::geometry) AS longitude,
     status,
     created_at
-FROM existing_customers
+FROM sadie_gtm.existing_customers
 WHERE location IS NOT NULL
   AND status = 'active';
 
@@ -19,7 +19,7 @@ SELECT
     ec.name AS customer_name,
     ST_Distance(h.location, ec.location) / 1000 AS distance_km
 FROM hotels h
-CROSS JOIN existing_customers ec
+CROSS JOIN sadie_gtm.existing_customers ec
 WHERE h.id = :hotel_id
   AND h.location IS NOT NULL
   AND ec.location IS NOT NULL

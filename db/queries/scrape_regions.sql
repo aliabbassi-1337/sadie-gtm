@@ -6,7 +6,7 @@ SELECT
     id, name, state, region_type,
     ST_AsGeoJSON(polygon) as polygon_geojson,
     center_lat, center_lng, radius_km, cell_size_km, priority, created_at
-FROM scrape_regions
+FROM sadie_gtm.scrape_regions
 WHERE UPPER(state) = UPPER(:state)
 ORDER BY priority DESC, name;
 
@@ -16,12 +16,12 @@ SELECT
     id, name, state, region_type,
     ST_AsGeoJSON(polygon) as polygon_geojson,
     center_lat, center_lng, radius_km, cell_size_km, priority, created_at
-FROM scrape_regions
+FROM sadie_gtm.scrape_regions
 WHERE LOWER(name) = LOWER(:name) AND UPPER(state) = UPPER(:state);
 
 -- name: insert_region$
 -- Insert a new region from a center point and radius (creates circular polygon)
-INSERT INTO scrape_regions (name, state, region_type, polygon, center_lat, center_lng, radius_km, cell_size_km, priority)
+INSERT INTO sadie_gtm.scrape_regions (name, state, region_type, polygon, center_lat, center_lng, radius_km, cell_size_km, priority)
 VALUES (
     :name, 
     :state, 
@@ -44,7 +44,7 @@ RETURNING id;
 
 -- name: insert_region_geojson$
 -- Insert a region from raw GeoJSON polygon
-INSERT INTO scrape_regions (name, state, region_type, polygon, center_lat, center_lng, cell_size_km, priority)
+INSERT INTO sadie_gtm.scrape_regions (name, state, region_type, polygon, center_lat, center_lng, cell_size_km, priority)
 VALUES (
     :name, 
     :state, 
@@ -65,21 +65,21 @@ RETURNING id;
 
 -- name: delete_region!
 -- Delete a region
-DELETE FROM scrape_regions
+DELETE FROM sadie_gtm.scrape_regions
 WHERE LOWER(name) = LOWER(:name) AND UPPER(state) = UPPER(:state);
 
 -- name: delete_regions_by_state!
 -- Delete all regions for a state
-DELETE FROM scrape_regions WHERE UPPER(state) = UPPER(:state);
+DELETE FROM sadie_gtm.scrape_regions WHERE UPPER(state) = UPPER(:state);
 
 -- name: count_regions_by_state$
 -- Count regions for a state
-SELECT COUNT(*) FROM scrape_regions WHERE UPPER(state) = UPPER(:state);
+SELECT COUNT(*) FROM sadie_gtm.scrape_regions WHERE UPPER(state) = UPPER(:state);
 
 -- name: point_in_any_region$
 -- Check if a point is within any region for a state
 SELECT COUNT(*) > 0 as is_in_region
-FROM scrape_regions
+FROM sadie_gtm.scrape_regions
 WHERE UPPER(state) = UPPER(:state)
   AND ST_Covers(polygon, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography);
 
@@ -89,7 +89,7 @@ SELECT
     id, name, state, region_type,
     ST_AsGeoJSON(polygon) as polygon_geojson,
     center_lat, center_lng, radius_km, cell_size_km, priority
-FROM scrape_regions
+FROM sadie_gtm.scrape_regions
 WHERE UPPER(state) = UPPER(:state)
   AND ST_Covers(polygon, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography);
 
@@ -100,11 +100,11 @@ SELECT
     ST_XMax(polygon::geometry) as lng_max,
     ST_YMin(polygon::geometry) as lat_min,
     ST_YMax(polygon::geometry) as lat_max
-FROM scrape_regions
+FROM sadie_gtm.scrape_regions
 WHERE id = :region_id;
 
 -- name: get_total_area_km2$
 -- Get total area of all regions for a state in km²
 SELECT COALESCE(SUM(ST_Area(polygon) / 1000000), 0) as total_area_km2
-FROM scrape_regions
+FROM sadie_gtm.scrape_regions
 WHERE UPPER(state) = UPPER(:state);
