@@ -55,11 +55,11 @@ export PATH="$HOME/.local/bin:$PATH"
 # Clone repository
 echo "[4/8] Cloning repository..."
 cd /home/ubuntu
-if [ -d "sadie_gtm" ]; then
-    cd sadie_gtm && git pull
+if [ -d "sadie-gtm" ]; then
+    cd sadie-gtm && git pull
 else
-    git clone https://github.com/aliabbassi-1337/sadie-gtm.git sadie_gtm
-    cd sadie_gtm
+    git clone https://github.com/aliabbassi-1337/sadie-gtm.git sadie-gtm
+    cd sadie-gtm
 fi
 
 # Install Python dependencies
@@ -110,7 +110,7 @@ echo "Setup Complete!"
 echo "=============================================="
 echo ""
 echo "IMPORTANT: Create .env file before starting services:"
-echo "  nano /home/ubuntu/sadie_gtm/.env"
+echo "  nano /home/ubuntu/sadie-gtm/.env"
 echo ""
 echo "Required environment variables:"
 echo "  DATABASE_URL=postgresql://..."

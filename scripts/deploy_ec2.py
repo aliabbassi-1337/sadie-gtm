@@ -43,8 +43,8 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/home/ubuntu/sadie_gtm
-EnvironmentFile=/home/ubuntu/sadie_gtm/.env
+WorkingDirectory=/home/ubuntu/sadie-gtm
+EnvironmentFile=/home/ubuntu/sadie-gtm/.env
 
 ExecStart=/home/ubuntu/.local/bin/{command}
 
@@ -72,7 +72,7 @@ MAILTO=""
 
 """
 
-CRON_JOB_TEMPLATE = "# {description}\n{schedule} ubuntu cd /home/ubuntu/sadie_gtm && source .env && /home/ubuntu/.local/bin/{command} >> /var/log/sadie/{name}.log 2>&1\n"
+CRON_JOB_TEMPLATE = "# {description}\n{schedule} ubuntu cd /home/ubuntu/sadie-gtm && source .env && /home/ubuntu/.local/bin/{command} >> /var/log/sadie/{name}.log 2>&1\n"
 
 
 def load_workflows() -> Dict[str, Any]:
