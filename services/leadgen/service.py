@@ -10,7 +10,7 @@ from loguru import logger
 from services.leadgen import repo
 from services.leadgen.constants import HotelStatus
 from services.leadgen.detector import BatchDetector, DetectionConfig, DetectionResult
-from services.leadgen.geocoding import CityLocation, geocode_city
+from services.leadgen.geocoding import CityLocation, geocode_city, fetch_city_boundary
 from pydantic import BaseModel
 import json
 from db.models.hotel import Hotel
@@ -792,6 +792,75 @@ class Service(IService):
             )
             regions.append(region)
             logger.info(f"Created region: {city.name} ({radius}km radius, {cell_size}km cells)")
+        
+        return regions
+
+    async def generate_regions_from_boundaries(
+        self,
+        state: str,
+        clear_existing: bool = True,
+    ) -> List[ScrapeRegion]:
+        """
+        Generate optimized regions using REAL city boundaries from OpenStreetMap.
+        
+        Much more efficient than circles for:
+        - Coastal cities (no ocean coverage)
+        - Islands (exact land area only)
+        - Irregular city shapes
+        
+        Falls back to circular regions for cities without OSM boundary data.
+        """
+        import asyncio
+        
+        if clear_existing:
+            await self.clear_regions(state)
+        
+        cities = await self.get_target_cities(state)
+        regions = []
+        
+        for city in cities:
+            # Rate limit: Nominatim allows 1 req/sec
+            await asyncio.sleep(1.1)
+            
+            # Try to fetch real boundary
+            boundary = await fetch_city_boundary(city.name, state)
+            
+            radius = city.radius_km or 12.0
+            if radius >= 20:
+                cell_size = 2.0
+            elif radius >= 12:
+                cell_size = 1.5
+            else:
+                cell_size = 1.0
+            
+            if boundary:
+                # Use real OSM boundary
+                region = await self.add_region_geojson(
+                    name=city.name,
+                    state=state,
+                    polygon_geojson=boundary.polygon_geojson,
+                    center_lat=boundary.lat,
+                    center_lng=boundary.lng,
+                    region_type="boundary",
+                    cell_size_km=cell_size,
+                    priority=1 if radius >= 20 else 0,
+                )
+                logger.info(f"Created boundary region: {city.name} (OSM, {cell_size}km cells)")
+            else:
+                # Fall back to circle
+                region = await self.add_region(
+                    name=city.name,
+                    state=state,
+                    center_lat=city.lat,
+                    center_lng=city.lng,
+                    radius_km=radius,
+                    region_type="city",
+                    cell_size_km=cell_size,
+                    priority=1 if radius >= 20 else 0,
+                )
+                logger.info(f"Created circular region: {city.name} ({radius}km radius, fallback)")
+            
+            regions.append(region)
         
         return regions
 

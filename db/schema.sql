@@ -292,8 +292,8 @@ CREATE TABLE IF NOT EXISTS scrape_regions (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,                    -- e.g., "Miami Metro", "Orlando Theme Parks"
     state TEXT NOT NULL,                   -- State code (e.g., "FL")
-    region_type TEXT DEFAULT 'city',       -- city, corridor, custom
-    polygon GEOGRAPHY(POLYGON, 4326),      -- GeoJSON polygon as PostGIS geography
+    region_type TEXT DEFAULT 'city',       -- city, corridor, custom, boundary
+    polygon GEOGRAPHY,                     -- GeoJSON Polygon or MultiPolygon as PostGIS geography
     center_lat DOUBLE PRECISION,           -- Center point for reference
     center_lng DOUBLE PRECISION,
     radius_km DOUBLE PRECISION,            -- If generated from city buffer

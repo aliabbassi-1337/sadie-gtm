@@ -77,7 +77,7 @@ async def list_regions(service: Service, state: str) -> None:
 
 
 async def generate_regions(service: Service, state: str) -> None:
-    """Generate regions from target cities."""
+    """Generate circular regions from target cities."""
     city_count = await service.count_target_cities(state)
     
     if city_count == 0:
@@ -85,12 +85,45 @@ async def generate_regions(service: Service, state: str) -> None:
         print(f"Add cities first with: python -m workflows.scrape_cities --state {state} --add 'City Name'")
         return
     
-    print(f"\nGenerating regions from {city_count} target cities...")
+    print(f"\nGenerating circular regions from {city_count} target cities...")
     regions = await service.generate_regions_from_cities(state)
     
     print(f"\nCreated {len(regions)} regions:")
     for region in regions:
         print(f"  • {region.name}: {region.radius_km:.1f}km radius, {region.cell_size_km:.1f}km cells")
+    
+    total_area = await service.get_total_region_area(state)
+    print(f"\nTotal coverage: {total_area:,.1f} km²")
+
+
+async def generate_optimized_regions(service: Service, state: str) -> None:
+    """Generate optimized regions using real OSM city boundaries."""
+    city_count = await service.count_target_cities(state)
+    
+    if city_count == 0:
+        print(f"\nNo target cities configured for {state}.")
+        print(f"Add cities first with: python -m workflows.scrape_cities --state {state} --add 'City Name'")
+        return
+    
+    print(f"\nFetching real city boundaries from OpenStreetMap for {city_count} cities...")
+    print("(This takes ~1 second per city due to API rate limits)")
+    print()
+    
+    regions = await service.generate_regions_from_boundaries(state)
+    
+    boundary_count = sum(1 for r in regions if r.region_type == "boundary")
+    circle_count = len(regions) - boundary_count
+    
+    print(f"\nCreated {len(regions)} regions:")
+    print(f"  • {boundary_count} with real OSM boundaries (optimal)")
+    print(f"  • {circle_count} with circular fallback")
+    print()
+    
+    for region in regions:
+        if region.region_type == "boundary":
+            print(f"  ✓ {region.name}: OSM boundary, {region.cell_size_km:.1f}km cells")
+        else:
+            print(f"  ○ {region.name}: {region.radius_km:.1f}km circle (fallback)")
     
     total_area = await service.get_total_region_area(state)
     print(f"\nTotal coverage: {total_area:,.1f} km²")
@@ -291,7 +324,9 @@ Examples:
     
     # Actions
     parser.add_argument("--list", action="store_true", help="List configured regions")
-    parser.add_argument("--generate", action="store_true", help="Generate regions from target cities")
+    parser.add_argument("--generate", action="store_true", help="Generate circular regions from target cities")
+    parser.add_argument("--generate-optimized", action="store_true", 
+                       help="Generate optimized regions using real OSM city boundaries (slower, but efficient)")
     parser.add_argument("--estimate", action="store_true", help="Estimate cost for all regions")
     parser.add_argument("--clear", action="store_true", help="Clear all regions")
     
@@ -325,6 +360,8 @@ Examples:
     try:
         if args.generate:
             await generate_regions(service, state)
+        elif args.generate_optimized:
+            await generate_optimized_regions(service, state)
         elif args.list:
             await list_regions(service, state)
         elif args.estimate:
