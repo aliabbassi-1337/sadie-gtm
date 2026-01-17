@@ -11,7 +11,9 @@ load_dotenv()
 # Load queries from SQL files
 queries = aiosql.from_path(
     Path(__file__).parent / "queries",
-    "asyncpg"
+    "asyncpg",
+    kwargs_only=False,  # Allow positional args
+    mandatory_parameters=False,  # Don't require explicit param lists in SQL comments
 )
 
 # Global connection pool

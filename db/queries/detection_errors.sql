@@ -1,4 +1,4 @@
--- name: insert_detection_error!
+-- name: insert_detection_error(hotel_id, error_type, error_message, detected_location)!
 -- Log a detection error for debugging
 INSERT INTO detection_errors (hotel_id, error_type, error_message, detected_location)
 VALUES (:hotel_id, :error_type, :error_message, :detected_location);
