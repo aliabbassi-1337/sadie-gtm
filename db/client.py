@@ -42,6 +42,8 @@ async def get_conn():
     """Get connection from pool (recommended pattern from asyncpg docs)."""
     pool = await init_db()
     async with pool.acquire() as conn:
+        # Supabase pooler doesn't honor server_settings, set explicitly
+        await conn.execute("SET search_path TO sadie_gtm, public")
         yield conn
 
 
@@ -50,6 +52,8 @@ async def get_transaction():
     """Get connection with transaction context."""
     pool = await init_db()
     async with pool.acquire() as conn:
+        # Supabase pooler doesn't honor server_settings, set explicitly
+        await conn.execute("SET search_path TO sadie_gtm, public")
         async with conn.transaction():
             yield conn
 

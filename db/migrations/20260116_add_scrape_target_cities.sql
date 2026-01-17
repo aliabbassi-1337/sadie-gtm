@@ -1,5 +1,5 @@
 -- Scrape target cities - cities to scrape for hotels
-CREATE TABLE IF NOT EXISTS scrape_target_cities (
+CREATE TABLE IF NOT EXISTS sadie_gtm.scrape_target_cities (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     state TEXT NOT NULL,
@@ -13,4 +13,4 @@ CREATE TABLE IF NOT EXISTS scrape_target_cities (
     UNIQUE(name, state)
 );
 
-CREATE INDEX IF NOT EXISTS idx_scrape_target_cities_state ON scrape_target_cities(state);
+CREATE INDEX IF NOT EXISTS idx_scrape_target_cities_state ON sadie_gtm.scrape_target_cities(state);

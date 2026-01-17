@@ -1,7 +1,10 @@
 -- Scrape regions - GeoJSON polygons defining areas to scrape
 -- Enables polygon-based scraping instead of bounding box + cell grid
 
-CREATE TABLE IF NOT EXISTS scrape_regions (
+-- Ensure search_path includes public for PostGIS types
+SET search_path TO sadie_gtm, public;
+
+CREATE TABLE IF NOT EXISTS sadie_gtm.scrape_regions (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,                    -- e.g., "Miami Metro", "Orlando Theme Parks"
     state TEXT NOT NULL,                   -- State code (e.g., "FL")
@@ -17,8 +20,7 @@ CREATE TABLE IF NOT EXISTS scrape_regions (
     UNIQUE(name, state)
 );
 
-CREATE INDEX IF NOT EXISTS idx_scrape_regions_state ON scrape_regions(state);
-CREATE INDEX IF NOT EXISTS idx_scrape_regions_polygon ON scrape_regions USING GIST(polygon);
+CREATE INDEX IF NOT EXISTS idx_scrape_regions_state ON sadie_gtm.scrape_regions(state);
+CREATE INDEX IF NOT EXISTS idx_scrape_regions_polygon ON sadie_gtm.scrape_regions USING GIST(polygon);
 
--- Also add to schema
-COMMENT ON TABLE scrape_regions IS 'Polygon regions for targeted scraping - only scrape within these areas';
+COMMENT ON TABLE sadie_gtm.scrape_regions IS 'Polygon regions for targeted scraping - only scrape within these areas';
