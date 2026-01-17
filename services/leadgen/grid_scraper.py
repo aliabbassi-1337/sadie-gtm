@@ -279,8 +279,9 @@ class GridScraper:
                 self.zoom_level = zoom
                 break
 
-        self._seen: Set[str] = set()
-        self._seen_locations: Set[Tuple[float, float]] = set()  # (lat, lng) rounded to ~100m
+        self._seen: Set[str] = set()  # Name-based dedup (fallback)
+        self._seen_place_ids: Set[str] = set()  # Google Place ID dedup (primary)
+        self._seen_locations: Set[Tuple[float, float]] = set()  # Location dedup (secondary)
         self._stats = ScrapeStats()
         self._out_of_credits = False
         # Scrape bounds for filtering out-of-region results
@@ -409,6 +410,7 @@ class GridScraper:
                                Use for incremental saving.
         """
         self._seen = set()
+        self._seen_place_ids = set()
         self._seen_locations = set()
         self._stats = ScrapeStats()
         self._out_of_credits = False
@@ -740,20 +742,38 @@ class GridScraper:
 
         name_lower = name.lower()
         website = place.get("website", "") or ""
-
-        # Skip duplicates
-        if name_lower in self._seen:
-            self._stats.duplicates_skipped += 1
-            logger.debug(f"SKIP duplicate: {name}")
-            return None
-        self._seen.add(name_lower)
-
-        # Track location for cell coverage analysis (round to ~100m grid)
+        place_id = place.get("placeId")  # Google Place ID - most reliable dedup key
         lat = place.get("latitude")
         lng = place.get("longitude")
-        if lat and lng:
-            loc_key = (round(lat, 3), round(lng, 3))  # ~111m precision
+
+        # 3-tier deduplication: placeId → location → name
+        # Primary: Google Place ID (globally unique, stable)
+        if place_id:
+            if place_id in self._seen_place_ids:
+                self._stats.duplicates_skipped += 1
+                logger.debug(f"SKIP duplicate (placeId): {name}")
+                return None
+            self._seen_place_ids.add(place_id)
+        elif lat and lng:
+            # Secondary: Location (~11m precision)
+            loc_key = (round(lat, 4), round(lng, 4))
+            if loc_key in self._seen_locations:
+                self._stats.duplicates_skipped += 1
+                logger.debug(f"SKIP duplicate (location): {name} at ({lat:.4f}, {lng:.4f})")
+                return None
             self._seen_locations.add(loc_key)
+        else:
+            # Tertiary: Name-based (least reliable)
+            if name_lower in self._seen:
+                self._stats.duplicates_skipped += 1
+                logger.debug(f"SKIP duplicate (name): {name}")
+                return None
+            self._seen.add(name_lower)
+
+        # Track location for cell coverage analysis
+        if lat and lng:
+            coverage_key = (round(lat, 3), round(lng, 3))  # ~111m precision for coverage
+            self._seen_locations.add(coverage_key)
 
             # Filter out-of-bounds results (Paris hotels when scraping Miami)
             if self._bounds:
