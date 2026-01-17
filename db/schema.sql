@@ -271,10 +271,9 @@ CREATE TABLE IF NOT EXISTS scrape_target_cities (
     state TEXT NOT NULL,
     lat DOUBLE PRECISION NOT NULL,
     lng DOUBLE PRECISION NOT NULL,
-    radius_km DOUBLE PRECISION DEFAULT 12.0,  -- Suggested scrape radius
-    population INTEGER,
+    radius_km DOUBLE PRECISION DEFAULT 12.0,  -- Suggested scrape radius (from Nominatim importance)
     display_name TEXT,
-    source TEXT DEFAULT 'nominatim',  -- nominatim, simplemaps, manual
+    source TEXT DEFAULT 'nominatim',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     
     UNIQUE(name, state)

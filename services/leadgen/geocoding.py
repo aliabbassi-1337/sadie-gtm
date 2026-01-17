@@ -17,9 +17,8 @@ class CityLocation(BaseModel):
     state: str
     lat: float
     lng: float
-    population: Optional[int] = None
     display_name: Optional[str] = None
-    radius_km: float = 12.0  # Default scrape radius
+    radius_km: float = 12.0  # Default scrape radius (from Nominatim importance)
 
 
 class CityBoundary(BaseModel):
@@ -70,67 +69,40 @@ async def geocode_city(city: str, state: str) -> CityLocation:
             raise ValueError(f"City not found: {city}, {state}")
         
         result = data[0]
+        importance = float(result.get("importance", 0.3))
+        
         return CityLocation(
             name=city,
             state=state,
             lat=float(result["lat"]),
             lng=float(result["lon"]),
             display_name=result.get("display_name"),
-            radius_km=_suggest_radius(city),
+            radius_km=_suggest_radius_from_importance(importance),
         )
 
 
-def _suggest_radius(city_name: str) -> float:
+def _suggest_radius_from_importance(importance: float) -> float:
     """
-    Suggest scrape radius based on city classification.
+    Suggest scrape radius based on Nominatim importance score.
     
-    Uses US Census metro area classifications:
-    - Major metros (top 20 US metros): 25km
-    - Large metros (top 100 US metros): 20km  
-    - Medium cities (state capitals, regional centers): 15km
-    - Default (smaller cities): 12km
+    Nominatim returns an 'importance' field (0-1) based on:
+    - Wikipedia article length/links
+    - OSM node connections
+    - Population data when available
+    
+    Importance ranges observed:
+    - 0.7+: Major metros (NYC, LA, Chicago)
+    - 0.5-0.7: Large cities (Orlando, Tampa)
+    - 0.3-0.5: Medium cities (regional centers)
+    - <0.3: Small towns
     """
-    name_lower = city_name.lower().strip()
-    
-    # Top 20 US metros by population
-    major_metros = {
-        "new york", "los angeles", "chicago", "houston", "phoenix",
-        "philadelphia", "san antonio", "san diego", "dallas", "austin",
-        "san jose", "jacksonville", "fort worth", "columbus", "charlotte",
-        "indianapolis", "san francisco", "seattle", "denver", "washington",
-        "boston", "el paso", "nashville", "detroit", "miami", "atlanta",
-    }
-    
-    # Top 100 metros and regional centers
-    large_metros = {
-        "orlando", "tampa", "baltimore", "portland", "las vegas",
-        "milwaukee", "albuquerque", "tucson", "fresno", "sacramento",
-        "kansas city", "mesa", "atlanta", "omaha", "colorado springs",
-        "raleigh", "long beach", "virginia beach", "oakland", "minneapolis",
-        "tulsa", "arlington", "new orleans", "wichita", "cleveland",
-        "bakersfield", "tampa", "aurora", "anaheim", "honolulu",
-        "santa ana", "riverside", "corpus christi", "lexington", "st louis",
-        "pittsburgh", "anchorage", "stockton", "cincinnati", "st paul",
-    }
-    
-    # State capitals and regional centers (medium-sized)
-    medium_cities = {
-        "fort lauderdale", "west palm beach", "sarasota", "fort myers",
-        "tallahassee", "pensacola", "baton rouge", "little rock",
-        "salt lake city", "hartford", "providence", "richmond",
-        "birmingham", "memphis", "louisville", "buffalo", "rochester",
-        "albany", "charleston", "savannah", "mobile", "montgomery",
-        "jackson", "shreveport", "des moines", "madison", "lansing",
-        "springfield", "topeka", "lincoln", "boise", "santa fe",
-    }
-    
-    if name_lower in major_metros:
-        return 25.0
-    if name_lower in large_metros:
-        return 20.0
-    if name_lower in medium_cities:
-        return 15.0
-    return 12.0
+    if importance >= 0.7:
+        return 25.0  # Major metros
+    if importance >= 0.5:
+        return 20.0  # Large cities
+    if importance >= 0.3:
+        return 15.0  # Medium cities
+    return 12.0  # Default
 
 
 async def fetch_city_boundary(city: str, state: str) -> Optional[CityBoundary]:

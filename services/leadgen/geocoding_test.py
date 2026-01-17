@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from services.leadgen.geocoding import (
     CityLocation,
     geocode_city,
-    _suggest_radius,
+    _suggest_radius_from_importance,
 )
 
 
@@ -57,45 +57,38 @@ class TestCityLocation:
             state="FL",
             lat=27.9506,
             lng=-82.4572,
-            population=400000,
             display_name="Tampa, Hillsborough County, Florida, United States",
         )
-        assert city.population == 400000
         assert "Tampa" in city.display_name
 
 
 @pytest.mark.no_db
-class TestSuggestRadius:
-    """Unit tests for _suggest_radius helper."""
+class TestSuggestRadiusFromImportance:
+    """Unit tests for _suggest_radius_from_importance helper."""
 
-    def test_major_metro_gets_25km(self):
-        # Top 20 US metros get 25km
-        assert _suggest_radius("Miami") == 25.0
-        assert _suggest_radius("Houston") == 25.0
-        assert _suggest_radius("Dallas") == 25.0
-        assert _suggest_radius("Jacksonville") == 25.0
+    def test_major_metro_importance(self):
+        # Major metros have importance >= 0.7
+        assert _suggest_radius_from_importance(0.8) == 25.0
+        assert _suggest_radius_from_importance(0.75) == 25.0
+        assert _suggest_radius_from_importance(0.7) == 25.0
 
-    def test_large_metro_gets_20km(self):
-        # Top 100 metros get 20km
-        assert _suggest_radius("Orlando") == 20.0
-        assert _suggest_radius("Tampa") == 20.0
-        assert _suggest_radius("Las Vegas") == 20.0
+    def test_large_city_importance(self):
+        # Large cities have importance 0.5-0.7
+        assert _suggest_radius_from_importance(0.6) == 20.0
+        assert _suggest_radius_from_importance(0.55) == 20.0
+        assert _suggest_radius_from_importance(0.5) == 20.0
 
-    def test_major_metro_case_insensitive(self):
-        assert _suggest_radius("MIAMI") == 25.0
-        assert _suggest_radius("miami") == 25.0
-        assert _suggest_radius("MiAmI") == 25.0
+    def test_medium_city_importance(self):
+        # Medium cities have importance 0.3-0.5
+        assert _suggest_radius_from_importance(0.4) == 15.0
+        assert _suggest_radius_from_importance(0.35) == 15.0
+        assert _suggest_radius_from_importance(0.3) == 15.0
 
-    def test_medium_city_gets_15km(self):
-        assert _suggest_radius("Fort Lauderdale") == 15.0
-        assert _suggest_radius("West Palm Beach") == 15.0
-        assert _suggest_radius("Sarasota") == 15.0
-        assert _suggest_radius("Pensacola") == 15.0
-
-    def test_other_city_gets_12km(self):
-        assert _suggest_radius("Boca Raton") == 12.0
-        assert _suggest_radius("Key West") == 12.0
-        assert _suggest_radius("Some Random City") == 12.0
+    def test_small_city_importance(self):
+        # Small cities have importance < 0.3
+        assert _suggest_radius_from_importance(0.2) == 12.0
+        assert _suggest_radius_from_importance(0.1) == 12.0
+        assert _suggest_radius_from_importance(0.0) == 12.0
 
 
 @pytest.mark.no_db
@@ -110,6 +103,7 @@ class TestGeocodeCityMocked:
             "lat": "25.7617",
             "lon": "-80.1918",
             "display_name": "Miami, Miami-Dade County, Florida, United States",
+            "importance": 0.75,  # Major metro
         }]
         mock_response.raise_for_status = MagicMock()
 
@@ -127,7 +121,7 @@ class TestGeocodeCityMocked:
             assert city.lat == 25.7617
             assert city.lng == -80.1918
             assert city.display_name == "Miami, Miami-Dade County, Florida, United States"
-            assert city.radius_km == 25.0  # Miami is a major metro
+            assert city.radius_km == 25.0  # High importance = major metro
 
     @pytest.mark.asyncio
     async def test_geocode_city_not_found(self):
@@ -154,6 +148,7 @@ class TestGeocodeCityMocked:
             "lat": "26.3587",
             "lon": "-80.0831",
             "display_name": "Boca Raton, Palm Beach County, Florida, United States",
+            "importance": 0.2,  # Small city
         }]
         mock_response.raise_for_status = MagicMock()
 
@@ -165,7 +160,7 @@ class TestGeocodeCityMocked:
             mock_client.return_value = mock_instance
 
             city = await geocode_city("Boca Raton", "FL")
-            assert city.radius_km == 12.0  # Not a major metro
+            assert city.radius_km == 12.0  # Low importance = small city
 
 
 # =============================================================================

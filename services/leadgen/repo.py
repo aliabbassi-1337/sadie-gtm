@@ -284,7 +284,6 @@ async def insert_target_city(
     lat: float,
     lng: float,
     radius_km: float = 12.0,
-    population: Optional[int] = None,
     display_name: Optional[str] = None,
     source: str = "nominatim",
 ) -> int:
@@ -297,7 +296,6 @@ async def insert_target_city(
             lat=lat,
             lng=lng,
             radius_km=radius_km,
-            population=population,
             display_name=display_name,
             source=source,
         )

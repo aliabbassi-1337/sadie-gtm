@@ -577,7 +577,6 @@ class Service(IService):
                 lat=row["lat"],
                 lng=row["lng"],
                 radius_km=row["radius_km"] or 12.0,
-                population=row["population"],
                 display_name=row["display_name"],
             )
             for row in rows
@@ -616,7 +615,6 @@ class Service(IService):
                 lat=existing["lat"],
                 lng=existing["lng"],
                 radius_km=existing["radius_km"] or 12.0,
-                population=existing["population"],
                 display_name=existing["display_name"],
             )
         
