@@ -1,0 +1,32 @@
+[Unit]
+Description=Sadie GTM Detection Consumer - Polls SQS and detects booking engines
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/sadie_gtm
+EnvironmentFile=/home/ubuntu/sadie_gtm/.env
+
+# Use medium preset (12GB RAM) - adjust based on instance size
+ExecStart=/home/ubuntu/.local/bin/uv run python -m workflows.detection_consumer --preset medium
+
+# Restart on failure with backoff
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=detection-consumer
+
+# Resource limits
+MemoryMax=14G
+CPUQuota=90%
+
+[Install]
+WantedBy=multi-user.target
