@@ -32,7 +32,8 @@ async def init_db():
             min_size=5,
             max_size=20,
             command_timeout=60,
-            max_inactive_connection_lifetime=300
+            max_inactive_connection_lifetime=300,
+            statement_cache_size=0,  # Required for Supavisor transaction mode (port 6543)
         )
     return _pool
 

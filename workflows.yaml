@@ -56,7 +56,7 @@ local:
 ec2:
   detection_consumer:
     description: Poll SQS and process hotel detection (parallelizable)
-    command: uv run python workflows/detection_consumer.py --concurrency 3
+    command: uv run python workflows/detection_consumer.py --concurrency 6
     type: systemd  # Runs continuously while instance is up
 
   enrichment_room_counts:
