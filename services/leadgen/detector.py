@@ -76,6 +76,7 @@ SKIP_JUNK_DOMAINS = [
     # Meta-search / aggregators (detected via location mismatch analysis)
     "bluepillow.com", "vio.com", "wowotrip.com", "trivago.com", "kayak.com",
     "priceline.com", "agoda.com", "hostelworld.com", "hotwire.com",
+    "decolar.com", "despegar.com", "momondo.com", "skyscanner.com",
     # Government / parks
     "dnr.", "parks.", "recreation.", ".gov", ".edu", ".mil",
 ]
@@ -279,9 +280,14 @@ def normalize_url(url: str) -> str:
 
 async def http_precheck(url: str, timeout: float = 3.0) -> Tuple[bool, str]:
     """Quick HTTP check before launching Playwright."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
     try:
         async with httpx.AsyncClient(
-            timeout=timeout, follow_redirects=True, verify=False
+            timeout=timeout, follow_redirects=True, verify=False, headers=headers
         ) as client:
             try:
                 resp = await client.head(url)
