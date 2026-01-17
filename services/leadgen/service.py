@@ -40,18 +40,34 @@ class ScrapeRegion(BaseModel):
             return None
         try:
             geojson = json.loads(self.polygon_geojson)
-            coords = geojson.get("coordinates", [[]])[0]
-            if not coords:
+            geom_type = geojson.get("type")
+            
+            # Extract all coordinate points based on geometry type
+            all_coords = []
+            if geom_type == "Polygon":
+                # Polygon: coordinates = [ring1, ring2, ...] where ring = [[lng, lat], ...]
+                for ring in geojson.get("coordinates", []):
+                    all_coords.extend(ring)
+            elif geom_type == "MultiPolygon":
+                # MultiPolygon: coordinates = [polygon1, polygon2, ...] where polygon = [ring1, ...]
+                for polygon in geojson.get("coordinates", []):
+                    for ring in polygon:
+                        all_coords.extend(ring)
+            else:
                 return None
-            lngs = [c[0] for c in coords]
-            lats = [c[1] for c in coords]
+            
+            if not all_coords:
+                return None
+            
+            lngs = [c[0] for c in all_coords]
+            lats = [c[1] for c in all_coords]
             return {
                 "lat_min": min(lats),
                 "lat_max": max(lats),
                 "lng_min": min(lngs),
                 "lng_max": max(lngs),
             }
-        except (json.JSONDecodeError, KeyError, IndexError):
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
             return None
 
 

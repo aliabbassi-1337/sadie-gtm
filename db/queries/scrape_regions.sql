@@ -56,7 +56,7 @@ VALUES (
     :priority
 )
 ON CONFLICT (name, state) DO UPDATE SET
-    polygon = ST_GeomFromGeoJSON(EXCLUDED.polygon::text)::geography,
+    polygon = ST_GeomFromGeoJSON(:polygon_geojson)::geography,
     center_lat = EXCLUDED.center_lat,
     center_lng = EXCLUDED.center_lng,
     cell_size_km = EXCLUDED.cell_size_km,
