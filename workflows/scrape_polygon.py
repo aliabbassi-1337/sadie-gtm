@@ -45,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from db.client import init_db, close_db
 from services.leadgen.service import Service
+from infra import slack
 
 
 async def list_regions(service: Service, state: str) -> None:
@@ -100,24 +101,45 @@ async def estimate_regions(service: Service, state: str) -> None:
         logger.info(f"  • {r['name']}: {r['cells']:,} cells ({r['cell_size_km']}km)")
 
 
-async def scrape_regions(service: Service, state: str, region_names: Optional[List[str]] = None) -> None:
+async def scrape_regions(service: Service, state: str, region_names: Optional[List[str]] = None, notify: bool = True) -> None:
     """Scrape regions for a state."""
     if region_names:
-        logger.info(f"Scraping {len(region_names)} specific regions: {', '.join(region_names)}")
+        regions_desc = ", ".join(region_names)
+        logger.info(f"Scraping {len(region_names)} specific regions: {regions_desc}")
     else:
         region_count = await service.count_regions(state)
         if region_count == 0:
             logger.warning(f"No regions configured for {state}.")
             logger.info(f"Ingest regions first: uv run python -m workflows.ingest_regions --state {state}")
             return
-        logger.info(f"Scraping all {region_count} regions for {state}...")
+        regions_desc = f"all {region_count} regions"
+        logger.info(f"Scraping {regions_desc} for {state}...")
     
-    hotels = await service.scrape_regions(state, save_to_db=True, region_names=region_names)
+    # Notify start
+    if notify:
+        slack.send_message(f"🔍 *Scraping Started*\n• State: {state}\n• Regions: {regions_desc}")
     
-    logger.info("=" * 60)
-    logger.info("Scraping Complete")
-    logger.info("=" * 60)
-    logger.info(f"Total unique hotels found: {len(hotels)}")
+    try:
+        hotels = await service.scrape_regions(state, save_to_db=True, region_names=region_names)
+        
+        logger.info("=" * 60)
+        logger.info("Scraping Complete")
+        logger.info("=" * 60)
+        logger.info(f"Total unique hotels found: {len(hotels)}")
+        
+        # Notify completion
+        if notify:
+            slack.send_message(
+                f"✅ *Scraping Complete*\n"
+                f"• State: {state}\n"
+                f"• Regions: {regions_desc}\n"
+                f"• Hotels found: {len(hotels)}"
+            )
+    except Exception as e:
+        logger.error(f"Scraping failed: {e}")
+        if notify:
+            slack.send_error(f"Scraping {state}", str(e))
+        raise
 
 
 async def add_region(
@@ -285,6 +307,7 @@ Examples:
     parser.add_argument("--cell-size", type=float, default=2.0, help="Cell size in km (default: 2)")
     parser.add_argument("--geojson", type=str, help="Path to GeoJSON file for custom polygon shape")
     parser.add_argument("--show-geojson", metavar="NAME", help="Output GeoJSON for a region (for visualization)")
+    parser.add_argument("--no-notify", action="store_true", help="Disable Slack notifications")
     
     args = parser.parse_args()
     state = args.state.upper()
@@ -330,7 +353,7 @@ Examples:
             await remove_region(service, state, args.remove)
         else:
             # Default action: scrape (optionally filtered)
-            await scrape_regions(service, state, region_names=args.only)
+            await scrape_regions(service, state, region_names=args.only, notify=not args.no_notify)
     finally:
         await close_db()
 
