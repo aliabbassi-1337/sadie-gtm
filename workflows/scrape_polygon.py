@@ -2,32 +2,33 @@
 """
 Polygon-based region scraping workflow.
 
-Instead of scraping an entire state with uniform cells, this workflow:
-1. Uses predefined polygon regions (generated from target cities)
-2. Each region has its own optimized cell size
-3. Only areas within regions are scraped - no wasted API calls on empty rural areas
+Scrapes hotels in pre-defined polygon regions (dense areas like cities).
+Regions must be ingested first using ingest_regions.py.
 
 Usage:
-    # Generate regions from target cities
-    python -m workflows.scrape_regions --state FL --generate
-
     # List configured regions
-    python -m workflows.scrape_regions --state FL --list
+    uv run python -m workflows.scrape_polygon --state FL --list
 
     # Estimate cost for all regions
-    python -m workflows.scrape_regions --state FL --estimate
+    uv run python -m workflows.scrape_polygon --state FL --estimate
 
     # Scrape all regions
-    python -m workflows.scrape_regions --state FL
+    uv run python -m workflows.scrape_polygon --state FL
 
-    # Add a custom region
-    python -m workflows.scrape_regions --state FL --add "Keys Corridor" --lat 24.7 --lng -81.1 --radius 50
+    # Show GeoJSON for a region (paste at geojson.io)
+    uv run python -m workflows.scrape_polygon --state FL --show-geojson "Miami Beach"
+
+    # Add a custom circular region
+    uv run python -m workflows.scrape_polygon --state FL --add "Keys" --lat 24.7 --lng -81.1 --radius 50
+
+    # Add a custom polygon from GeoJSON file
+    uv run python -m workflows.scrape_polygon --state FL --add "Custom Zone" --geojson zone.geojson
 
     # Remove a region
-    python -m workflows.scrape_regions --state FL --remove "Keys Corridor"
+    uv run python -m workflows.scrape_polygon --state FL --remove "Keys"
 
     # Clear all regions
-    python -m workflows.scrape_regions --state FL --clear
+    uv run python -m workflows.scrape_polygon --state FL --clear
 """
 
 import argparse
@@ -74,26 +75,6 @@ async def list_regions(service: Service, state: str) -> None:
             f"{region.cell_size_km:.1f} km     "
             f"{region.priority:<8}"
         )
-
-
-async def generate_regions(service: Service, state: str) -> None:
-    """Generate circular regions from target cities."""
-    city_count = await service.count_target_cities(state)
-    
-    if city_count == 0:
-        print(f"\nNo target cities configured for {state}.")
-        print(f"Add cities first with: python -m workflows.scrape_cities --state {state} --add 'City Name'")
-        return
-    
-    print(f"\nGenerating circular regions from {city_count} target cities...")
-    regions = await service.generate_regions_from_cities(state)
-    
-    print(f"\nCreated {len(regions)} regions:")
-    for region in regions:
-        print(f"  • {region.name}: {region.radius_km:.1f}km radius, {region.cell_size_km:.1f}km cells")
-    
-    total_area = await service.get_total_region_area(state)
-    print(f"\nTotal coverage: {total_area:,.1f} km²")
 
 
 async def estimate_regions(service: Service, state: str) -> None:
@@ -197,7 +178,7 @@ async def add_region_from_geojson(
     with open(geojson_path) as f:
         data = json.load(f)
     
-    # Handle both Feature and raw Polygon
+    # Handle Feature, FeatureCollection, or raw geometry
     if data.get("type") == "Feature":
         geom = data["geometry"]
     elif data.get("type") == "FeatureCollection":
@@ -205,12 +186,16 @@ async def add_region_from_geojson(
     else:
         geom = data
     
-    if geom.get("type") != "Polygon":
-        print(f"Error: GeoJSON must be a Polygon, got {geom.get('type')}")
+    if geom.get("type") not in ("Polygon", "MultiPolygon"):
+        print(f"Error: GeoJSON must be a Polygon or MultiPolygon, got {geom.get('type')}")
         return
     
     # Calculate center from coordinates
-    coords = geom["coordinates"][0]
+    if geom.get("type") == "MultiPolygon":
+        # For MultiPolygon, use first polygon's exterior ring
+        coords = geom["coordinates"][0][0]
+    else:
+        coords = geom["coordinates"][0]
     lngs = [c[0] for c in coords]
     lats = [c[1] for c in coords]
     center_lat = sum(lats) / len(lats)
@@ -273,17 +258,17 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Generate regions from cities
-  python -m workflows.scrape_regions --state FL --generate
+  # List regions
+  uv run python -m workflows.scrape_polygon --state FL --list
 
   # Estimate cost
-  python -m workflows.scrape_regions --state FL --estimate
+  uv run python -m workflows.scrape_polygon --state FL --estimate
 
   # Scrape all regions
-  python -m workflows.scrape_regions --state FL
+  uv run python -m workflows.scrape_polygon --state FL
 
-  # Add custom region (e.g., Keys corridor)
-  python -m workflows.scrape_regions --state FL --add "Keys" --lat 24.7 --lng -81.1 --radius 50
+  # Add custom circular region
+  uv run python -m workflows.scrape_polygon --state FL --add "Keys" --lat 24.7 --lng -81.1 --radius 50
         """
     )
     
@@ -291,7 +276,6 @@ Examples:
     
     # Actions
     parser.add_argument("--list", action="store_true", help="List configured regions")
-    parser.add_argument("--generate", action="store_true", help="Generate circular regions (fast, use for testing)")
     parser.add_argument("--estimate", action="store_true", help="Estimate cost for all regions")
     parser.add_argument("--clear", action="store_true", help="Clear all regions")
     
@@ -312,8 +296,8 @@ Examples:
     await init_db()
     api_key = os.environ.get("SERPER_API_KEY")
     no_api_key_needed = (
-        args.list or args.generate or args.clear or 
-        args.add or args.remove or args.show_geojson
+        args.list or args.clear or args.add or 
+        args.remove or args.show_geojson
     )
     if not api_key and not no_api_key_needed:
         print("Error: SERPER_API_KEY environment variable required for scraping")
@@ -323,9 +307,7 @@ Examples:
     service = Service(api_key=api_key or "")
     
     try:
-        if args.generate:
-            await generate_regions(service, state)
-        elif args.list:
+        if args.list:
             await list_regions(service, state)
         elif args.estimate:
             await estimate_regions(service, state)

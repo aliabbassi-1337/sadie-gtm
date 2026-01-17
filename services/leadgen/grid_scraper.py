@@ -50,20 +50,6 @@ ZOOM_BY_CELL_SIZE = {
 MAX_CONCURRENT_CELLS = 2     # Process up to 2 cells concurrently
 MAX_CONCURRENT_REQUESTS = 4  # Stay under 5 qps rate limit (free/basic plan)
 
-# State bounding boxes from scripts/scrapers/grid.py
-STATE_BOUNDS = {
-    "florida": (24.396308, 31.000968, -87.634896, -79.974307),
-    "california": (32.528832, 42.009503, -124.482003, -114.131211),
-    "texas": (25.837377, 36.500704, -106.645646, -93.508039),
-    "new_york": (40.477399, 45.015851, -79.762418, -71.777491),
-    "tennessee": (34.982924, 36.678118, -90.310298, -81.6469),
-    "north_carolina": (33.752878, 36.588117, -84.321869, -75.460621),
-    "georgia": (30.355644, 35.000659, -85.605165, -80.839729),
-    "arizona": (31.332177, 37.004260, -114.818269, -109.045223),
-    "nevada": (35.001857, 42.002207, -120.005746, -114.039648),
-    "colorado": (36.992426, 41.003444, -109.060253, -102.041524),
-}
-
 # Search types - diverse terms to surface different properties
 SEARCH_TYPES = [
     "hotel",
@@ -282,19 +268,6 @@ class GridScraper:
             on_batch_complete=on_batch_complete,
         )
 
-    async def scrape_state(
-        self,
-        state: str,
-        on_batch_complete: Optional[callable] = None,
-    ) -> Tuple[List[ScrapedHotel], ScrapeStats]:
-        """Scrape hotels in a state using adaptive grid."""
-        state_key = state.lower().replace(" ", "_")
-        if state_key not in STATE_BOUNDS:
-            raise ValueError(f"Unknown state: {state}. Available: {list(STATE_BOUNDS.keys())}")
-
-        lat_min, lat_max, lng_min, lng_max = STATE_BOUNDS[state_key]
-        return await self._scrape_bounds(lat_min, lat_max, lng_min, lng_max, on_batch_complete=on_batch_complete)
-
     def estimate_region(
         self,
         center_lat: float,
@@ -311,15 +284,6 @@ class GridScraper:
             lng_min=center_lng - lng_deg,
             lng_max=center_lng + lng_deg,
         )
-
-    def estimate_state(self, state: str) -> ScrapeEstimate:
-        """Estimate cost for scraping a state."""
-        state_key = state.lower().replace(" ", "_")
-        if state_key not in STATE_BOUNDS:
-            raise ValueError(f"Unknown state: {state}. Available: {list(STATE_BOUNDS.keys())}")
-
-        lat_min, lat_max, lng_min, lng_max = STATE_BOUNDS[state_key]
-        return self._estimate_bounds(lat_min, lat_max, lng_min, lng_max)
 
     def _estimate_bounds(
         self,
