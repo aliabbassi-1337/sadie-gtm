@@ -29,8 +29,8 @@ async def init_db():
             user=os.getenv("SADIE_DB_USER"),
             password=os.getenv("SADIE_DB_PASSWORD"),
             server_settings={'search_path': 'sadie_gtm, public'},
-            min_size=2,
-            max_size=5,  # Keep low to fit multiple EC2 instances within Supabase connection limit
+            min_size=1,
+            max_size=3,  # Keep very low: 3 instances × 3 = 9 connections (Supabase limit ~15)
             command_timeout=60,
             max_inactive_connection_lifetime=300,
             statement_cache_size=0,  # Required for Supavisor transaction mode (port 6543)
