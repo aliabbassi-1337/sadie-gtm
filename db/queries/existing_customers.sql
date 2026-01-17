@@ -1,4 +1,4 @@
--- name: get_all_existing_customers*
+-- name: get_all_existing_customers
 -- Get all existing customers with location for proximity calculation
 SELECT
     id,

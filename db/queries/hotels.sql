@@ -81,7 +81,7 @@ RETURNING id;
 DELETE FROM hotels
 WHERE id = :hotel_id;
 
--- name: get_hotels_pending_detection*
+-- name: get_hotels_pending_detection
 -- Get hotels that need booking engine detection
 -- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet
 SELECT
@@ -138,7 +138,7 @@ SET phone_website = COALESCE(:phone_website, phone_website),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
--- name: get_hotels_by_ids*
+-- name: get_hotels_by_ids
 -- Get hotels by list of IDs (for worker to fetch batch)
 SELECT
     id,
@@ -173,7 +173,7 @@ WHERE id = ANY(:hotel_ids);
 -- REPORTING QUERIES
 -- ============================================================================
 
--- name: get_leads_for_city*
+-- name: get_leads_for_city
 -- Get hotel leads for a city with booking engine, room count, and nearest customer
 -- Only returns launched hotels (status=1)
 SELECT
@@ -204,7 +204,7 @@ WHERE h.city = :city
   AND h.state = :state
   AND h.status = 1;
 
--- name: get_leads_for_state*
+-- name: get_leads_for_state
 -- Get hotel leads for an entire state with booking engine, room count, and nearest customer
 -- Only returns launched hotels (status=1)
 SELECT
@@ -265,7 +265,7 @@ LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state;
 
--- name: get_top_engines_for_city*
+-- name: get_top_engines_for_city
 -- Get top booking engines for a city (launched hotels only)
 SELECT
     be.name AS engine_name,
@@ -278,7 +278,7 @@ WHERE h.city = :city
   AND h.status = 1
 GROUP BY be.name;
 
--- name: get_top_engines_for_state*
+-- name: get_top_engines_for_state
 -- Get top booking engines for a state (launched hotels only)
 SELECT
     be.name AS engine_name,
@@ -290,7 +290,7 @@ WHERE h.state = :state
   AND h.status = 1
 GROUP BY be.name;
 
--- name: get_cities_in_state*
+-- name: get_cities_in_state
 -- Get all cities in a state that have launched hotels
 SELECT DISTINCT city
 FROM hotels
@@ -307,7 +307,7 @@ WHERE state = :state
 --    0 = Pending/Not ready
 --    1 = Launched and live
 
--- name: get_launchable_hotels*
+-- name: get_launchable_hotels
 -- Get hotels ready to be launched (fully enriched with all data)
 -- Criteria: status=0 (pending), has booking engine, has successful room count (status=1), has proximity
 SELECT
@@ -339,7 +339,7 @@ INNER JOIN hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0;
 
--- name: launch_hotels*
+-- name: launch_hotels
 -- Atomically claim and launch hotels (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
 -- Returns launched hotel IDs for logging/tracking
@@ -358,7 +358,7 @@ SET status = 1, updated_at = CURRENT_TIMESTAMP
 WHERE id IN (SELECT id FROM claimed)
 RETURNING id;
 
--- name: launch_ready_hotels*
+-- name: launch_ready_hotels
 -- Atomically claim and launch up to :limit ready hotels (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
 -- Returns launched hotel IDs for logging/tracking

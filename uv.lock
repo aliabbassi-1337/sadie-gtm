@@ -10,24 +10,9 @@ resolution-markers = [
 name = "aiosql"
 version = "13.4"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version < '3.10'",
-]
 sdist = { url = "https://files.pythonhosted.org/packages/98/3a/105cdf480d444ee059f3fbea65616fba006fba29d32e382fb1a4d947f4b7/aiosql-13.4.tar.gz", hash = "sha256:da6ebb4d5e735753853007a7d574e60761338fc6ca8d95d6d95b5d85d7b1354d", size = 75730, upload-time = "2025-04-09T08:27:36.593Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/cf/219d8fdae6b6ea9192111b68b611550852f0b082ace9f23e391dde639f28/aiosql-13.4-py3-none-any.whl", hash = "sha256:f5dc4a93484a96ee9008f8488cc1be100e1ebf08cd2135ccade89975332bf49f", size = 24783, upload-time = "2025-04-09T08:27:34.753Z" },
-]
-
-[[package]]
-name = "aiosql"
-version = "15.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.10'",
-]
-sdist = { url = "https://files.pythonhosted.org/packages/dc/31/97ebbd15ead5cf9c3951d6e8dfafc5e7b7e8c52148768cb7b95cd443fc8a/aiosql-15.0.tar.gz", hash = "sha256:744939fdfb3e0c36d88ccaf1f73cb1cf8cc38e7052666b884502db99aff8f3fd", size = 77429, upload-time = "2026-01-04T19:14:41.239Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/a4/67a07ed3e827a50671d7248624c1d3666243c580b0b0567c62d12e1c6de7/aiosql-15.0-py3-none-any.whl", hash = "sha256:ba659870914258790da77a999902c0b7712d58754ca2bd335cf2be34a8433b42", size = 26145, upload-time = "2026-01-04T19:14:39.792Z" },
 ]
 
 [[package]]
@@ -1050,8 +1035,7 @@ name = "sadie-gtm"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "aiosql", version = "13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "aiosql", version = "15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "aiosql" },
     { name = "asyncpg" },
     { name = "boto3" },
     { name = "httpx" },
@@ -1076,7 +1060,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiosql", specifier = ">=13.4" },
+    { name = "aiosql", specifier = "==13.4" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "boto3", specifier = ">=1.42.27" },
     { name = "httpx", specifier = ">=0.25.0" },

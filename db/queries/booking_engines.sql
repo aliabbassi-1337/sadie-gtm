@@ -4,7 +4,7 @@ SELECT id, name, domains, tier, is_active
 FROM booking_engines
 WHERE name = :name;
 
--- name: get_all_booking_engines*
+-- name: get_all_booking_engines
 -- Get all active booking engines with their domain patterns
 SELECT id, name, domains, tier
 FROM booking_engines

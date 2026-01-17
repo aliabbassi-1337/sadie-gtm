@@ -3,7 +3,7 @@
 --    0 = Failed
 --    1 = Success
 
--- name: get_hotels_pending_enrichment*
+-- name: get_hotels_pending_enrichment
 -- Get hotels that need room count enrichment (read-only, for status display)
 -- Criteria: status=0 (pending), successfully detected (hbe.status=1), has website, not in hotel_room_count
 SELECT
@@ -21,7 +21,7 @@ WHERE h.status = 0
   AND hrc.id IS NULL
 LIMIT :limit;
 
--- name: claim_hotels_for_enrichment*
+-- name: claim_hotels_for_enrichment
 -- Atomically claim hotels for enrichment (multi-worker safe)
 -- Inserts status=-1 (processing) records, returns claimed hotel IDs
 -- Uses ON CONFLICT DO NOTHING so only one worker claims each hotel

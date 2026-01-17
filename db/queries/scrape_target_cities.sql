@@ -1,6 +1,6 @@
 -- Queries for scrape_target_cities table
 
--- name: get_target_cities_by_state*
+-- name: get_target_cities_by_state
 -- Get all target cities for a state
 SELECT id, name, state, lat, lng, radius_km, display_name, source, created_at
 FROM scrape_target_cities

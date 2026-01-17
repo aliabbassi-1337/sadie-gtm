@@ -1,4 +1,4 @@
--- name: get_hotels_pending_proximity*
+-- name: get_hotels_pending_proximity
 -- Get hotels that need customer proximity calculation (read-only, for status display)
 -- Criteria: status=0 (pending), successfully detected (hbe.status=1), has location, not in hotel_customer_proximity
 -- Note: Does NOT depend on room count - proximity runs in parallel with room count enrichment

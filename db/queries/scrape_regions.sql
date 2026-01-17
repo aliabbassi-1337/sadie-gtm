@@ -1,6 +1,6 @@
 -- Queries for scrape_regions table
 
--- name: get_regions_by_state*
+-- name: get_regions_by_state
 -- Get all regions for a state, ordered by priority
 SELECT 
     id, name, state, region_type,
@@ -83,7 +83,7 @@ FROM scrape_regions
 WHERE UPPER(state) = UPPER(:state)
   AND ST_Covers(polygon, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography);
 
--- name: get_regions_containing_point*
+-- name: get_regions_containing_point
 -- Get all regions containing a point
 SELECT 
     id, name, state, region_type,
