@@ -105,7 +105,7 @@ SELECT
     h.created_at,
     h.updated_at
 FROM sadie_gtm.hotels h
-LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 WHERE h.status = 0
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
@@ -195,10 +195,10 @@ SELECT
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
-LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
-LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.city = :city
   AND h.state = :state
@@ -226,10 +226,10 @@ SELECT
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
-LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
-LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
   AND h.status = 1;
@@ -245,7 +245,7 @@ SELECT
     COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
     COUNT(CASE WHEN be.tier = 2 THEN 1 END) AS tier_2_count
 FROM sadie_gtm.hotels h
-LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.city = :city
   AND h.state = :state;
@@ -261,7 +261,7 @@ SELECT
     COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
     COUNT(CASE WHEN be.tier = 2 THEN 1 END) AS tier_2_count
 FROM sadie_gtm.hotels h
-LEFT JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state;
 
@@ -271,7 +271,7 @@ SELECT
     be.name AS engine_name,
     COUNT(*) AS hotel_count
 FROM sadie_gtm.hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.city = :city
   AND h.state = :state
@@ -284,7 +284,7 @@ SELECT
     be.name AS engine_name,
     COUNT(*) AS hotel_count
 FROM sadie_gtm.hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
   AND h.status = 1
@@ -322,10 +322,10 @@ SELECT
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
-INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 INNER JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
-INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+INNER JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 INNER JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.status = 0
 LIMIT :limit;
@@ -334,9 +334,9 @@ LIMIT :limit;
 -- Count hotels ready to be launched (status=0 with all enrichment data)
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
-INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
-INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+INNER JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0;
 
 -- name: launch_hotels
@@ -346,9 +346,9 @@ WHERE h.status = 0;
 WITH claimed AS (
     SELECT h.id
     FROM sadie_gtm.hotels h
-    INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+    INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
-    INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+    INNER JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
       AND h.id = ANY(:hotel_ids)
     FOR UPDATE OF h SKIP LOCKED
@@ -365,9 +365,9 @@ RETURNING id;
 WITH claimed AS (
     SELECT h.id
     FROM sadie_gtm.hotels h
-    INNER JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+    INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
-    INNER JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+    INNER JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
     FOR UPDATE OF h SKIP LOCKED
     LIMIT :limit
