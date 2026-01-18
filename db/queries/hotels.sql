@@ -309,7 +309,8 @@ WHERE state = :state
 
 -- name: get_launchable_hotels
 -- Get hotels ready to be launched (fully enriched with all data)
--- Criteria: status=0 (pending), has booking engine, has successful room count (status=1), has proximity
+-- Criteria: status=0 (pending), has booking engine, has successful room count (status=1)
+-- Proximity is optional (LEFT JOIN)
 SELECT
     h.id,
     h.name AS hotel_name,
@@ -325,18 +326,17 @@ FROM sadie_gtm.hotels h
 INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 INNER JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
-INNER JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
-INNER JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.status = 0
 LIMIT :limit;
 
 -- name: get_launchable_count^
--- Count hotels ready to be launched (status=0 with all enrichment data)
+-- Count hotels ready to be launched (status=0, has detection, has room count)
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
-INNER JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0;
 
 -- name: launch_hotels
@@ -348,7 +348,6 @@ WITH claimed AS (
     FROM sadie_gtm.hotels h
     INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
-    INNER JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
       AND h.id = ANY(:hotel_ids)
     FOR UPDATE OF h SKIP LOCKED
@@ -367,7 +366,6 @@ WITH claimed AS (
     FROM sadie_gtm.hotels h
     INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     INNER JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
-    INNER JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
     WHERE h.status = 0
     FOR UPDATE OF h SKIP LOCKED
     LIMIT :limit
