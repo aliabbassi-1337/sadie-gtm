@@ -60,9 +60,9 @@ WHERE status = -1
 -- Count hotels waiting for enrichment (status=0, successfully detected, has website, not in hotel_room_count)
 -- Optional tier filter: pass NULL to include all tiers
 SELECT COUNT(*) AS count
-FROM hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-JOIN booking_engines be ON hbe.booking_engine_id = be.id
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.status = 0
   AND h.website IS NOT NULL
