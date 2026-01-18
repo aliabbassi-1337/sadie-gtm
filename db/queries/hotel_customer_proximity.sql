@@ -9,9 +9,9 @@ SELECT
     ST_X(h.location::geometry) AS longitude,
     h.created_at,
     h.updated_at
-FROM hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0
   AND h.location IS NOT NULL
   AND hcp.id IS NULL
@@ -20,9 +20,9 @@ LIMIT :limit;
 -- name: get_pending_proximity_count^
 -- Count hotels waiting for proximity calculation (status=0, successfully detected, has location, not in hotel_customer_proximity)
 SELECT COUNT(*) AS count
-FROM hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-LEFT JOIN hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 WHERE h.status = 0
   AND h.location IS NOT NULL
   AND hcp.id IS NULL;

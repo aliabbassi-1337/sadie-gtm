@@ -12,8 +12,8 @@ SELECT
     h.website,
     h.created_at,
     h.updated_at
-FROM hotels h
-JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.status = 0
   AND h.website IS NOT NULL
@@ -28,9 +28,9 @@ LIMIT :limit;
 -- Optional tier filter: pass NULL to include all tiers
 WITH pending AS (
     SELECT h.id, h.name, h.website, h.created_at, h.updated_at
-    FROM hotels h
-    JOIN hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-    JOIN booking_engines be ON hbe.booking_engine_id = be.id
+    FROM sadie_gtm.hotels h
+    JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+    JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
     LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
     WHERE h.status = 0
       AND h.website IS NOT NULL

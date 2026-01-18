@@ -18,7 +18,7 @@ SELECT
     ec.id AS existing_customer_id,
     ec.name AS customer_name,
     ST_Distance(h.location, ec.location) / 1000 AS distance_km
-FROM hotels h
+FROM sadie_gtm.hotels h
 CROSS JOIN sadie_gtm.existing_customers ec
 WHERE h.id = :hotel_id
   AND h.location IS NOT NULL
