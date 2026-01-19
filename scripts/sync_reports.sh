@@ -9,7 +9,7 @@ set -e
 
 S3_BUCKET="sadie-gtm"
 S3_PREFIX="HotelLeadGen"
-ONEDRIVE_PATH="$HOME/Library/CloudStorage/OneDrive-ValsoftCorporation/HotelLeadGen"
+SHAREPOINT_PATH="$HOME/Library/CloudStorage/OneDrive-SharedLibraries-ValsoftCorporation/Sadie Shared - Sadie Lead Gen"
 
 # Parse args
 DRY_RUN=""
@@ -19,19 +19,19 @@ if [[ "$1" == "--dry-run" ]]; then
 fi
 
 # Create OneDrive directory if it doesn't exist
-mkdir -p "$ONEDRIVE_PATH"
+mkdir -p "$SHAREPOINT_PATH"
 
-echo "Syncing from s3://$S3_BUCKET/$S3_PREFIX to $ONEDRIVE_PATH"
+echo "Syncing from s3://$S3_BUCKET/$S3_PREFIX to $SHAREPOINT_PATH"
 echo ""
 
 # Sync from S3 to OneDrive
-aws s3 sync "s3://$S3_BUCKET/$S3_PREFIX" "$ONEDRIVE_PATH" \
+aws s3 sync "s3://$S3_BUCKET/$S3_PREFIX" "$SHAREPOINT_PATH" \
     --exclude "*.tmp" \
     $DRY_RUN
 
 echo ""
 echo "Sync complete!"
-echo "Reports available at: $ONEDRIVE_PATH"
+echo "Reports available at: $SHAREPOINT_PATH"
 
 # Restart OneDrive to force cloud sync
 if [[ -z "$DRY_RUN" ]]; then
