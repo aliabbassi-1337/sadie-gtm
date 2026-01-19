@@ -99,7 +99,30 @@ pb := fmt.Sprintf("!4m12!1m3!1d3826.9!2d%.4f!3d%.4f!2m3!1f0!2f0!3f0...", lon, la
 - Multiple workers consume from same queue
 - Built-in deduplication
 
+## Current Serper Performance (Florida Test - Jan 2026)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Hotels scraped | 3,506 | Miami, Orlando, Tampa |
+| API calls | ~4,200 | $4.20 cost |
+| Non-hotels filtered | 1,089 (31%) | Restaurants, gas stations, etc. |
+| No website | 591 (17%) | Can't detect booking engine |
+| Engines detected | 449 (13%) | Have direct booking |
+| Launched | 221+ | Fully enriched leads |
+
+**Key Insight:** 31% of Serper results are garbage (non-hotels). Browser scraper could filter by Google place type before saving, reducing waste.
+
+## Decision: Hybrid Approach (Recommended)
+
+1. **Keep Serper for discovery** - Fast, simple, $0.01/detected engine
+2. **Consider browser scraper for:**
+   - Fetching reviews (for sentiment analysis)
+   - Getting more fields (hours, price range)
+   - Reducing 31% garbage rate via place type filtering
+
 ## Next Steps
-- [ ] Decide on integration approach
-- [ ] If integrating: prototype Playwright-based scraper in Python
-- [ ] If hybrid: add enrichment step after Serper scrape
+- [x] Test Serper-based pipeline end-to-end ✓
+- [x] Measure waste rate and detection rate ✓
+- [ ] Evaluate if 31% waste justifies browser scraper complexity
+- [ ] If yes: Prototype place type filtering with Playwright
+- [ ] Consider browser scraper for review enrichment (post-detection)
