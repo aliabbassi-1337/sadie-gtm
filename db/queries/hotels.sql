@@ -377,3 +377,40 @@ RETURNING id;
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels
 WHERE status = 1;
+
+-- ============================================================================
+-- LOCATION ENRICHMENT QUERIES
+-- ============================================================================
+
+-- name: get_hotels_pending_location_enrichment
+-- Get hotels with coordinates but missing city
+SELECT
+    id,
+    name,
+    address,
+    city,
+    state,
+    country,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude
+FROM sadie_gtm.hotels
+WHERE location IS NOT NULL
+  AND (city IS NULL OR city = '')
+LIMIT :limit;
+
+-- name: get_pending_location_enrichment_count^
+-- Count hotels needing location enrichment
+SELECT COUNT(*) AS count
+FROM sadie_gtm.hotels
+WHERE location IS NOT NULL
+  AND (city IS NULL OR city = '');
+
+-- name: update_hotel_location!
+-- Update hotel location fields from reverse geocoding
+UPDATE sadie_gtm.hotels
+SET address = COALESCE(:address, address),
+    city = COALESCE(:city, city),
+    state = COALESCE(:state, state),
+    country = COALESCE(:country, country),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
