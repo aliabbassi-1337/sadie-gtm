@@ -4,11 +4,21 @@ This is an internal helper module. It does NOT access the database.
 Only the service layer should call this and handle caching.
 """
 
+import asyncio
 import json
 from typing import Optional
 import httpx
 from pydantic import BaseModel
 from loguru import logger
+
+
+class ReverseGeocodingResult(BaseModel):
+    """Result from reverse geocoding (coordinates to address)."""
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    display_name: Optional[str] = None
 
 
 class CityLocation(BaseModel):
@@ -160,3 +170,94 @@ async def fetch_city_boundary(city: str, state: str) -> Optional[CityBoundary]:
             osm_type=result.get("osm_type"),
             osm_id=int(result["osm_id"]) if result.get("osm_id") else None,
         )
+
+
+async def reverse_geocode(lat: float, lng: float) -> Optional[ReverseGeocodingResult]:
+    """
+    Fetch address components from coordinates using OpenStreetMap Nominatim API.
+
+    This is a free API with rate limits (1 req/sec).
+
+    Args:
+        lat: Latitude
+        lng: Longitude
+
+    Returns:
+        ReverseGeocodingResult with address components, or None if not found
+    """
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={
+                    "lat": lat,
+                    "lon": lng,
+                    "format": "json",
+                    "addressdetails": 1,
+                },
+                headers={"User-Agent": "sadie-gtm/1.0"},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if "error" in data:
+                logger.warning(f"Reverse geocoding failed for ({lat}, {lng}): {data['error']}")
+                return None
+
+            address = data.get("address", {})
+
+            # Extract city - Nominatim uses different keys depending on location type
+            city = (
+                address.get("city") or
+                address.get("town") or
+                address.get("village") or
+                address.get("municipality") or
+                address.get("hamlet")
+            )
+
+            # Extract state
+            state = address.get("state")
+            # Convert full state name to abbreviation for US states
+            if state and address.get("country_code") == "us":
+                state = _state_to_abbrev(state)
+
+            # Build street address
+            street_parts = []
+            if address.get("house_number"):
+                street_parts.append(address["house_number"])
+            if address.get("road"):
+                street_parts.append(address["road"])
+            street_address = " ".join(street_parts) if street_parts else None
+
+            return ReverseGeocodingResult(
+                address=street_address,
+                city=city,
+                state=state,
+                country=address.get("country"),
+                display_name=data.get("display_name"),
+            )
+
+        except httpx.HTTPError as e:
+            logger.error(f"Reverse geocoding HTTP error for ({lat}, {lng}): {e}")
+            return None
+
+
+def _state_to_abbrev(state_name: str) -> str:
+    """Convert US state name to abbreviation."""
+    state_map = {
+        "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR",
+        "California": "CA", "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE",
+        "Florida": "FL", "Georgia": "GA", "Hawaii": "HI", "Idaho": "ID",
+        "Illinois": "IL", "Indiana": "IN", "Iowa": "IA", "Kansas": "KS",
+        "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME", "Maryland": "MD",
+        "Massachusetts": "MA", "Michigan": "MI", "Minnesota": "MN", "Mississippi": "MS",
+        "Missouri": "MO", "Montana": "MT", "Nebraska": "NE", "Nevada": "NV",
+        "New Hampshire": "NH", "New Jersey": "NJ", "New Mexico": "NM", "New York": "NY",
+        "North Carolina": "NC", "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK",
+        "Oregon": "OR", "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
+        "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
+        "Vermont": "VT", "Virginia": "VA", "Washington": "WA", "West Virginia": "WV",
+        "Wisconsin": "WI", "Wyoming": "WY", "District of Columbia": "DC",
+    }
+    return state_map.get(state_name, state_name)
