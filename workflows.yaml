@@ -60,19 +60,19 @@ ec2:
     type: systemd  # Runs continuously while instance is up
 
   enrichment_room_counts:
-    description: Enrich hotels with room counts via Groq LLM (tier 1 only)
-    command: uv run python workflows/enrichment.py room-counts --limit 100 --tier 1
-    schedule: "*/10 * * * *"  # Every 10 min
+    description: Enrich hotels with room counts via Groq LLM
+    command: uv run python workflows/enrichment.py room-counts --limit 100
+    schedule: "*/2 * * * *"  # Every 2 min
     type: cron
 
   enrichment_proximity:
     description: Calculate nearest existing customer distance
     command: uv run python workflows/enrichment.py proximity --limit 200
-    schedule: "*/5 * * * *"  # Every 5 min (fast, no API)
+    schedule: "*/2 * * * *"  # Every 2 min
     type: cron
 
   launcher:
     description: Launch fully enriched hotels (mark as live)
     command: uv run python workflows/launcher.py launch-all
-    schedule: "*/5 * * * *"  # Every 5 min
+    schedule: "*/2 * * * *"  # Every 2 min
     type: cron
