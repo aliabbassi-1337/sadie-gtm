@@ -5,7 +5,8 @@
 
 -- name: get_hotels_pending_enrichment
 -- Get hotels that need room count enrichment (read-only, for status display)
--- Criteria: status=0 (pending), successfully detected (hbe.status=1), has website, not in hotel_room_count
+-- Criteria: successfully detected (hbe.status=1), has website, not in hotel_room_count
+-- Note: No status filter - can enrich hotels at any stage
 SELECT
     h.id,
     h.name,
@@ -15,8 +16,7 @@ SELECT
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
-WHERE h.status = 0
-  AND h.website IS NOT NULL
+WHERE h.website IS NOT NULL
   AND h.website != ''
   AND hrc.id IS NULL
 LIMIT :limit;
@@ -26,14 +26,14 @@ LIMIT :limit;
 -- Inserts status=-1 (processing) records, returns claimed hotel IDs
 -- Uses ON CONFLICT DO NOTHING so only one worker claims each hotel
 -- Optional tier filter: pass NULL to include all tiers
+-- Note: No status filter - can enrich hotels at any stage
 WITH pending AS (
     SELECT h.id, h.name, h.website, h.created_at, h.updated_at
     FROM sadie_gtm.hotels h
     JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
     LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
-    WHERE h.status = 0
-      AND h.website IS NOT NULL
+    WHERE h.website IS NOT NULL
       AND h.website != ''
       AND hrc.id IS NULL
       AND (:tier::int IS NULL OR be.tier = :tier)
@@ -57,15 +57,15 @@ WHERE status = -1
   AND enriched_at < NOW() - INTERVAL '30 minutes';
 
 -- name: get_pending_enrichment_count^
--- Count hotels waiting for enrichment (status=0, successfully detected, has website, not in hotel_room_count)
+-- Count hotels waiting for enrichment (successfully detected, has website, not in hotel_room_count)
 -- Optional tier filter: pass NULL to include all tiers
+-- Note: No status filter - can enrich hotels at any stage
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
-WHERE h.status = 0
-  AND h.website IS NOT NULL
+WHERE h.website IS NOT NULL
   AND h.website != ''
   AND hrc.id IS NULL
   AND (:tier::int IS NULL OR be.tier = :tier);
