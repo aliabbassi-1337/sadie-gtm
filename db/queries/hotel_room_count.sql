@@ -25,8 +25,8 @@ LIMIT :limit;
 -- Atomically claim hotels for enrichment (multi-worker safe)
 -- Inserts status=-1 (processing) records, returns claimed hotel IDs
 -- Uses ON CONFLICT DO NOTHING so only one worker claims each hotel
--- Optional tier filter: pass NULL to include all tiers
 -- Note: No status filter - can enrich hotels at any stage
+-- Note: No tier filter - enriches hotels with any booking engine
 WITH pending AS (
     SELECT h.id, h.name, h.website, h.created_at, h.updated_at
     FROM sadie_gtm.hotels h
@@ -36,7 +36,6 @@ WITH pending AS (
     WHERE h.website IS NOT NULL
       AND h.website != ''
       AND hrc.id IS NULL
-      AND (:tier::int IS NULL OR be.tier = :tier)
     LIMIT :limit
 ),
 claimed AS (
@@ -58,8 +57,8 @@ WHERE status = -1
 
 -- name: get_pending_enrichment_count^
 -- Count hotels waiting for enrichment (successfully detected, has website, not in hotel_room_count)
--- Optional tier filter: pass NULL to include all tiers
 -- Note: No status filter - can enrich hotels at any stage
+-- Note: No tier filter - counts hotels with any booking engine
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
@@ -67,8 +66,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.website IS NOT NULL
   AND h.website != ''
-  AND hrc.id IS NULL
-  AND (:tier::int IS NULL OR be.tier = :tier);
+  AND hrc.id IS NULL;
 
 -- name: insert_room_count<!
 -- Insert/update room count for a hotel
