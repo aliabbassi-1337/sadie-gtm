@@ -1,7 +1,7 @@
 -- name: get_hotels_pending_proximity
 -- Get hotels that need customer proximity calculation (read-only, for status display)
--- Criteria: status=0 (pending), successfully detected (hbe.status=1), has location, not in hotel_customer_proximity
--- Note: Does NOT depend on room count - proximity runs in parallel with room count enrichment
+-- Criteria: successfully detected (hbe.status=1), has location, not in hotel_customer_proximity
+-- Note: No status filter - can enrich hotels at any stage
 SELECT
     h.id,
     h.name,
@@ -12,19 +12,18 @@ SELECT
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
-WHERE h.status = 0
-  AND h.location IS NOT NULL
+WHERE h.location IS NOT NULL
   AND hcp.id IS NULL
 LIMIT :limit;
 
 -- name: get_pending_proximity_count^
--- Count hotels waiting for proximity calculation (status=0, successfully detected, has location, not in hotel_customer_proximity)
+-- Count hotels waiting for proximity calculation (successfully detected, has location, not in hotel_customer_proximity)
+-- Note: No status filter - can enrich hotels at any stage
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
-WHERE h.status = 0
-  AND h.location IS NOT NULL
+WHERE h.location IS NOT NULL
   AND hcp.id IS NULL;
 
 -- name: insert_customer_proximity<!
