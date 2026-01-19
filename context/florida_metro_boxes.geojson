@@ -1,0 +1,89 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "Miami-Dade / Broward", "color": "#e41a1c" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-80.50, 25.35],
+          [-80.05, 25.35],
+          [-80.05, 26.30],
+          [-80.50, 26.30],
+          [-80.50, 25.35]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Palm Beach", "color": "#377eb8" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-80.25, 26.30],
+          [-80.00, 26.30],
+          [-80.00, 26.95],
+          [-80.25, 26.95],
+          [-80.25, 26.30]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Tampa Bay", "color": "#4daf4a" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-82.85, 27.55],
+          [-82.25, 27.55],
+          [-82.25, 28.15],
+          [-82.85, 28.15],
+          [-82.85, 27.55]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Orlando", "color": "#984ea3" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-81.60, 28.25],
+          [-81.10, 28.25],
+          [-81.10, 28.95],
+          [-81.60, 28.95],
+          [-81.60, 28.25]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Jacksonville", "color": "#ff7f00" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-81.85, 30.10],
+          [-81.40, 30.10],
+          [-81.40, 30.50],
+          [-81.85, 30.50],
+          [-81.85, 30.10]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "Southwest FL (Naples/Ft Myers)", "color": "#ffff33" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-82.00, 26.15],
+          [-81.65, 26.15],
+          [-81.65, 26.75],
+          [-82.00, 26.75],
+          [-82.00, 26.15]
+        ]]
+      }
+    }
+  ]
+}

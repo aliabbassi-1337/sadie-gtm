@@ -266,6 +266,7 @@ class ScrapeStats(BaseModel):
     cells_subdivided: int = 0
     cells_skipped: int = 0  # Cells with existing coverage
     cells_reduced: int = 0  # Cells with partial coverage (fewer queries)
+    cells_sparse_skipped: int = 0  # Cells skipped due to low density (water, swamps, etc.)
     duplicates_skipped: int = 0
     chains_skipped: int = 0
     out_of_bounds: int = 0  # Hotels outside scrape region
@@ -503,7 +504,7 @@ class GridScraper:
                     logger.info(f"Saved {len(batch_hotels)} hotels ({self._stats.cells_searched}/{len(cells) + self._stats.cells_searched} cells)")
 
         self._stats.hotels_found = len(hotels)
-        logger.info(f"Scrape done: {len(hotels)} hotels, {self._stats.api_calls} API calls")
+        logger.info(f"Scrape done: {len(hotels)} hotels, {self._stats.api_calls} API calls, {self._stats.cells_sparse_skipped} sparse cells skipped")
 
         return hotels, self._stats
 
@@ -695,13 +696,27 @@ class GridScraper:
             if hotel:
                 hotels.append(hotel)
 
+        # AGGRESSIVE SPARSE SKIP: If scout returns very few results, skip entirely
+        # This saves credits on water, swamps, forests, farmland, etc.
+        if scout_count == 0:
+            # Empty cell (ocean, swamp, etc.) - skip entirely, no subdivision
+            self._stats.cells_sparse_skipped += 1
+            logger.debug(f"SPARSE SKIP (0 results): cell at ({cell.center_lat:.3f}, {cell.center_lng:.3f})")
+            return hotels, False  # Don't subdivide empty cells
+
+        if scout_count <= 3:
+            # Very sparse cell - return what we found, don't query more or subdivide
+            self._stats.cells_sparse_skipped += 1
+            logger.debug(f"SPARSE SKIP ({scout_count} results): cell at ({cell.center_lat:.3f}, {cell.center_lng:.3f})")
+            return hotels, False  # Don't subdivide sparse cells
+
         # Determine how many more queries based on density
-        if scout_count <= 5:
-            remaining_queries = all_queries[1:2]  # 2 total
+        if scout_count <= 8:
+            remaining_queries = all_queries[1:2]  # 2 total (was 5)
         elif scout_count <= 14:
-            remaining_queries = all_queries[1:6]  # 6 total
+            remaining_queries = all_queries[1:4]  # 4 total (was 6)
         else:
-            remaining_queries = all_queries[1:]   # 12 total
+            remaining_queries = all_queries[1:8]  # 8 total (was 12)
 
         # Execute remaining queries concurrently
         if remaining_queries:

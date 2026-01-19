@@ -905,3 +905,128 @@ class Service(IService):
             "total_area_km2": round(total_area, 1),
             "region_breakdown": region_estimates,
         }
+
+    def estimate_bbox(
+        self,
+        lat_min: float,
+        lng_min: float,
+        lat_max: float,
+        lng_max: float,
+        cell_size_km: float = 2.0,
+        name: str = "bounding box",
+    ) -> dict:
+        """
+        Estimate cost for scraping a bounding box.
+
+        Args:
+            lat_min, lng_min, lat_max, lng_max: Bounding box coordinates
+            cell_size_km: Cell size for scraping grid
+            name: Name for display
+
+        Returns dict with estimate details.
+        """
+        center_lat = (lat_min + lat_max) / 2
+        height_km = (lat_max - lat_min) * 111.0
+        width_km = (lng_max - lng_min) * 111.0 * math.cos(math.radians(center_lat))
+        area_km2 = height_km * width_km
+
+        cells_x = max(1, int(math.ceil(width_km / cell_size_km)))
+        cells_y = max(1, int(math.ceil(height_km / cell_size_km)))
+        total_cells = cells_x * cells_y
+
+        # Estimate API calls: 3 queries per cell (dense mode), some cells sparse-skipped
+        # With sparse skipping, estimate ~2.5 queries per cell on average
+        avg_queries_per_cell = 2.5
+        estimated_api_calls = int(total_cells * avg_queries_per_cell)
+
+        # Cost: $0.001 per query (Serper pricing)
+        cost_per_query = 0.001
+        estimated_cost = estimated_api_calls * cost_per_query
+
+        # Estimate hotels: ~8 unique hotels per cell after dedup
+        hotels_per_cell = 8
+        estimated_hotels = total_cells * hotels_per_cell
+
+        return {
+            "name": name,
+            "lat_min": lat_min,
+            "lng_min": lng_min,
+            "lat_max": lat_max,
+            "lng_max": lng_max,
+            "cell_size_km": cell_size_km,
+            "area_km2": round(area_km2, 1),
+            "dimensions_km": f"{width_km:.1f} x {height_km:.1f}",
+            "grid_cells": f"{cells_x} x {cells_y} = {total_cells}",
+            "total_cells": total_cells,
+            "estimated_api_calls": estimated_api_calls,
+            "estimated_cost_usd": round(estimated_cost, 2),
+            "estimated_hotels": estimated_hotels,
+        }
+
+    async def scrape_bbox(
+        self,
+        lat_min: float,
+        lng_min: float,
+        lat_max: float,
+        lng_max: float,
+        cell_size_km: float = 2.0,
+        save_to_db: bool = True,
+        source: str = "bbox",
+    ) -> Tuple[List[ScrapedHotel], dict]:
+        """
+        Scrape hotels in a bounding box.
+
+        Args:
+            lat_min, lng_min, lat_max, lng_max: Bounding box coordinates
+            cell_size_km: Cell size for scraping grid
+            save_to_db: Whether to save hotels to database
+            source: Source identifier for database records
+
+        Returns tuple of (hotels list, stats dict).
+        """
+        scraper = GridScraper(
+            api_key=self._api_key,
+            cell_size_km=cell_size_km,
+        )
+
+        total_saved = 0
+        all_hotels = []
+        seen_ids = set()
+
+        async def save_batch(batch_hotels):
+            nonlocal total_saved
+            unique_batch = []
+            for h in batch_hotels:
+                if h.google_place_id:
+                    if h.google_place_id in seen_ids:
+                        continue
+                    seen_ids.add(h.google_place_id)
+                unique_batch.append(h)
+
+            if save_to_db and unique_batch:
+                count = await self._save_hotels(unique_batch, source=source)
+                total_saved += count
+                logger.info(f"  Saved batch: {count} hotels (total: {total_saved})")
+
+            all_hotels.extend(unique_batch)
+
+        hotels, stats = await scraper._scrape_bounds(
+            lat_min=lat_min,
+            lat_max=lat_max,
+            lng_min=lng_min,
+            lng_max=lng_max,
+            on_batch_complete=save_batch,
+        )
+
+        return all_hotels, {
+            "hotels_found": len(all_hotels),
+            "hotels_saved": total_saved,
+            "api_calls": stats.api_calls,
+            "cells_searched": stats.cells_searched,
+            "cells_subdivided": stats.cells_subdivided,
+            "cells_skipped": stats.cells_skipped,
+            "cells_sparse_skipped": stats.cells_sparse_skipped,
+            "duplicates_skipped": stats.duplicates_skipped,
+            "chains_skipped": stats.chains_skipped,
+            "out_of_bounds": stats.out_of_bounds,
+        }
