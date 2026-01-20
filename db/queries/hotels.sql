@@ -121,6 +121,47 @@ WHERE h.status = 0
   AND LOWER(h.website) NOT LIKE '%accor.com%'
 LIMIT :limit;
 
+-- name: get_hotels_pending_detection_by_categories
+-- Get hotels that need booking engine detection, filtered by categories
+-- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet, in categories list
+SELECT
+    h.id,
+    h.name,
+    h.google_place_id,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.city,
+    h.state,
+    h.country,
+    h.address,
+    ST_Y(h.location::geometry) AS latitude,
+    ST_X(h.location::geometry) AS longitude,
+    h.rating,
+    h.review_count,
+    h.status,
+    h.source,
+    h.created_at,
+    h.updated_at
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.status = 0
+  AND hbe.hotel_id IS NULL
+  AND h.website IS NOT NULL
+  AND h.website != ''
+  AND h.category = ANY(:categories)
+  AND LOWER(h.website) NOT LIKE '%marriott.com%'
+  AND LOWER(h.website) NOT LIKE '%hilton.com%'
+  AND LOWER(h.website) NOT LIKE '%ihg.com%'
+  AND LOWER(h.website) NOT LIKE '%hyatt.com%'
+  AND LOWER(h.website) NOT LIKE '%wyndham.com%'
+  AND LOWER(h.website) NOT LIKE '%choicehotels.com%'
+  AND LOWER(h.website) NOT LIKE '%bestwestern.com%'
+  AND LOWER(h.website) NOT LIKE '%radissonhotels.com%'
+  AND LOWER(h.website) NOT LIKE '%accor.com%'
+LIMIT :limit;
+
 -- name: update_hotel_status!
 -- Update hotel status after detection
 UPDATE sadie_gtm.hotels

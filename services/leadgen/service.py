@@ -151,11 +151,17 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def enqueue_hotels_for_detection(self, limit: int = 1000, batch_size: int = 20) -> int:
+    async def enqueue_hotels_for_detection(
+        self,
+        limit: int = 1000,
+        batch_size: int = 20,
+        categories: Optional[List[str]] = None,
+    ) -> int:
         """
         Enqueue hotels for detection via SQS.
         Queries hotels with status=0 and no hotel_booking_engines record.
         Detection tracked by hotel_booking_engines presence, not status.
+        Optionally filter by categories (e.g., ['hotel', 'motel']).
         Returns count of hotels enqueued.
         """
         pass
@@ -449,19 +455,25 @@ class Service(IService):
         """Get hotels by list of IDs."""
         return await repo.get_hotels_by_ids(hotel_ids=hotel_ids)
 
-    async def enqueue_hotels_for_detection(self, limit: int = 1000, batch_size: int = 20) -> int:
+    async def enqueue_hotels_for_detection(
+        self,
+        limit: int = 1000,
+        batch_size: int = 20,
+        categories: Optional[List[str]] = None,
+    ) -> int:
         """Enqueue hotels for detection via SQS.
 
         Queries hotels with status=0 and no hotel_booking_engines record.
         Sends to SQS in batches. Does NOT update status - detection is tracked
         by presence of hotel_booking_engines record.
+        Optionally filter by categories (e.g., ['hotel', 'motel']).
 
         Returns count of hotels enqueued.
         """
         from infra.sqs import send_messages_batch, get_queue_url
 
         # Get hotels pending detection (status=0, no booking engine record)
-        hotels = await repo.get_hotels_pending_detection(limit=limit)
+        hotels = await repo.get_hotels_pending_detection(limit=limit, categories=categories)
         if not hotels:
             return 0
 
@@ -1162,18 +1174,21 @@ class Service(IService):
         cells_y = max(1, int(math.ceil(height_km / cell_size_km)))
         total_cells = cells_x * cells_y
 
-        # Estimate API calls: 5 queries per cell (thorough mode), some cells sparse-skipped
-        # With sparse skipping, estimate ~4 queries per cell on average
-        avg_queries_per_cell = 4.0
+        # Estimate API calls
+        # Based on actual Orlando data: 5000 calls / 1536 cells = 3.25 calls per cell
+        # Includes multiple query types (hotels, motels, lodging) + some pagination
+        avg_queries_per_cell = 3.25
         estimated_api_calls = int(total_cells * avg_queries_per_cell)
 
         # Cost: $0.001 per query (Serper pricing)
         cost_per_query = 0.001
         estimated_cost = estimated_api_calls * cost_per_query
 
-        # Estimate hotels: ~8 unique hotels per cell after dedup
-        hotels_per_cell = 8
-        estimated_hotels = total_cells * hotels_per_cell
+        # Estimate hotels: ~1.4 unique hotels per cell after dedup
+        # Based on actual Palm Beach data: 689 hotels / 495 cells = 1.4
+        # Many cells overlap, and dedup removes ~60% of raw results
+        hotels_per_cell = 1.4
+        estimated_hotels = int(total_cells * hotels_per_cell)
 
         return {
             "name": name,

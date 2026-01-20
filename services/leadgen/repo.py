@@ -65,16 +65,25 @@ async def delete_hotel(hotel_id: int) -> None:
         await queries.delete_hotel(conn, hotel_id=hotel_id)
 
 
-async def get_hotels_pending_detection(limit: int = 100) -> List[Hotel]:
+async def get_hotels_pending_detection(
+    limit: int = 100,
+    categories: Optional[List[str]] = None,
+) -> List[Hotel]:
     """Get hotels that need booking engine detection.
 
     Criteria:
     - status = 0 (scraped)
     - website is not null
     - not a big chain (Marriott, Hilton, IHG, Hyatt, Wyndham, etc.)
+    - optionally filtered by categories (e.g., ['hotel', 'motel'])
     """
     async with get_conn() as conn:
-        results = await queries.get_hotels_pending_detection(conn, limit=limit)
+        if categories:
+            results = await queries.get_hotels_pending_detection_by_categories(
+                conn, limit=limit, categories=categories
+            )
+        else:
+            results = await queries.get_hotels_pending_detection(conn, limit=limit)
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
