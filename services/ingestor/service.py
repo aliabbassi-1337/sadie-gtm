@@ -7,14 +7,52 @@ Handles ingestion from:
 - Other public data sources
 """
 
+from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Tuple
 from loguru import logger
 
 from services.ingestor.dbpr import DBPRIngester, DBPRLicense, DBPRIngestStats, LICENSE_TYPES
 from services.ingestor import repo
 
+# Hotel status constants
+HOTEL_STATUS_PENDING = 0
+HOTEL_STATUS_LAUNCHED = 1
+HOTEL_STATUS_NO_BOOKING_ENGINE = -1
+HOTEL_STATUS_LOCATION_MISMATCH = -2
 
-class IngestorService:
+
+class IService(ABC):
+    """Ingestor Service Interface - Import hotel data from external sources."""
+
+    @abstractmethod
+    async def ingest_dbpr(
+        self,
+        counties: Optional[List[str]] = None,
+        license_types: Optional[List[str]] = None,
+        new_only: bool = False,
+        save_to_db: bool = True,
+    ) -> Tuple[List[DBPRLicense], dict]:
+        """
+        Ingest Florida DBPR lodging licenses.
+
+        Args:
+            counties: Filter to specific counties (e.g., ["Palm Beach", "Miami-Dade"])
+            license_types: Filter to specific types (e.g., ["Hotel", "Motel"])
+            new_only: Only download new licenses (current fiscal year)
+            save_to_db: Whether to save to hotels table
+
+        Returns:
+            Tuple of (licenses, stats dict)
+        """
+        pass
+
+    @abstractmethod
+    def get_dbpr_license_types(self) -> Dict[str, str]:
+        """Get mapping of DBPR license type codes to names."""
+        pass
+
+
+class Service(IService):
     """Service for ingesting hotel data from external sources."""
 
     async def ingest_dbpr(
@@ -88,7 +126,7 @@ class IngestorService:
                 result = await repo.insert_hotel(
                     name=lic.business_name or lic.licensee_name,
                     source=f"dbpr_{lic.license_type.lower().replace(' ', '_').replace('-', '_')}",
-                    status=0,  # Pending
+                    status=HOTEL_STATUS_PENDING,
                     address=lic.address,
                     city=lic.city,
                     state=lic.state,
