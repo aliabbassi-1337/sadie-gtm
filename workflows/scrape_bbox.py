@@ -148,6 +148,7 @@ async def scrape_box(
     cell_size: float,
     state: str,
     thorough: bool = False,
+    max_pages: int = 1,
 ) -> None:
     """Scrape a single bounding box."""
     # Show estimate first
@@ -160,14 +161,23 @@ async def scrape_box(
         name=name,
     )
 
+    # Adjust estimate for pagination
+    if max_pages > 1:
+        est_calls_with_pages = est['estimated_api_calls'] * max_pages
+        est_cost_with_pages = est['estimated_cost_usd'] * max_pages
+    else:
+        est_calls_with_pages = est['estimated_api_calls']
+        est_cost_with_pages = est['estimated_cost_usd']
+
     logger.info("=" * 70)
     logger.info(f"Scraping: {name}")
     logger.info("=" * 70)
     logger.info(f"Bounds: ({lat_min}, {lng_min}) to ({lat_max}, {lng_max})")
     logger.info(f"Area: {est['area_km2']} km² ({est['dimensions_km']})")
     logger.info(f"Grid: {est['grid_cells']} cells ({cell_size}km)")
-    logger.info(f"Estimated API calls: ~{est['estimated_api_calls']:,}")
-    logger.info(f"Estimated cost: ~${est['estimated_cost_usd']:.2f}")
+    logger.info(f"Pagination: {max_pages} page(s) per query")
+    logger.info(f"Estimated API calls: ~{est_calls_with_pages:,}")
+    logger.info(f"Estimated cost: ~${est_cost_with_pages:.2f}")
     logger.info("")
 
     # Create source name for database
@@ -182,6 +192,7 @@ async def scrape_box(
         save_to_db=True,
         source=source_name,
         thorough=thorough,
+        max_pages=max_pages,
     )
 
     logger.info("")
@@ -237,6 +248,7 @@ Examples:
     parser.add_argument("--state", type=str, default="FL", help="State code for source tracking (default: FL)")
     parser.add_argument("--cell-size", type=float, default=2.0, help="Cell size in km (default: 2.0)")
     parser.add_argument("--thorough", action="store_true", help="Disable skipping for maximum coverage (more API calls)")
+    parser.add_argument("--pages", type=int, default=1, help="Pages per query for pagination (1-5, each page ~20 results, default: 1)")
 
     args = parser.parse_args()
 
@@ -309,6 +321,7 @@ Examples:
                     cell_size=args.cell_size,
                     state=args.state,
                     thorough=args.thorough,
+                    max_pages=args.pages,
                 )
     finally:
         await close_db()

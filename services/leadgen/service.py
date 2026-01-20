@@ -974,6 +974,7 @@ class Service(IService):
         save_to_db: bool = True,
         source: str = "bbox",
         thorough: bool = False,
+        max_pages: int = 1,
     ) -> Tuple[List[ScrapedHotel], dict]:
         """
         Scrape hotels in a bounding box.
@@ -984,6 +985,7 @@ class Service(IService):
             save_to_db: Whether to save hotels to database
             source: Source identifier for database records
             thorough: Disable skipping for maximum coverage (more API calls)
+            max_pages: Pages per query for pagination (1-5, each page ~20 results)
 
         Returns tuple of (hotels list, stats dict).
         """
@@ -991,6 +993,7 @@ class Service(IService):
             api_key=self._api_key,
             cell_size_km=cell_size_km,
             thorough=thorough,
+            max_pages=max_pages,
         )
 
         # Preload existing hotels from DB to skip already-covered cells

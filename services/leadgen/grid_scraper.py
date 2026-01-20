@@ -307,6 +307,7 @@ class GridScraper:
         hybrid: bool = False,
         aggressive: bool = False,
         thorough: bool = False,
+        max_pages: int = 1,
         city_coords: Optional[List[Tuple[float, float]]] = None,
     ):
         self.api_key = api_key or os.environ.get("SERPER_API_KEY", "")
@@ -317,10 +318,11 @@ class GridScraper:
         self.hybrid = hybrid  # Use variable cell sizes based on proximity to cities
         self.aggressive = aggressive  # Use more aggressive (cheaper) hybrid settings
         self.thorough = thorough  # Disable skipping for maximum coverage
-        
+        self.max_pages = max_pages  # Pages per query (1-5, each page ~20 results)
+
         # City coordinates for hybrid mode density detection (passed from service)
         self.city_coords = city_coords or _DEFAULT_CITY_COORDS
-        
+
         # Set hybrid parameters based on mode
         if aggressive:
             self.dense_radius_km = HYBRID_AGGRESSIVE_DENSE_RADIUS_KM
@@ -328,7 +330,7 @@ class GridScraper:
         else:
             self.dense_radius_km = HYBRID_DENSE_RADIUS_KM
             self.sparse_cell_size_km = HYBRID_SPARSE_CELL_SIZE_KM
-        
+
         # Pick zoom level that covers the cell
         self.zoom_level = 14  # default
         for size, zoom in sorted(ZOOM_BY_CELL_SIZE.items()):
@@ -341,6 +343,10 @@ class GridScraper:
         self._seen_locations: Set[Tuple[float, float]] = set()  # Location dedup (secondary)
         self._seen_coverage: Set[Tuple[float, float]] = set()  # Cell coverage tracking
         self._stats = ScrapeStats()
+        self._out_of_credits = False
+        self._bounds: Optional[Tuple[float, float, float, float]] = None
+        self._client: Optional[httpx.AsyncClient] = None
+        self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
     def preload_existing(self, place_ids: Set[str], locations: Set[Tuple[float, float]]) -> None:
         """Preload existing hotels from DB to skip already-covered areas.
@@ -350,9 +356,6 @@ class GridScraper:
         self._seen_place_ids.update(place_ids)
         self._seen_coverage.update(locations)
         logger.info(f"Preloaded {len(place_ids)} existing place_ids, {len(locations)} locations")
-        self._out_of_credits = False
-        # Scrape bounds for filtering out-of-region results
-        self._bounds: Optional[Tuple[float, float, float, float]] = None  # (lat_min, lat_max, lng_min, lng_max)
 
     async def scrape_region(
         self,
@@ -748,12 +751,22 @@ class GridScraper:
 
         # Dense mode (small cells ≤2.5km): run 4 more diverse queries (5 total including scout)
         # Use varied search types to find different property types
+        # With pagination enabled, each query fetches multiple pages
         if cell.size_km <= 2.5:
             diverse_queries = [all_queries[3], all_queries[6], all_queries[9], all_queries[11] if len(all_queries) > 11 else all_queries[2]]
-            results = await asyncio.gather(*[
-                self._search_serper(query, cell.center_lat, cell.center_lng, cell_zoom)
-                for query in diverse_queries
-            ])
+
+            if self.max_pages > 1:
+                # Use paginated search for more results
+                results = await asyncio.gather(*[
+                    self._search_serper_paginated(query, cell.center_lat, cell.center_lng, cell_zoom, max_pages=self.max_pages)
+                    for query in diverse_queries
+                ])
+            else:
+                results = await asyncio.gather(*[
+                    self._search_serper(query, cell.center_lat, cell.center_lng, cell_zoom)
+                    for query in diverse_queries
+                ])
+
             for places in results:
                 if len(places) >= API_RESULT_LIMIT:
                     hit_limit = True
@@ -761,7 +774,7 @@ class GridScraper:
                     hotel = self._process_place(place)
                     if hotel:
                         hotels.append(hotel)
-            logger.debug(f"  Dense mode: {len(hotels)} unique hotels after 5 queries")
+            logger.debug(f"  Dense mode: {len(hotels)} unique hotels after 5 queries (max_pages={self.max_pages})")
             return hotels, hit_limit
 
         # Sparse mode (large cells): determine how many more queries based on density
@@ -772,12 +785,18 @@ class GridScraper:
         else:
             remaining_queries = all_queries[1:8]  # 8 total
 
-        # Execute remaining queries concurrently
+        # Execute remaining queries concurrently (with pagination if enabled)
         if remaining_queries:
-            results = await asyncio.gather(*[
-                self._search_serper(query, cell.center_lat, cell.center_lng, cell_zoom)
-                for query in remaining_queries
-            ])
+            if self.max_pages > 1:
+                results = await asyncio.gather(*[
+                    self._search_serper_paginated(query, cell.center_lat, cell.center_lng, cell_zoom, max_pages=self.max_pages)
+                    for query in remaining_queries
+                ])
+            else:
+                results = await asyncio.gather(*[
+                    self._search_serper(query, cell.center_lat, cell.center_lng, cell_zoom)
+                    for query in remaining_queries
+                ])
 
             for places in results:
                 if len(places) >= API_RESULT_LIMIT:
@@ -802,21 +821,40 @@ class GridScraper:
         lat: float,
         lng: float,
         zoom_level: Optional[int] = None,
+        page: int = 1,
     ) -> List[dict]:
-        """Call Serper Maps API with semaphore for rate limiting."""
+        """Call Serper Maps API with semaphore for rate limiting.
+
+        Args:
+            query: Search query (e.g., "hotel", "motel")
+            lat: Latitude of search center
+            lng: Longitude of search center
+            zoom_level: Google Maps zoom level (default from constructor)
+            page: Page number for pagination (1, 2, 3, etc.)
+        """
         if self._out_of_credits:
             return []
 
         zoom = zoom_level or self.zoom_level
 
+        # Create client if not in context of _scrape_bounds
+        own_client = False
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=30.0)
+            own_client = True
+
         async with self._semaphore:
             self._stats.api_calls += 1
 
             try:
+                payload = {"q": query, "ll": f"@{lat},{lng},{zoom}z"}
+                if page > 1:
+                    payload["page"] = page
+
                 resp = await self._client.post(
                     SERPER_MAPS_URL,
                     headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-                    json={"q": query, "ll": f"@{lat},{lng},{zoom}z"},
+                    json=payload,
                 )
 
                 if resp.status_code == 400 and "credits" in resp.text.lower():
@@ -832,6 +870,77 @@ class GridScraper:
             except Exception as e:
                 logger.error(f"Serper request failed: {e}")
                 return []
+            finally:
+                if own_client:
+                    await self._client.aclose()
+                    self._client = None
+
+    async def _search_serper_paginated(
+        self,
+        query: str,
+        lat: float,
+        lng: float,
+        zoom_level: Optional[int] = None,
+        max_pages: int = 3,
+    ) -> List[dict]:
+        """Call Serper Maps API with pagination to get more results.
+
+        Fetches up to max_pages of results (each page ~20 results).
+        Stops early if a page returns fewer than 15 results (sparse).
+
+        Args:
+            query: Search query
+            lat: Latitude of search center
+            lng: Longitude of search center
+            zoom_level: Google Maps zoom level
+            max_pages: Maximum pages to fetch (1-5 recommended)
+
+        Returns:
+            Combined list of places from all pages
+        """
+        all_places = []
+        seen_ids = set()  # Dedupe within this paginated search
+
+        # Create client once for all pages if not already set
+        own_client = False
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=30.0)
+            own_client = True
+
+        try:
+            for page in range(1, max_pages + 1):
+                if self._out_of_credits:
+                    break
+
+                places = await self._search_serper(query, lat, lng, zoom_level, page=page)
+
+                # Dedupe within this search
+                new_places = []
+                for p in places:
+                    pid = p.get("placeId")
+                    if pid and pid not in seen_ids:
+                        seen_ids.add(pid)
+                        new_places.append(p)
+                    elif not pid:
+                        new_places.append(p)
+
+                all_places.extend(new_places)
+
+                # Stop if page is sparse (fewer than 15 results = likely last page)
+                if len(places) < 15:
+                    logger.debug(f"Pagination early exit: page {page} had {len(places)} results")
+                    break
+
+                # Stop if all results on this page were duplicates
+                if len(new_places) == 0 and len(places) > 0:
+                    logger.debug(f"Pagination early exit: page {page} all duplicates")
+                    break
+        finally:
+            if own_client and self._client:
+                await self._client.aclose()
+                self._client = None
+
+        return all_places
 
     def _process_place(self, place: dict) -> Optional[ScrapedHotel]:
         """Process place into ScrapedHotel, filtering chains/duplicates."""
