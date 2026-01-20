@@ -182,6 +182,9 @@ Supported engines: """ + ", ".join(list_engines())
 
     # Save to database
     if args.save_db:
+        from db.client import init_db
+        await init_db()
+
         logger.info("Saving to database...")
         source = "reverse_lookup"
         if locations:
