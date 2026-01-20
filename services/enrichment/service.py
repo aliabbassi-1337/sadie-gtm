@@ -1,8 +1,10 @@
 from abc import ABC, abstractmethod
 from decimal import Decimal
 import asyncio
+import os
 
 import httpx
+from dotenv import load_dotenv
 
 from services.enrichment import repo
 from services.enrichment.room_count_enricher import (
@@ -14,6 +16,10 @@ from services.enrichment.customer_proximity import (
     log as proximity_log,
 )
 from services.enrichment.website_enricher import WebsiteEnricher
+
+load_dotenv()
+
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 
 class IService(ABC):
@@ -221,7 +227,6 @@ class Service(IService):
 
     async def enrich_websites(
         self,
-        api_key: str,
         limit: int = 100,
         source_filter: str = None,
         state_filter: str = None,
@@ -231,9 +236,9 @@ class Service(IService):
         Find websites for hotels that don't have them via Serper search.
 
         Runs concurrently with semaphore-controlled parallelism.
+        Requires SERPER_API_KEY environment variable.
 
         Args:
-            api_key: Serper API key
             limit: Max hotels to process
             source_filter: Filter by source (e.g., 'dbpr')
             state_filter: Filter by state (e.g., 'FL')
@@ -242,6 +247,10 @@ class Service(IService):
         Returns:
             Stats dict with found/not_found/errors counts
         """
+        if not SERPER_API_KEY:
+            log("Error: SERPER_API_KEY not found in environment")
+            return {"total": 0, "found": 0, "not_found": 0, "errors": 0}
+
         # Claim hotels atomically (multi-worker safe)
         hotels = await repo.claim_hotels_for_website_enrichment(
             limit=limit,
@@ -255,7 +264,7 @@ class Service(IService):
 
         log(f"Claimed {len(hotels)} hotels for website enrichment (concurrency={concurrency})")
 
-        enricher = WebsiteEnricher(api_key=api_key, delay_between_requests=0)
+        enricher = WebsiteEnricher(api_key=SERPER_API_KEY, delay_between_requests=0)
         semaphore = asyncio.Semaphore(concurrency)
 
         found = 0
