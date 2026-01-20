@@ -230,6 +230,8 @@ class Service(IService):
         """
         Find websites for hotels that don't have them via Serper search.
 
+        Uses claim pattern for multi-worker safety.
+
         Args:
             api_key: Serper API key
             limit: Max hotels to process
@@ -240,8 +242,8 @@ class Service(IService):
         Returns:
             Stats dict with found/not_found/errors counts
         """
-        # Get hotels without websites
-        hotels = await repo.get_hotels_without_websites(
+        # Claim hotels atomically (multi-worker safe)
+        hotels = await repo.claim_hotels_for_website_enrichment(
             limit=limit,
             source_filter=source_filter,
             state_filter=state_filter,
@@ -251,7 +253,7 @@ class Service(IService):
             log("No hotels found needing website enrichment")
             return {"total": 0, "found": 0, "not_found": 0, "errors": 0}
 
-        log(f"Enriching {len(hotels)} hotels with websites")
+        log(f"Claimed {len(hotels)} hotels for website enrichment")
 
         enricher = WebsiteEnricher(api_key=api_key, delay_between_requests=delay)
 
@@ -272,10 +274,19 @@ class Service(IService):
             if result.website:
                 found += 1
                 await repo.update_hotel_website(hotel["id"], result.website)
+                await repo.update_website_enrichment_status(
+                    hotel["id"], status=1, source="serper"
+                )
             elif result.error == "no_match":
                 not_found += 1
+                await repo.update_website_enrichment_status(
+                    hotel["id"], status=0, source="serper"
+                )
             else:
                 errors += 1
+                await repo.update_website_enrichment_status(
+                    hotel["id"], status=0, source="serper"
+                )
 
         log(f"Website enrichment complete: {found} found, {not_found} not found, {errors} errors")
 

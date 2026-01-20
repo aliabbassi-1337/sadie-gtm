@@ -455,11 +455,3 @@ SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
--- name: get_hotels_needing_enrichment
--- Get DBPR hotels needing website enrichment
-SELECT id, name, city, state, address
-FROM sadie_gtm.hotels
-WHERE source IN ('dbpr_hotel', 'dbpr_motel')
-  AND (website IS NULL OR website = '')
-LIMIT :limit
-OFFSET :offset;
