@@ -147,6 +147,7 @@ async def scrape_box(
     name: str,
     cell_size: float,
     state: str,
+    thorough: bool = False,
 ) -> None:
     """Scrape a single bounding box."""
     # Show estimate first
@@ -180,6 +181,7 @@ async def scrape_box(
         cell_size_km=cell_size,
         save_to_db=True,
         source=source_name,
+        thorough=thorough,
     )
 
     logger.info("")
@@ -234,6 +236,7 @@ Examples:
     parser.add_argument("--name", type=str, help="Name of box (for scraping specific box from GeoJSON)")
     parser.add_argument("--state", type=str, default="FL", help="State code for source tracking (default: FL)")
     parser.add_argument("--cell-size", type=float, default=2.0, help="Cell size in km (default: 2.0)")
+    parser.add_argument("--thorough", action="store_true", help="Disable skipping for maximum coverage (more API calls)")
 
     args = parser.parse_args()
 
@@ -305,6 +308,7 @@ Examples:
                     name=box["name"],
                     cell_size=args.cell_size,
                     state=args.state,
+                    thorough=args.thorough,
                 )
     finally:
         await close_db()

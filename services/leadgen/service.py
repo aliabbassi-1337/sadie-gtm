@@ -973,6 +973,7 @@ class Service(IService):
         cell_size_km: float = 2.0,
         save_to_db: bool = True,
         source: str = "bbox",
+        thorough: bool = False,
     ) -> Tuple[List[ScrapedHotel], dict]:
         """
         Scrape hotels in a bounding box.
@@ -982,12 +983,14 @@ class Service(IService):
             cell_size_km: Cell size for scraping grid
             save_to_db: Whether to save hotels to database
             source: Source identifier for database records
+            thorough: Disable skipping for maximum coverage (more API calls)
 
         Returns tuple of (hotels list, stats dict).
         """
         scraper = GridScraper(
             api_key=self._api_key,
             cell_size_km=cell_size_km,
+            thorough=thorough,
         )
 
         # Preload existing hotels from DB to skip already-covered cells

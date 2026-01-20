@@ -66,6 +66,11 @@ SEARCH_TYPES = [
     "vacation rental",
     "extended stay",
     "suites",
+    "boutique hotel",
+    "beach hotel",
+    "hostel",
+    "aparthotel",
+    "condo hotel",
 ]
 
 # Modifiers to get niche results (rotated per cell)
@@ -80,6 +85,9 @@ SEARCH_MODIFIERS = [
     "beachfront",
     "waterfront",
     "downtown",
+    "luxury",
+    "pet friendly",
+    "oceanfront",
 ]
 
 # Chain filter - names to skip
@@ -298,6 +306,7 @@ class GridScraper:
         cell_size_km: float = DEFAULT_CELL_SIZE_KM,
         hybrid: bool = False,
         aggressive: bool = False,
+        thorough: bool = False,
         city_coords: Optional[List[Tuple[float, float]]] = None,
     ):
         self.api_key = api_key or os.environ.get("SERPER_API_KEY", "")
@@ -307,6 +316,7 @@ class GridScraper:
         self.cell_size_km = cell_size_km
         self.hybrid = hybrid  # Use variable cell sizes based on proximity to cities
         self.aggressive = aggressive  # Use more aggressive (cheaper) hybrid settings
+        self.thorough = thorough  # Disable skipping for maximum coverage
         
         # City coordinates for hybrid mode density detection (passed from service)
         self.city_coords = city_coords or _DEFAULT_CITY_COORDS
@@ -726,8 +736,9 @@ class GridScraper:
 
         # DUPLICATE SKIP: Only skip if scout found NOTHING new (100% overlap)
         # Different query types can still surface unique hotels
+        # Skip this check in thorough mode - always run full queries
         scout_new = scout_count - scout_known
-        if scout_new == 0 and scout_known >= 5:
+        if not self.thorough and scout_new == 0 and scout_known >= 5:
             self._stats.cells_duplicate_skipped += 1
             logger.info(f"DUPLICATE SKIP: cell ({cell.center_lat:.4f}, {cell.center_lng:.4f}) scout={scout_count}, all already known")
             return hotels, False  # Don't run more queries, don't subdivide
