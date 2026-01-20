@@ -225,19 +225,19 @@ class Service(IService):
         limit: int = 100,
         source_filter: str = None,
         state_filter: str = None,
-        delay: float = 0.1,
+        concurrency: int = 10,
     ) -> dict:
         """
         Find websites for hotels that don't have them via Serper search.
 
-        Uses claim pattern for multi-worker safety.
+        Runs concurrently with semaphore-controlled parallelism.
 
         Args:
             api_key: Serper API key
             limit: Max hotels to process
             source_filter: Filter by source (e.g., 'dbpr')
             state_filter: Filter by state (e.g., 'FL')
-            delay: Delay between API calls
+            concurrency: Max concurrent API requests (default 10)
 
         Returns:
             Stats dict with found/not_found/errors counts
@@ -253,40 +253,51 @@ class Service(IService):
             log("No hotels found needing website enrichment")
             return {"total": 0, "found": 0, "not_found": 0, "errors": 0}
 
-        log(f"Claimed {len(hotels)} hotels for website enrichment")
+        log(f"Claimed {len(hotels)} hotels for website enrichment (concurrency={concurrency})")
 
-        enricher = WebsiteEnricher(api_key=api_key, delay_between_requests=delay)
+        enricher = WebsiteEnricher(api_key=api_key, delay_between_requests=0)
+        semaphore = asyncio.Semaphore(concurrency)
 
         found = 0
         not_found = 0
         errors = 0
+        completed = 0
 
-        for i, hotel in enumerate(hotels):
-            if (i + 1) % 50 == 0:
-                log(f"  Progress: {i + 1}/{len(hotels)} ({found} found)")
+        async def process_hotel(hotel: dict) -> tuple[str, bool]:
+            """Process a single hotel, returns (status, has_website)."""
+            nonlocal found, not_found, errors, completed
 
-            result = await enricher.find_website(
-                name=hotel["name"],
-                city=hotel["city"],
-                state=hotel.get("state", "FL"),
-            )
+            async with semaphore:
+                result = await enricher.find_website(
+                    name=hotel["name"],
+                    city=hotel["city"],
+                    state=hotel.get("state", "FL"),
+                    address=hotel.get("address"),
+                )
 
-            if result.website:
-                found += 1
-                await repo.update_hotel_website(hotel["id"], result.website)
-                await repo.update_website_enrichment_status(
-                    hotel["id"], status=1, source="serper"
-                )
-            elif result.error == "no_match":
-                not_found += 1
-                await repo.update_website_enrichment_status(
-                    hotel["id"], status=0, source="serper"
-                )
-            else:
-                errors += 1
-                await repo.update_website_enrichment_status(
-                    hotel["id"], status=0, source="serper"
-                )
+                if result.website:
+                    found += 1
+                    await repo.update_hotel_website(hotel["id"], result.website)
+                    await repo.update_website_enrichment_status(
+                        hotel["id"], status=1, source="serper"
+                    )
+                elif result.error == "no_match":
+                    not_found += 1
+                    await repo.update_website_enrichment_status(
+                        hotel["id"], status=0, source="serper"
+                    )
+                else:
+                    errors += 1
+                    await repo.update_website_enrichment_status(
+                        hotel["id"], status=0, source="serper"
+                    )
+
+                completed += 1
+                if completed % 50 == 0:
+                    log(f"  Progress: {completed}/{len(hotels)} ({found} found)")
+
+        # Run all hotel enrichments concurrently
+        await asyncio.gather(*[process_hotel(h) for h in hotels])
 
         log(f"Website enrichment complete: {found} found, {not_found} not found, {errors} errors")
 
