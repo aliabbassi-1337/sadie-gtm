@@ -120,9 +120,44 @@ pb := fmt.Sprintf("!4m12!1m3!1d3826.9!2d%.4f!3d%.4f!2m3!1f0!2f0!3f0...", lon, la
    - Getting more fields (hours, price range)
    - Reducing 31% garbage rate via place type filtering
 
+## Serper Optimization Findings (Jan 2026)
+
+### Zoom Level Testing
+| Zoom | Results | Radius |
+|------|---------|--------|
+| 14z | 20 | ~2km |
+| 15z | 20 | ~1km |
+| 16z | 9 | ~500m |
+| 17z | 2 | ~250m |
+| 18z+ | 0 | too tight |
+
+### Optimal Config: 15z + 0.5km cells
+Testing same 3km × 3km area:
+| Config | Hotels | API Calls | vs Baseline |
+|--------|--------|-----------|-------------|
+| 14z + 1.5km | 44 | 4 | baseline |
+| 15z + 0.5km | **64** | 36 | **+45%** |
+| 15z + 0.75km | 56 | 16 | +27% |
+
+**Key insight:** Wider zoom (15z = 1km radius) with smaller cells (0.5km) creates overlap that catches more unique hotels. Each cell's search extends into neighbors, surfacing different results.
+
+### Serper Limitations
+- Max 20 results per query (no pagination)
+- Popular hotels dominate results
+- Diminishing returns with tighter zoom
+- Can't get ALL hotels in an area
+
+### Browser Scraper Advantage
+- Paginates through ALL results (not just 20)
+- Could find 2-3x more hotels per area
+- Free (no API costs)
+- More data fields (33+ vs 15)
+
 ## Next Steps
 - [x] Test Serper-based pipeline end-to-end ✓
 - [x] Measure waste rate and detection rate ✓
+- [x] Optimize zoom/cell size for Serper ✓
 - [ ] Evaluate if 31% waste justifies browser scraper complexity
 - [ ] If yes: Prototype place type filtering with Playwright
 - [ ] Consider browser scraper for review enrichment (post-detection)
+- [ ] Build Playwright scraper to bypass 20 result limit
