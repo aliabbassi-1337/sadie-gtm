@@ -14,6 +14,7 @@ from services.leadgen.geocoding import CityLocation, geocode_city, fetch_city_bo
 from pydantic import BaseModel
 import json
 from db.models.hotel import Hotel
+from db.client import init_db
 from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, DEFAULT_CELL_SIZE_KM
 
 # Re-export for public API
@@ -934,9 +935,9 @@ class Service(IService):
         cells_y = max(1, int(math.ceil(height_km / cell_size_km)))
         total_cells = cells_x * cells_y
 
-        # Estimate API calls: 3 queries per cell (dense mode), some cells sparse-skipped
-        # With sparse skipping, estimate ~2.5 queries per cell on average
-        avg_queries_per_cell = 2.5
+        # Estimate API calls: 5 queries per cell (thorough mode), some cells sparse-skipped
+        # With sparse skipping, estimate ~4 queries per cell on average
+        avg_queries_per_cell = 4.0
         estimated_api_calls = int(total_cells * avg_queries_per_cell)
 
         # Cost: $0.001 per query (Serper pricing)
@@ -989,9 +990,25 @@ class Service(IService):
             cell_size_km=cell_size_km,
         )
 
+        # Preload existing hotels from DB to skip already-covered cells
+        pool = await init_db()
+        existing = await pool.fetch('''
+            SELECT google_place_id, ST_Y(location::geometry) as lat, ST_X(location::geometry) as lng
+            FROM sadie_gtm.hotels
+            WHERE google_place_id IS NOT NULL
+            AND ST_Within(
+                location::geometry,
+                ST_MakeEnvelope($1, $2, $3, $4, 4326)
+            )
+        ''', lng_min, lat_min, lng_max, lat_max)
+
+        existing_place_ids = {r['google_place_id'] for r in existing if r['google_place_id']}
+        existing_locations = {(round(r['lat'], 4), round(r['lng'], 4)) for r in existing}
+        scraper.preload_existing(existing_place_ids, existing_locations)
+
         total_saved = 0
         all_hotels = []
-        seen_ids = set()
+        seen_ids = set(existing_place_ids)  # Also skip in batch saving
 
         async def save_batch(batch_hotels):
             nonlocal total_saved
@@ -1026,7 +1043,9 @@ class Service(IService):
             "cells_subdivided": stats.cells_subdivided,
             "cells_skipped": stats.cells_skipped,
             "cells_sparse_skipped": stats.cells_sparse_skipped,
+            "cells_duplicate_skipped": stats.cells_duplicate_skipped,
             "duplicates_skipped": stats.duplicates_skipped,
             "chains_skipped": stats.chains_skipped,
+            "non_lodging_skipped": stats.non_lodging_skipped,
             "out_of_bounds": stats.out_of_bounds,
         }

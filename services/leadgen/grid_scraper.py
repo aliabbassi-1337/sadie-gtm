@@ -37,10 +37,14 @@ DEFAULT_CELL_SIZE_KM = 2.0   # Default cell size (2km works for most areas)
 MIN_CELL_SIZE_KM = 0.5       # Don't subdivide below 500m
 API_RESULT_LIMIT = 20        # Serper returns max 20 results - subdivide if hit
 
-# Zoom levels by cell size (must cover the cell area)
+# Zoom levels by cell size
+# KEY INSIGHT: Wider zoom + smaller cells = more unique results due to overlap
+# 15z (1km radius) with 0.5km cells catches hotels that get buried in single searches
 ZOOM_BY_CELL_SIZE = {
-    0.5: 16,   # 500m cell -> 16z
+    0.5: 15,   # 500m cell -> 15z (1km radius) - overlap catches more unique hotels
+    0.75: 15,  # 750m cell -> 15z - good balance
     1.0: 15,   # 1km cell -> 15z
+    1.5: 15,   # 1.5km cell -> 15z
     2.0: 14,   # 2km cell -> 14z
     5.0: 13,   # 5km cell -> 13z
     10.0: 12,  # 10km cell -> 12z
@@ -267,8 +271,10 @@ class ScrapeStats(BaseModel):
     cells_skipped: int = 0  # Cells with existing coverage
     cells_reduced: int = 0  # Cells with partial coverage (fewer queries)
     cells_sparse_skipped: int = 0  # Cells skipped due to low density (water, swamps, etc.)
+    cells_duplicate_skipped: int = 0  # Cells skipped because scout found mostly known hotels
     duplicates_skipped: int = 0
     chains_skipped: int = 0
+    non_lodging_skipped: int = 0  # Non-hotel places (restaurants, shops, etc.)
     out_of_bounds: int = 0  # Hotels outside scrape region
 
 
@@ -323,7 +329,17 @@ class GridScraper:
         self._seen: Set[str] = set()  # Name-based dedup (fallback)
         self._seen_place_ids: Set[str] = set()  # Google Place ID dedup (primary)
         self._seen_locations: Set[Tuple[float, float]] = set()  # Location dedup (secondary)
+        self._seen_coverage: Set[Tuple[float, float]] = set()  # Cell coverage tracking
         self._stats = ScrapeStats()
+
+    def preload_existing(self, place_ids: Set[str], locations: Set[Tuple[float, float]]) -> None:
+        """Preload existing hotels from DB to skip already-covered areas.
+
+        Call this BEFORE scraping to avoid re-fetching known hotels.
+        """
+        self._seen_place_ids.update(place_ids)
+        self._seen_coverage.update(locations)
+        logger.info(f"Preloaded {len(place_ids)} existing place_ids, {len(locations)} locations")
         self._out_of_credits = False
         # Scrape bounds for filtering out-of-region results
         self._bounds: Optional[Tuple[float, float, float, float]] = None  # (lat_min, lat_max, lng_min, lng_max)
@@ -387,12 +403,12 @@ class GridScraper:
             # Count dense vs sparse cells for accurate estimate
             dense_cells = sum(1 for c in cells if c.size_km <= HYBRID_DENSE_CELL_SIZE_KM + 1.0)
             sparse_cells = initial_cells - dense_cells
-            
-            # Dense cells: 3 queries, no subdivision
-            # Sparse cells: 4 queries, ~25% subdivision
-            dense_api_calls = dense_cells * 3
+
+            # Dense cells: 5 queries (thorough), no subdivision
+            # Sparse cells: 5 queries, ~25% subdivision
+            dense_api_calls = dense_cells * 5
             sparse_subdivided = int(sparse_cells * 0.25 * 4)
-            sparse_api_calls = (sparse_cells + sparse_subdivided) * 4
+            sparse_api_calls = (sparse_cells + sparse_subdivided) * 5
             
             estimated_api_calls = dense_api_calls + sparse_api_calls
             estimated_total_cells = initial_cells + sparse_subdivided
@@ -410,11 +426,11 @@ class GridScraper:
             subdivided_cells = int(initial_cells * subdivision_rate * 4)
             estimated_total_cells = initial_cells + subdivided_cells
 
-            # Query count depends on cell size
+            # Query count depends on cell size (updated for thorough scraping)
             if self.cell_size_km <= 2.0:
-                avg_queries_per_cell = 3.0
+                avg_queries_per_cell = 5.0  # Scout + 4 diverse queries
             else:
-                avg_queries_per_cell = 4.0
+                avg_queries_per_cell = 5.0
             estimated_api_calls = int(estimated_total_cells * avg_queries_per_cell)
 
         # Cost: $1 per 1000 credits ($50 plan = 50k credits)
@@ -453,6 +469,7 @@ class GridScraper:
         self._seen = set()
         self._seen_place_ids = set()
         self._seen_locations = set()
+        self._seen_coverage = set()  # Separate set for cell coverage tracking
         self._stats = ScrapeStats()
         self._out_of_credits = False
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -504,7 +521,9 @@ class GridScraper:
                     logger.info(f"Saved {len(batch_hotels)} hotels ({self._stats.cells_searched}/{len(cells) + self._stats.cells_searched} cells)")
 
         self._stats.hotels_found = len(hotels)
-        logger.info(f"Scrape done: {len(hotels)} hotels, {self._stats.api_calls} API calls, {self._stats.cells_sparse_skipped} sparse cells skipped")
+        logger.info(f"Scrape done: {len(hotels)} hotels, {self._stats.api_calls} API calls")
+        logger.info(f"  Cells: {self._stats.cells_searched} searched, {self._stats.cells_sparse_skipped} sparse-skipped, {self._stats.cells_skipped} coverage-skipped, {self._stats.cells_reduced} coverage-reduced")
+        logger.info(f"  Filtered: {self._stats.duplicates_skipped} duplicates, {self._stats.chains_skipped} chains, {self._stats.non_lodging_skipped} non-lodging, {self._stats.out_of_bounds} out-of-bounds")
 
         return hotels, self._stats
 
@@ -601,7 +620,7 @@ class GridScraper:
     def _get_cell_coverage(self, cell: GridCell) -> int:
         """Count how many already-seen hotels are within this cell."""
         count = 0
-        for lat, lng in self._seen_locations:
+        for lat, lng in self._seen_coverage:
             if cell.lat_min <= lat <= cell.lat_max and cell.lng_min <= lng <= cell.lng_max:
                 count += 1
         return count
@@ -625,21 +644,29 @@ class GridScraper:
 
         # Check if cell already has coverage from adjacent cells
         existing_coverage = self._get_cell_coverage(cell)
-        if existing_coverage >= 5:
-            # Cell already has 5+ hotels from adjacent cell queries - skip entirely
+        if existing_coverage >= 10:
+            # Cell already has 10+ hotels from adjacent cell queries - skip entirely
             self._stats.cells_skipped += 1
-            logger.debug(f"SKIP cell ({cell.center_lat:.3f}, {cell.center_lng:.3f}) - already has {existing_coverage} hotels from adjacent cells")
+            logger.info(f"COVERAGE SKIP: cell ({cell.center_lat:.4f}, {cell.center_lng:.4f}) already has {existing_coverage} hotels")
             return hotels, False
-        elif existing_coverage >= 2:
-            # Cell has some coverage - run reduced queries (just 1)
+        elif existing_coverage >= 5:
+            # Cell has good coverage - run 2 diverse queries to catch stragglers
             self._stats.cells_reduced += 1
-            logger.debug(f"REDUCED queries for cell ({cell.center_lat:.3f}, {cell.center_lng:.3f}) - has {existing_coverage} hotels")
-            results = await self._search_serper("hotel", cell.center_lat, cell.center_lng, cell_zoom)
-            for place in results:
-                hotel = self._process_place(place)
-                if hotel:
-                    hotels.append(hotel)
-            return hotels, len(results) >= API_RESULT_LIMIT
+            logger.info(f"COVERAGE REDUCED: cell ({cell.center_lat:.4f}, {cell.center_lng:.4f}) has {existing_coverage} hotels, running 2 queries")
+            queries = ["hotel", "inn motel"]
+            results_list = await asyncio.gather(*[
+                self._search_serper(q, cell.center_lat, cell.center_lng, cell_zoom)
+                for q in queries
+            ])
+            hit_limit = False
+            for results in results_list:
+                if len(results) >= API_RESULT_LIMIT:
+                    hit_limit = True
+                for place in results:
+                    hotel = self._process_place(place)
+                    if hotel:
+                        hotels.append(hotel)
+            return hotels, hit_limit
 
         # Pick 4 types for this cell (rotate through them based on cell index)
         num_types = len(SEARCH_TYPES)
@@ -665,12 +692,53 @@ class GridScraper:
                 query = f"{modifier} {search_type}".strip() if modifier else search_type
                 all_queries.append(query)
 
-        # Dense mode (small cells ≤2km): run 3 diverse queries instead of 12
-        # This reduces duplicates significantly while still getting good coverage
-        # Use cell.size_km for hybrid mode where cells have different sizes
+        # ALWAYS scout first to enable sparse-skipping for ALL cell sizes
+        scout_results = await self._search_serper(all_queries[0], cell.center_lat, cell.center_lng, cell_zoom)
+        scout_count = len(scout_results)
+
+        # Count how many scout results are already known (duplicates)
+        scout_known = 0
+        for place in scout_results:
+            place_id = place.get("placeId")
+            if place_id and place_id in self._seen_place_ids:
+                scout_known += 1
+
+        # Process scout results
+        if scout_count >= API_RESULT_LIMIT:
+            hit_limit = True
+        for place in scout_results:
+            hotel = self._process_place(place)
+            if hotel:
+                hotels.append(hotel)
+
+        # SPARSE SKIP: Only skip truly empty cells (ocean, swamp, etc.)
+        # Don't skip cells with 1-3 results - they might have more with different queries
+        if scout_count == 0:
+            self._stats.cells_sparse_skipped += 1
+            logger.info(f"SPARSE SKIP (0 results): cell at ({cell.center_lat:.4f}, {cell.center_lng:.4f})")
+            return hotels, False  # Don't subdivide empty cells
+
+        if scout_count == 1:
+            # Very sparse but not empty - return what we found, run 1 more diverse query
+            self._stats.cells_sparse_skipped += 1
+            logger.info(f"SPARSE SKIP ({scout_count} results): cell at ({cell.center_lat:.4f}, {cell.center_lng:.4f})")
+            return hotels, False
+
+        # DUPLICATE SKIP: Only skip if scout found NOTHING new (100% overlap)
+        # Different query types can still surface unique hotels
+        scout_new = scout_count - scout_known
+        if scout_new == 0 and scout_known >= 5:
+            self._stats.cells_duplicate_skipped += 1
+            logger.info(f"DUPLICATE SKIP: cell ({cell.center_lat:.4f}, {cell.center_lng:.4f}) scout={scout_count}, all already known")
+            return hotels, False  # Don't run more queries, don't subdivide
+
+        # Log cell processing
+        logger.debug(f"Cell ({cell.center_lat:.4f}, {cell.center_lng:.4f}): scout={scout_count}, known={scout_known}, new={scout_new}, size={cell.size_km:.1f}km")
+
+        # Dense mode (small cells ≤2.5km): run 4 more diverse queries (5 total including scout)
+        # Use varied search types to find different property types
         if cell.size_km <= 2.5:
-            # Pick 3 diverse search types (hotel, motel, inn cover most cases)
-            diverse_queries = [all_queries[0], all_queries[3], all_queries[6]]
+            diverse_queries = [all_queries[3], all_queries[6], all_queries[9], all_queries[11] if len(all_queries) > 11 else all_queries[2]]
             results = await asyncio.gather(*[
                 self._search_serper(query, cell.center_lat, cell.center_lng, cell_zoom)
                 for query in diverse_queries
@@ -682,41 +750,16 @@ class GridScraper:
                     hotel = self._process_place(place)
                     if hotel:
                         hotels.append(hotel)
+            logger.debug(f"  Dense mode: {len(hotels)} unique hotels after 5 queries")
             return hotels, hit_limit
 
-        # Sparse mode (large cells): scout first, early exit if sparse
-        scout_results = await self._search_serper(all_queries[0], cell.center_lat, cell.center_lng, cell_zoom)
-        scout_count = len(scout_results)
-
-        # Process scout results
-        if scout_count >= API_RESULT_LIMIT:
-            hit_limit = True
-        for place in scout_results:
-            hotel = self._process_place(place)
-            if hotel:
-                hotels.append(hotel)
-
-        # AGGRESSIVE SPARSE SKIP: If scout returns very few results, skip entirely
-        # This saves credits on water, swamps, forests, farmland, etc.
-        if scout_count == 0:
-            # Empty cell (ocean, swamp, etc.) - skip entirely, no subdivision
-            self._stats.cells_sparse_skipped += 1
-            logger.debug(f"SPARSE SKIP (0 results): cell at ({cell.center_lat:.3f}, {cell.center_lng:.3f})")
-            return hotels, False  # Don't subdivide empty cells
-
-        if scout_count <= 3:
-            # Very sparse cell - return what we found, don't query more or subdivide
-            self._stats.cells_sparse_skipped += 1
-            logger.debug(f"SPARSE SKIP ({scout_count} results): cell at ({cell.center_lat:.3f}, {cell.center_lng:.3f})")
-            return hotels, False  # Don't subdivide sparse cells
-
-        # Determine how many more queries based on density
+        # Sparse mode (large cells): determine how many more queries based on density
         if scout_count <= 8:
-            remaining_queries = all_queries[1:2]  # 2 total (was 5)
+            remaining_queries = all_queries[1:2]  # 2 total
         elif scout_count <= 14:
-            remaining_queries = all_queries[1:4]  # 4 total (was 6)
+            remaining_queries = all_queries[1:4]  # 4 total
         else:
-            remaining_queries = all_queries[1:8]  # 8 total (was 12)
+            remaining_queries = all_queries[1:8]  # 8 total
 
         # Execute remaining queries concurrently
         if remaining_queries:
@@ -762,7 +805,7 @@ class GridScraper:
                 resp = await self._client.post(
                     SERPER_MAPS_URL,
                     headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-                    json={"q": query, "num": 100, "ll": f"@{lat},{lng},{zoom}z"},
+                    json={"q": query, "ll": f"@{lat},{lng},{zoom}z"},
                 )
 
                 if resp.status_code == 400 and "credits" in resp.text.lower():
@@ -787,11 +830,11 @@ class GridScraper:
 
         # Filter by place type - only keep lodging types
         place_type = (place.get("type") or "").lower()
-        valid_lodging_types = ["hotel", "motel", "inn", "resort", "lodge", "hostel", "guest house", "bed & breakfast", "b&b", "suites", "extended stay"]
+        valid_lodging_types = ["hotel", "motel", "inn", "resort", "lodge", "hostel", "guest house", "bed & breakfast", "b&b", "suites", "extended stay", "lodging", "accommodation", "vacation rental"]
         is_lodging = any(t in place_type for t in valid_lodging_types)
-        
+
         if place_type and not is_lodging:
-            self._stats.chains_skipped += 1
+            self._stats.non_lodging_skipped += 1
             logger.debug(f"SKIP non-lodging type '{place_type}': {name}")
             return None
 
@@ -825,10 +868,10 @@ class GridScraper:
                 return None
             self._seen.add(name_lower)
 
-        # Track location for cell coverage analysis
+        # Track location for cell coverage analysis (separate set)
         if lat and lng:
             coverage_key = (round(lat, 3), round(lng, 3))  # ~111m precision for coverage
-            self._seen_locations.add(coverage_key)
+            self._seen_coverage.add(coverage_key)
 
             # Filter out-of-bounds results (Paris hotels when scraping Miami)
             if self._bounds:
@@ -848,7 +891,7 @@ class GridScraper:
         # Skip non-hotel businesses by name
         for keyword in SKIP_NON_HOTELS:
             if keyword in name_lower:
-                self._stats.chains_skipped += 1
+                self._stats.non_lodging_skipped += 1
                 logger.debug(f"SKIP non-hotel '{keyword}': {name}")
                 return None
 

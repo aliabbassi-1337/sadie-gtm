@@ -191,9 +191,11 @@ async def scrape_box(
     logger.info(f"API calls: {stats['api_calls']}")
     logger.info(f"Cells searched: {stats['cells_searched']}")
     logger.info(f"Cells sparse-skipped: {stats['cells_sparse_skipped']}")
+    logger.info(f"Cells duplicate-skipped: {stats['cells_duplicate_skipped']}")
     logger.info(f"Cells subdivided: {stats['cells_subdivided']}")
     logger.info(f"Duplicates skipped: {stats['duplicates_skipped']}")
     logger.info(f"Chains skipped: {stats['chains_skipped']}")
+    logger.info(f"Non-lodging skipped: {stats['non_lodging_skipped']}")
     logger.info(f"Out of bounds: {stats['out_of_bounds']}")
 
 
