@@ -151,6 +151,20 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def save_reverse_lookup_results(
+        self,
+        results: List[dict],
+        source: str = "reverse_lookup",
+    ) -> dict:
+        """
+        Save reverse lookup results to database.
+        Hotels from reverse lookup already have known booking engines.
+        Creates hotel record AND hotel_booking_engines record.
+        Returns dict with insert/error counts.
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self, detection_config: DetectionConfig = None, api_key: Optional[str] = None) -> None:
@@ -436,6 +450,75 @@ class Service(IService):
 
         # No status update needed - detection is tracked by hotel_booking_engines record
         return len(hotel_ids)
+
+    async def save_reverse_lookup_results(
+        self,
+        results: List[dict],
+        source: str = "reverse_lookup",
+    ) -> dict:
+        """
+        Save reverse lookup results to database.
+        Hotels from reverse lookup already have known booking engines.
+        Creates hotel record AND hotel_booking_engines record.
+        """
+        stats = {
+            "total": len(results),
+            "inserted": 0,
+            "engines_linked": 0,
+            "skipped_no_website": 0,
+            "errors": 0,
+        }
+
+        # Cache booking engine IDs to avoid repeated lookups
+        engine_cache: Dict[str, int] = {}
+
+        for i, r in enumerate(results):
+            if (i + 1) % 50 == 0:
+                logger.info(f"  Saved {i + 1}/{len(results)}...")
+
+            try:
+                website = r.get("website") or r.get("booking_url")
+                if not website:
+                    stats["skipped_no_website"] += 1
+                    continue
+
+                # Insert hotel
+                hotel_id = await repo.insert_hotel(
+                    name=r["name"],
+                    website=website,
+                    source=source,
+                    status=0,
+                )
+                stats["inserted"] += 1
+
+                # Get or create booking engine (cached)
+                booking_engine = r["booking_engine"]
+                if booking_engine not in engine_cache:
+                    engine = await repo.get_booking_engine_by_name(booking_engine)
+                    if engine:
+                        engine_cache[booking_engine] = engine.id
+                    else:
+                        engine_id = await repo.insert_booking_engine(
+                            name=booking_engine,
+                            tier=2,
+                        )
+                        engine_cache[booking_engine] = engine_id
+
+                # Link hotel to booking engine
+                await repo.insert_hotel_booking_engine(
+                    hotel_id=hotel_id,
+                    booking_engine_id=engine_cache[booking_engine],
+                    booking_url=r.get("booking_url"),
+                    detection_method="reverse_lookup",
+                    status=1,
+                )
+                stats["engines_linked"] += 1
+
+            except Exception as e:
+                logger.warning(f"Error saving {r.get('name', 'unknown')}: {e}")
+                stats["errors"] += 1
+
+        return stats
 
     def estimate_region(
         self,
