@@ -191,3 +191,80 @@ async def get_pending_proximity_count() -> int:
     async with get_conn() as conn:
         result = await queries.get_pending_proximity_count(conn)
         return result["count"] if result else 0
+
+
+# ============================================================================
+# WEBSITE ENRICHMENT FUNCTIONS
+# ============================================================================
+
+
+async def get_hotels_without_websites(
+    limit: int = 100,
+    source_filter: Optional[str] = None,
+    state_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Get hotels that need website enrichment.
+
+    Args:
+        limit: Max hotels to return
+        source_filter: Filter by source (e.g., 'dbpr')
+        state_filter: Filter by state (e.g., 'FL')
+
+    Returns list of hotel dicts with id, name, city, state, address.
+    """
+    async with get_conn() as conn:
+        query = """
+            SELECT id, name, city, state, address
+            FROM sadie_gtm.hotels
+            WHERE website IS NULL
+            AND city IS NOT NULL
+            AND name IS NOT NULL
+        """
+        params = []
+
+        if source_filter:
+            query += f" AND source LIKE ${len(params) + 1}"
+            params.append(f"%{source_filter}%")
+
+        if state_filter:
+            query += f" AND state = ${len(params) + 1}"
+            params.append(state_filter)
+
+        query += f" ORDER BY created_at DESC LIMIT ${len(params) + 1}"
+        params.append(limit)
+
+        rows = await conn.fetch(query, *params)
+        return [dict(r) for r in rows]
+
+
+async def update_hotel_website(hotel_id: int, website: str) -> bool:
+    """Update hotel with enriched website.
+
+    Returns True if updated.
+    """
+    async with get_conn() as conn:
+        result = await conn.execute(
+            "UPDATE sadie_gtm.hotels SET website = $1 WHERE id = $2",
+            website, hotel_id
+        )
+        return result == "UPDATE 1"
+
+
+async def get_website_enrichment_stats(source_prefix: str = "dbpr") -> Dict[str, int]:
+    """Get stats for hotels needing website enrichment.
+
+    Returns dict with total, with_website, without_website counts.
+    """
+    async with get_conn() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) as total,
+                COUNT(website) as with_website,
+                COUNT(*) - COUNT(website) as without_website
+            FROM sadie_gtm.hotels
+            WHERE source LIKE $1
+            """,
+            f"{source_prefix}%"
+        )
+        return dict(row) if row else {"total": 0, "with_website": 0, "without_website": 0}

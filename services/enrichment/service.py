@@ -13,6 +13,7 @@ from services.enrichment.room_count_enricher import (
 from services.enrichment.customer_proximity import (
     log as proximity_log,
 )
+from services.enrichment.website_enricher import WebsiteEnricher
 
 
 class IService(ABC):
@@ -217,3 +218,71 @@ class Service(IService):
     async def get_pending_proximity_count(self) -> int:
         """Count hotels waiting for proximity calculation."""
         return await repo.get_pending_proximity_count()
+
+    async def enrich_websites(
+        self,
+        api_key: str,
+        limit: int = 100,
+        source_filter: str = None,
+        state_filter: str = None,
+        delay: float = 0.1,
+    ) -> dict:
+        """
+        Find websites for hotels that don't have them via Serper search.
+
+        Args:
+            api_key: Serper API key
+            limit: Max hotels to process
+            source_filter: Filter by source (e.g., 'dbpr')
+            state_filter: Filter by state (e.g., 'FL')
+            delay: Delay between API calls
+
+        Returns:
+            Stats dict with found/not_found/errors counts
+        """
+        # Get hotels without websites
+        hotels = await repo.get_hotels_without_websites(
+            limit=limit,
+            source_filter=source_filter,
+            state_filter=state_filter,
+        )
+
+        if not hotels:
+            log("No hotels found needing website enrichment")
+            return {"total": 0, "found": 0, "not_found": 0, "errors": 0}
+
+        log(f"Enriching {len(hotels)} hotels with websites")
+
+        enricher = WebsiteEnricher(api_key=api_key, delay_between_requests=delay)
+
+        found = 0
+        not_found = 0
+        errors = 0
+
+        for i, hotel in enumerate(hotels):
+            if (i + 1) % 50 == 0:
+                log(f"  Progress: {i + 1}/{len(hotels)} ({found} found)")
+
+            result = await enricher.find_website(
+                name=hotel["name"],
+                city=hotel["city"],
+                state=hotel.get("state", "FL"),
+            )
+
+            if result.website:
+                found += 1
+                await repo.update_hotel_website(hotel["id"], result.website)
+            elif result.error == "no_match":
+                not_found += 1
+            else:
+                errors += 1
+
+        log(f"Website enrichment complete: {found} found, {not_found} not found, {errors} errors")
+
+        return {
+            "total": len(hotels),
+            "found": found,
+            "not_found": not_found,
+            "errors": errors,
+            "api_calls": len(hotels),
+        }

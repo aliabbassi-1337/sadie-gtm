@@ -37,8 +37,8 @@ from loguru import logger
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.leadgen.service import Service
-from services.leadgen.dbpr_scraper import LICENSE_TYPES, RANK_CODES, DBPRIngester
+from services.ingestor import IngestorService
+from services.ingestor.dbpr import LICENSE_TYPES, RANK_CODES, DBPRIngester
 from db.client import init_db
 
 
@@ -184,7 +184,7 @@ License Types: """ + ", ".join(list_types())
         await init_db()
 
     # Run ingestion
-    service = Service()
+    service = IngestorService()
 
     logger.info("Starting DBPR license ingestion...")
     if args.county:
@@ -192,7 +192,7 @@ License Types: """ + ", ".join(list_types())
     if args.type:
         logger.info(f"Filtering to types: {args.type}")
 
-    licenses, stats = await service.ingest_dbpr_licenses(
+    licenses, stats = await service.ingest_dbpr(
         counties=args.county,
         license_types=args.type,
         new_only=args.new_only,
