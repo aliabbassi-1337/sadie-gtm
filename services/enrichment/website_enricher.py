@@ -14,19 +14,34 @@ from loguru import logger
 
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
+SERPER_PLACES_URL = "https://google.serper.dev/places"
 
 # Domains to skip (OTAs, directories, not the hotel's own site)
 SKIP_DOMAINS = {
+    # OTAs
     "booking.com", "expedia.com", "hotels.com", "tripadvisor.com",
     "trivago.com", "kayak.com", "priceline.com", "agoda.com",
     "orbitz.com", "travelocity.com", "hotwire.com",
+    "airbnb.com", "vrbo.com", "homeaway.com",
+    # Social media
     "yelp.com", "facebook.com", "instagram.com", "twitter.com",
     "linkedin.com", "youtube.com", "pinterest.com",
+    # Directories
     "yellowpages.com", "whitepages.com", "bbb.org",
     "mapquest.com", "google.com", "apple.com",
     "wikipedia.org", "wikidata.org",
     "zomato.com", "opentable.com",
-    "airbnb.com", "vrbo.com", "homeaway.com",
+    "tripadvisor.ca", "yelp.ca", "b2bhint.com",
+    "chamberofcommerce.com", "manta.com", "dnb.com",
+    # Government/license sites
+    "myfloridalicense.com", "sunbiz.org", "tallahassee.com", "jacksonville.com",
+    "data.tallahassee.com", "data.jacksonville.com", "flcompanyregistry.com",
+    # People search (garbage results)
+    "spokeo.com", "intelius.com", "socialcatfish.com", "whitepages.com",
+    "truepeoplesearch.com", "fastpeoplesearch.com", "beenverified.com",
+    # Chain hotels (not our target)
+    "marriott.com", "hilton.com", "ihg.com", "wyndhamhotels.com",
+    "choicehotels.com", "hyatt.com", "accor.com", "bestwestern.com",
 }
 
 
@@ -57,31 +72,94 @@ class WebsiteEnricher:
         self.api_key = api_key
         self.delay = delay_between_requests
 
+    async def find_website_places(
+        self,
+        name: str,
+        address: str,
+        city: str,
+        state: str = "FL",
+    ) -> Optional[str]:
+        """
+        Search for hotel website using Serper Places API.
+
+        Args:
+            name: Hotel/business name
+            address: Street address
+            city: City name
+            state: State code
+
+        Returns:
+            Website URL if found, None otherwise
+        """
+        query = f"{name} {address} {city} {state}"
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    SERPER_PLACES_URL,
+                    headers={
+                        "X-API-KEY": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"q": query, "num": 5},
+                )
+
+                if resp.status_code != 200:
+                    return None
+
+                data = resp.json()
+                places = data.get("places", [])
+
+                for place in places:
+                    website = place.get("website")
+                    if website:
+                        domain = self._extract_domain(website)
+                        if domain and domain not in SKIP_DOMAINS:
+                            return website
+
+        except Exception:
+            pass
+
+        return None
+
     async def find_website(
         self,
         name: str,
         city: str,
         state: str = "FL",
+        address: Optional[str] = None,
+        try_places: bool = True,
     ) -> EnrichmentResult:
         """
-        Search for a hotel's website.
+        Search for a hotel's website using Places API first, then regular search.
 
         Args:
             name: Hotel/business name
             city: City name
             state: State code
+            address: Street address (optional, improves Places lookup)
+            try_places: Whether to try Serper Places API first
 
         Returns:
             EnrichmentResult with website if found
         """
-        # Build search query
-        query = f'"{name}" {city} {state} official site'
-
         result = EnrichmentResult(
             name=name,
             city=city,
-            search_query=query,
+            search_query="",
         )
+
+        # Try Serper Places API first if we have an address
+        if try_places and address:
+            places_result = await self.find_website_places(name, address, city, state)
+            if places_result:
+                result.website = places_result
+                result.search_query = f"places: {name} {address} {city}"
+                return result
+
+        # Fall back to regular search
+        query = f'"{name}" {city} {state} official site'
+        result.search_query = query
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -150,6 +228,8 @@ class WebsiteEnricher:
         name_key: str = "name",
         city_key: str = "city",
         state_key: str = "state",
+        address_key: str = "address",
+        try_places: bool = True,
     ) -> tuple[List[EnrichmentResult], EnrichmentStats]:
         """
         Enrich a batch of hotels with websites.
@@ -159,6 +239,8 @@ class WebsiteEnricher:
             name_key: Key for hotel name in dict
             city_key: Key for city in dict
             state_key: Key for state in dict
+            address_key: Key for address in dict
+            try_places: Whether to try Serper Places API first
 
         Returns:
             Tuple of (results, stats)
@@ -173,12 +255,13 @@ class WebsiteEnricher:
             name = hotel.get(name_key, "")
             city = hotel.get(city_key, "")
             state = hotel.get(state_key, "FL")
+            address = hotel.get(address_key, "")
 
             if not name or not city:
                 stats.errors += 1
                 continue
 
-            result = await self.find_website(name, city, state)
+            result = await self.find_website(name, city, state, address=address, try_places=try_places)
             stats.api_calls += 1
 
             if result.website:

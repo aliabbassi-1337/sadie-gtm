@@ -124,7 +124,7 @@ class DBPRIngestStats:
 class DBPRIngester:
     """Download and parse Florida DBPR lodging license data."""
 
-    def __init__(self, timeout: float = 60.0):
+    def __init__(self, timeout: float = 120.0):
         self.timeout = timeout
 
     async def download_file(self, filename: str) -> str:

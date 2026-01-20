@@ -84,10 +84,6 @@ class IngestorService:
                 logger.info(f"  Saving... {i + 1}/{len(licenses)}")
 
             try:
-                # Skip non-active licenses
-                if lic.status not in ("Current/Active", "Active"):
-                    continue
-
                 # Insert (will skip duplicates based on name+city)
                 result = await repo.insert_hotel(
                     name=lic.business_name or lic.licensee_name,
