@@ -157,7 +157,63 @@ Testing same 3km × 3km area:
 - [x] Test Serper-based pipeline end-to-end ✓
 - [x] Measure waste rate and detection rate ✓
 - [x] Optimize zoom/cell size for Serper ✓
-- [ ] Evaluate if 31% waste justifies browser scraper complexity
-- [ ] If yes: Prototype place type filtering with Playwright
-- [ ] Consider browser scraper for review enrichment (post-detection)
-- [ ] Build Playwright scraper to bypass 20 result limit
+- [x] Add pagination support to Serper (pages 1-5) ✓
+- [x] Set up Docker-based Apify crawler ✓
+- [ ] Test Apify crawler on small city
+- [ ] Compare results with Serper data
+- [ ] Run on full Palm Beach county
+
+---
+
+## Docker-Based Apify Crawler (NEW - Jan 2026)
+
+### Setup Location
+```
+tools/crawler-google-places/
+├── docker-compose.yml    # Docker config
+├── Dockerfile           # Apify Puppeteer/Chrome image
+├── input/               # Input JSON goes here
+├── storage/             # Output data stored here
+└── src/                 # Crawler source code
+```
+
+### Build Docker Image
+```bash
+cd tools/crawler-google-places
+docker compose build
+```
+
+### Usage
+
+```bash
+# Scrape hotels in a city
+uv run python -m workflows.scrape_browser --search "hotel" --city "West Palm Beach" --state "Florida" --max-places 100
+
+# Scrape hotels in a county (more thorough)
+uv run python -m workflows.scrape_browser --search "hotel" --county "Palm Beach" --state "Florida" --max-places 500
+
+# Scrape using coordinates
+uv run python -m workflows.scrape_browser --search "hotel" --lat 26.72 --lng -80.05 --zoom 13 --max-places 200
+
+# Scrape from GeoJSON box
+uv run python -m workflows.scrape_browser --search "hotel" --geojson context/florida_metro_boxes.geojson --name "Palm Beach" --max-places 1000
+
+# Save to database
+uv run python -m workflows.scrape_browser --search "hotel" --county "Palm Beach" --state "Florida" --max-places 500 --save-db
+
+# Dry run (show config only)
+uv run python -m workflows.scrape_browser --search "hotel" --city "Miami" --state "Florida" --dry-run
+```
+
+### Key Advantages Over Serper
+| Feature | Serper API | Apify Crawler |
+|---------|------------|---------------|
+| Results per query | Max 60 (with pagination) | **Unlimited** |
+| Cost | $0.001/query | **Free** (compute only) |
+| Speed | Fast (1-2s) | Slow (~30s-2min) |
+| Data fields | ~15 | **33+** |
+| Reviews | No | Yes |
+
+### When to Use Which
+- **Serper**: Quick coverage, validation, time-sensitive
+- **Browser**: Deep scraping, new areas, unlimited results needed
