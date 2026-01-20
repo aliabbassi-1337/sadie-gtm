@@ -3,9 +3,7 @@ Ingestor Repository - Database operations for ingested data.
 """
 
 from typing import Optional
-from loguru import logger
-
-from db.client import get_conn
+from db.client import queries, get_conn
 
 
 async def insert_hotel(
@@ -28,33 +26,29 @@ async def insert_hotel(
     """
     async with get_conn() as conn:
         # Check for existing by name + city (dedup)
-        existing = await conn.fetchrow(
-            """
-            SELECT id, category FROM sadie_gtm.hotels
-            WHERE LOWER(name) = LOWER($1)
-            AND LOWER(COALESCE(city, '')) = LOWER(COALESCE($2, ''))
-            LIMIT 1
-            """,
-            name, city
-        )
+        existing = await queries.get_hotel_by_name_city(conn, name=name, city=city)
 
         if existing:
             # Update category if provided and not already set
             if category and not existing["category"]:
-                await conn.execute(
-                    "UPDATE sadie_gtm.hotels SET category = $1 WHERE id = $2",
-                    category, existing["id"]
+                await queries.update_hotel_category(
+                    conn, hotel_id=existing["id"], category=category
                 )
             return existing["id"]
 
         # Insert new hotel
-        row = await conn.fetchrow(
-            """
-            INSERT INTO sadie_gtm.hotels (name, website, source, status, address, city, state, country, phone_google, category)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING id
-            """,
-            name, website, source, status, address, city, state, country, phone, category
+        hotel_id = await queries.insert_hotel_with_category(
+            conn,
+            name=name,
+            website=website,
+            source=source,
+            status=status,
+            address=address,
+            city=city,
+            state=state,
+            country=country,
+            phone=phone,
+            category=category,
         )
 
-        return row["id"] if row else None
+        return hotel_id

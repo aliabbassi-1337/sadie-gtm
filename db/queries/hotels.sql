@@ -414,3 +414,52 @@ SET address = COALESCE(:address, address),
     country = COALESCE(:country, country),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
+
+-- ============================================================================
+-- INGESTOR QUERIES
+-- ============================================================================
+
+-- name: get_hotel_by_name_city^
+-- Check if hotel exists by name and city (for dedup)
+SELECT id, category
+FROM sadie_gtm.hotels
+WHERE LOWER(name) = LOWER(:name)
+  AND LOWER(COALESCE(city, '')) = LOWER(COALESCE(:city, ''))
+LIMIT 1;
+
+-- name: update_hotel_category!
+-- Update hotel category
+UPDATE sadie_gtm.hotels
+SET category = :category, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: insert_hotel_with_category<!
+-- Insert a new hotel with category and return the ID
+INSERT INTO sadie_gtm.hotels (
+    name, website, source, status, address, city, state, country, phone_google, category
+) VALUES (
+    :name, :website, :source, :status, :address, :city, :state, :country, :phone, :category
+)
+RETURNING id;
+
+-- name: update_hotel_website!
+-- Update hotel website
+UPDATE sadie_gtm.hotels
+SET website = :website, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: update_hotel_location_point!
+-- Update hotel location from lat/lng
+UPDATE sadie_gtm.hotels
+SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: get_hotels_needing_enrichment
+-- Get DBPR hotels needing website enrichment
+SELECT id, name, city, state, address
+FROM sadie_gtm.hotels
+WHERE source IN ('dbpr_hotel', 'dbpr_motel')
+  AND (website IS NULL OR website = '')
+LIMIT :limit
+OFFSET :offset;
