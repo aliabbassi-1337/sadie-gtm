@@ -1,21 +1,30 @@
 """LeadGen Service - Scraping and detection pipeline."""
 
 import math
+import re
 from abc import ABC, abstractmethod
 from optparse import Option
 from typing import Dict, List, Tuple, Optional
 
+import httpx
 from loguru import logger
+from pydantic import BaseModel
+import json
 
 from services.leadgen import repo
 from services.leadgen.constants import HotelStatus
 from services.leadgen.detector import BatchDetector, DetectionConfig, DetectionResult
 from services.leadgen.geocoding import CityLocation, geocode_city, fetch_city_boundary
-from pydantic import BaseModel
-import json
+from services.leadgen.reverse_lookup import (
+    BOOKING_ENGINE_DORKS,
+    ReverseLookupResult,
+    ReverseLookupStats,
+)
 from db.models.hotel import Hotel
 from db.client import init_db
 from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, DEFAULT_CELL_SIZE_KM
+
+SERPER_SEARCH_URL = "https://google.serper.dev/search"
 
 # Re-export for public API
 __all__ = ["IService", "Service", "ScrapeEstimate", "CityLocation", "ScrapeRegion"]
@@ -163,6 +172,27 @@ class IService(ABC):
         Creates hotel record AND hotel_booking_engines record.
         Returns dict with insert/error counts.
         """
+        pass
+
+    @abstractmethod
+    async def reverse_lookup(
+        self,
+        locations: List[str],
+        engines: Optional[List[str]] = None,
+        max_results_per_dork: int = 100,
+    ) -> Tuple[List[ReverseLookupResult], ReverseLookupStats]:
+        """
+        Search for hotels by their booking engine URLs via Google dorks.
+        Returns pre-qualified leads with known booking engines.
+        """
+        pass
+
+    @abstractmethod
+    def get_reverse_lookup_dorks(
+        self,
+        engines: Optional[List[str]] = None,
+    ) -> List[Tuple[str, str, Optional[str]]]:
+        """Get list of dorks for reverse lookup (for dry-run display)."""
         pass
 
 
@@ -519,6 +549,120 @@ class Service(IService):
                 stats["errors"] += 1
 
         return stats
+
+    def get_reverse_lookup_dorks(
+        self,
+        engines: Optional[List[str]] = None,
+    ) -> List[Tuple[str, str, Optional[str]]]:
+        """Get list of dorks for reverse lookup (for dry-run display)."""
+        dorks = BOOKING_ENGINE_DORKS
+        if engines:
+            engines_lower = [e.lower() for e in engines]
+            dorks = [d for d in BOOKING_ENGINE_DORKS if d[0] in engines_lower]
+        return dorks
+
+    async def reverse_lookup(
+        self,
+        locations: List[str],
+        engines: Optional[List[str]] = None,
+        max_results_per_dork: int = 100,
+    ) -> Tuple[List[ReverseLookupResult], ReverseLookupStats]:
+        """
+        Search for hotels by their booking engine URLs via Google dorks.
+        Returns pre-qualified leads with known booking engines.
+        """
+        seen_urls: set = set()
+        all_results: List[ReverseLookupResult] = []
+        stats = ReverseLookupStats()
+
+        dorks_to_run = self.get_reverse_lookup_dorks(engines)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for location in locations:
+                logger.info(f"Running {len(dorks_to_run)} dorks for location: {location}")
+
+                for engine_name, dork_template, url_pattern in dorks_to_run:
+                    dork = dork_template.format(location=location)
+                    stats.dorks_run += 1
+                    stats.api_calls += 1
+
+                    try:
+                        resp = await client.post(
+                            SERPER_SEARCH_URL,
+                            headers={"X-API-KEY": self._api_key, "Content-Type": "application/json"},
+                            json={"q": dork, "num": max_results_per_dork},
+                        )
+
+                        if resp.status_code != 200:
+                            logger.error(f"Serper error {resp.status_code}: {resp.text[:100]}")
+                            continue
+
+                        search_results = resp.json().get("organic", [])
+                        stats.results_found += len(search_results)
+
+                        for r in search_results:
+                            url = r.get("link", "")
+                            title = r.get("title", "")
+                            snippet = r.get("snippet", "")
+
+                            if url in seen_urls:
+                                continue
+                            seen_urls.add(url)
+
+                            # Validate URL matches expected pattern
+                            if url_pattern and not re.search(url_pattern, url, re.I):
+                                continue
+
+                            # Extract hotel name
+                            name = self._extract_hotel_name_from_title(title, url)
+                            if not name or len(name) < 3:
+                                continue
+
+                            result = ReverseLookupResult(
+                                name=name,
+                                booking_url=url,
+                                booking_engine=engine_name,
+                                snippet=snippet,
+                                source_dork=dork,
+                            )
+                            all_results.append(result)
+
+                            if engine_name not in stats.by_engine:
+                                stats.by_engine[engine_name] = 0
+                            stats.by_engine[engine_name] += 1
+
+                    except Exception as e:
+                        logger.error(f"Error running dork '{dork}': {e}")
+
+        stats.unique_results = len(all_results)
+        logger.info(f"Reverse lookup complete: {stats.unique_results} unique results from {stats.api_calls} API calls")
+        for engine, count in sorted(stats.by_engine.items(), key=lambda x: -x[1]):
+            logger.info(f"  {engine}: {count}")
+
+        return all_results, stats
+
+    def _extract_hotel_name_from_title(self, title: str, url: str) -> str:
+        """Extract hotel name from search result title."""
+        name = title
+        suffixes = [
+            " - Book Direct", " | Book Now", " - Official Site",
+            " - Reservations", " | Reservations", " - Hotels.com",
+            " - Booking.com", " | Booking", " - Cloudbeds",
+            ", United States of America", ", USA", ", Florida",
+        ]
+        for suffix in suffixes:
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+            if name.lower().endswith(suffix.lower()):
+                name = name[:-len(suffix)]
+
+        if "cloudbeds.com" in name.lower() or len(name) > 100:
+            match = re.search(r'/reservation/(\w+)', url)
+            if match:
+                slug = match.group(1)
+                name = re.sub(r'([a-z])([A-Z])', r'\1 \2', slug)
+
+        return name.strip()
 
     def estimate_region(
         self,
