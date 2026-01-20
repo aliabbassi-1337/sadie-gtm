@@ -433,6 +433,16 @@ UPDATE sadie_gtm.hotels
 SET category = :category, updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
+-- name: update_hotel_from_ingestor!
+-- Update hotel with data from ingestor (DBPR etc)
+-- Uses COALESCE to not overwrite existing data with NULL
+UPDATE sadie_gtm.hotels
+SET category = COALESCE(:category, category),
+    address = COALESCE(:address, address),
+    phone_google = COALESCE(:phone, phone_google),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
 -- name: insert_hotel_with_category<!
 -- Insert a new hotel with category and return the ID
 INSERT INTO sadie_gtm.hotels (

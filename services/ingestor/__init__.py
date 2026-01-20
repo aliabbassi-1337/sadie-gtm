@@ -1,5 +1,5 @@
 """Ingestor Service - Import data from external sources."""
 
-from services.ingestor.service import IngestorService
+from services.ingestor.service import Service, IService
 
-__all__ = ["IngestorService"]
+__all__ = ["Service", "IService"]

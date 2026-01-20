@@ -21,19 +21,22 @@ async def insert_hotel(
     """
     Insert a hotel from ingestion source.
 
-    If duplicate exists, updates category if provided.
-    Returns hotel ID if inserted/updated, None if duplicate with no updates.
+    If duplicate exists, updates with ingestor data (category, address, phone).
+    Returns hotel ID.
     """
     async with get_conn() as conn:
         # Check for existing by name + city (dedup)
         existing = await queries.get_hotel_by_name_city(conn, name=name, city=city)
 
         if existing:
-            # Update category if provided and not already set
-            if category and not existing["category"]:
-                await queries.update_hotel_category(
-                    conn, hotel_id=existing["id"], category=category
-                )
+            # Update with ingestor data (won't overwrite existing non-null values)
+            await queries.update_hotel_from_ingestor(
+                conn,
+                hotel_id=existing["id"],
+                category=category,
+                address=address,
+                phone=phone,
+            )
             return existing["id"]
 
         # Insert new hotel
