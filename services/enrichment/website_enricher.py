@@ -51,6 +51,8 @@ class EnrichmentResult:
     name: str
     city: str
     website: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
     search_query: str = ""
     error: Optional[str] = None
 
@@ -78,7 +80,7 @@ class WebsiteEnricher:
         address: str,
         city: str,
         state: str = "FL",
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], Optional[float], Optional[float]]:
         """
         Search for hotel website using Serper Places API.
 
@@ -89,7 +91,7 @@ class WebsiteEnricher:
             state: State code
 
         Returns:
-            Website URL if found, None otherwise
+            Tuple of (website, lat, lng) - any can be None
         """
         query = f"{name} {address} {city} {state}"
 
@@ -105,22 +107,31 @@ class WebsiteEnricher:
                 )
 
                 if resp.status_code != 200:
-                    return None
+                    return None, None, None
 
                 data = resp.json()
                 places = data.get("places", [])
 
                 for place in places:
+                    # Extract coordinates
+                    lat = place.get("latitude")
+                    lng = place.get("longitude")
+
+                    # Extract website
                     website = place.get("website")
                     if website:
                         domain = self._extract_domain(website)
-                        if domain and domain not in SKIP_DOMAINS:
-                            return website
+                        if domain and domain in SKIP_DOMAINS:
+                            website = None  # Skip but keep coords
+
+                    # Return first place with coords (website optional)
+                    if lat and lng:
+                        return website, lat, lng
 
         except Exception:
             pass
 
-        return None
+        return None, None, None
 
     async def find_website(
         self,
@@ -151,11 +162,14 @@ class WebsiteEnricher:
 
         # Try Serper Places API first if we have an address
         if try_places and address:
-            places_result = await self.find_website_places(name, address, city, state)
-            if places_result:
-                result.website = places_result
+            website, lat, lng = await self.find_website_places(name, address, city, state)
+            result.lat = lat
+            result.lng = lng
+            if website:
+                result.website = website
                 result.search_query = f"places: {name} {address} {city}"
                 return result
+            # If Places found coords but no website, continue to search
 
         # Fall back to regular search
         query = f'"{name}" {city} {state} official site'

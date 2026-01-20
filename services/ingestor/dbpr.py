@@ -14,10 +14,15 @@ Total: ~193,000 lodging licenses across Florida.
 
 import csv
 import io
+import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 import httpx
 from loguru import logger
+
+# Cache directory for downloaded DBPR files
+CACHE_DIR = Path(__file__).parent.parent.parent / "data" / "dbpr_cache"
 
 
 # DBPR data extract URLs
@@ -127,15 +132,30 @@ class DBPRIngester:
     def __init__(self, timeout: float = 120.0):
         self.timeout = timeout
 
-    async def download_file(self, filename: str) -> str:
-        """Download a CSV file from DBPR."""
-        url = f"{DBPR_BASE_URL}/{filename}"
+    async def download_file(self, filename: str, use_cache: bool = True) -> str:
+        """Download a CSV file from DBPR, with local caching."""
+        # Check cache first
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_path = CACHE_DIR / filename
 
+        if use_cache and cache_path.exists():
+            logger.info(f"  Using cached {filename}")
+            return cache_path.read_text()
+
+        # Download from DBPR
+        url = f"{DBPR_BASE_URL}/{filename}"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 raise Exception(f"Failed to download {filename}: HTTP {resp.status_code}")
-            return resp.text
+
+            content = resp.text
+
+            # Save to cache
+            cache_path.write_text(content)
+            logger.info(f"  Cached {filename} to {cache_path}")
+
+            return content
 
     def parse_csv(self, csv_content: str, is_new_licenses: bool = False) -> List[DBPRLicense]:
         """Parse a DBPR CSV file into license objects."""
