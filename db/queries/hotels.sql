@@ -502,6 +502,7 @@ WHERE id = :hotel_id;
 
 -- name: update_hotel_location_point!
 -- Update hotel location from lat/lng
+-- SRID 4326 = WGS84 (standard GPS coordinate system)
 UPDATE sadie_gtm.hotels
 SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
     updated_at = CURRENT_TIMESTAMP
