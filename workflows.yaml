@@ -59,6 +59,12 @@ ec2:
     command: uv run python workflows/detection_consumer.py --concurrency 6
     type: systemd  # Runs continuously while instance is up
 
+  enqueue_detection:
+    description: Auto-queue pending hotels for detection
+    command: uv run python workflows/enqueue_detection.py --limit 500 --categories hotel motel --no-notify
+    schedule: "*/5 * * * *"  # Every 5 min
+    type: cron
+
   enrichment_room_counts:
     description: Enrich hotels with room counts via Groq LLM
     command: uv run python workflows/enrichment.py room-counts --limit 100
