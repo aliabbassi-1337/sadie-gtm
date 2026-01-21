@@ -44,3 +44,4 @@ SADIE-GTM-BLUEPRINT.png
 *.png
 # Generated EC2 configs
 infra/ec2/generated/
+.claude/

@@ -166,6 +166,19 @@ async def insert_customer_proximity(
         return result
 
 
+async def insert_customer_proximity_none(hotel_id: int) -> int:
+    """Insert record marking hotel as processed with no nearby customer (NULL values).
+
+    Returns the hotel_customer_proximity ID.
+    """
+    async with get_conn() as conn:
+        result = await queries.insert_customer_proximity_none(
+            conn,
+            hotel_id=hotel_id,
+        )
+        return result
+
+
 async def get_customer_proximity_by_hotel_id(hotel_id: int) -> Optional[Dict[str, Any]]:
     """Get customer proximity for a specific hotel.
 
@@ -191,3 +204,114 @@ async def get_pending_proximity_count() -> int:
     async with get_conn() as conn:
         result = await queries.get_pending_proximity_count(conn)
         return result["count"] if result else 0
+
+
+# ============================================================================
+# WEBSITE ENRICHMENT FUNCTIONS
+# ============================================================================
+
+
+async def get_hotels_pending_website_enrichment(limit: int = 100) -> List[Dict[str, Any]]:
+    """Get hotels that need website enrichment (read-only, for status display).
+
+    Criteria:
+    - no website
+    - has name and city
+    - not already in hotel_website_enrichment table
+    """
+    async with get_conn() as conn:
+        results = await queries.get_hotels_pending_website_enrichment(conn, limit=limit)
+        return [dict(row) for row in results]
+
+
+async def claim_hotels_for_website_enrichment(
+    limit: int = 100,
+    source_filter: Optional[str] = None,
+    state_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Atomically claim hotels for website enrichment (multi-worker safe).
+
+    Inserts status=-1 (processing) records into hotel_website_enrichment.
+    Uses ON CONFLICT DO NOTHING so only one worker claims each hotel.
+
+    Args:
+        limit: Max hotels to claim
+        source_filter: Filter by source (e.g., 'dbpr%')
+        state_filter: Filter by state (e.g., 'FL')
+
+    Returns list of successfully claimed hotels.
+    """
+    async with get_conn() as conn:
+        if source_filter or state_filter:
+            results = await queries.claim_hotels_for_website_enrichment_filtered(
+                conn,
+                limit=limit,
+                source_filter=f"%{source_filter}%" if source_filter else None,
+                state_filter=state_filter,
+            )
+        else:
+            results = await queries.claim_hotels_for_website_enrichment(conn, limit=limit)
+        return [dict(row) for row in results]
+
+
+async def reset_stale_website_enrichment_claims() -> None:
+    """Reset claims stuck in processing state (status=-1) for > 30 min.
+
+    Run this periodically to recover from crashed workers.
+    """
+    async with get_conn() as conn:
+        await queries.reset_stale_website_enrichment_claims(conn)
+
+
+async def get_pending_website_enrichment_count() -> int:
+    """Count hotels waiting for website enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_pending_website_enrichment_count(conn)
+        return result["count"] if result else 0
+
+
+async def update_hotel_website(hotel_id: int, website: str) -> None:
+    """Update hotel with enriched website."""
+    async with get_conn() as conn:
+        await queries.update_hotel_website(conn, hotel_id=hotel_id, website=website)
+
+
+async def update_website_enrichment_status(
+    hotel_id: int,
+    status: int,
+    source: Optional[str] = None,
+) -> None:
+    """Update website enrichment status after processing.
+
+    Args:
+        hotel_id: The hotel ID
+        status: 0=failed, 1=success
+        source: Source of enrichment (serper, manual, etc)
+    """
+    async with get_conn() as conn:
+        await queries.update_website_enrichment_status(
+            conn,
+            hotel_id=hotel_id,
+            status=status,
+            source=source,
+        )
+
+
+async def get_website_enrichment_stats(source_prefix: Optional[str] = None) -> Dict[str, int]:
+    """Get stats for website enrichment progress.
+
+    Returns dict with total, with_website, without_website, enriched_success, enriched_failed counts.
+    """
+    async with get_conn() as conn:
+        result = await queries.get_website_enrichment_stats(
+            conn,
+            source_prefix=f"{source_prefix}%" if source_prefix else None,
+        )
+        return dict(result) if result else {
+            "total": 0,
+            "with_website": 0,
+            "without_website": 0,
+            "enriched_success": 0,
+            "enriched_failed": 0,
+            "in_progress": 0,
+        }

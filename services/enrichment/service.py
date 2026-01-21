@@ -1,8 +1,10 @@
 from abc import ABC, abstractmethod
 from decimal import Decimal
 import asyncio
+import os
 
 import httpx
+from dotenv import load_dotenv
 
 from services.enrichment import repo
 from services.enrichment.room_count_enricher import (
@@ -13,6 +15,11 @@ from services.enrichment.room_count_enricher import (
 from services.enrichment.customer_proximity import (
     log as proximity_log,
 )
+from services.enrichment.website_enricher import WebsiteEnricher
+
+load_dotenv()
+
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 
 class IService(ABC):
@@ -161,12 +168,16 @@ class Service(IService):
         self,
         limit: int = 100,
         max_distance_km: float = 100.0,
+        concurrency: int = 20,
     ) -> int:
         """
         Calculate distance to nearest Sadie customer for hotels.
         Uses PostGIS for efficient spatial queries.
-        Returns number of hotels processed.
+        Runs in parallel with semaphore-controlled concurrency.
+        Returns number of hotels with nearby customers found.
         """
+        import asyncio
+
         # Get hotels needing proximity calculation
         hotels = await repo.get_hotels_pending_proximity(limit=limit)
 
@@ -174,35 +185,44 @@ class Service(IService):
             proximity_log("No hotels pending proximity calculation")
             return 0
 
-        proximity_log(f"Processing {len(hotels)} hotels for proximity calculation")
+        proximity_log(f"Processing {len(hotels)} hotels for proximity calculation (concurrency={concurrency})")
 
+        semaphore = asyncio.Semaphore(concurrency)
         processed_count = 0
 
-        for hotel in hotels:
+        async def process_hotel(hotel):
+            nonlocal processed_count
+
             # Skip if hotel has no location
             if hotel.latitude is None or hotel.longitude is None:
-                continue
+                return
 
-            # Find nearest customer using PostGIS
-            nearest = await repo.find_nearest_customer(
-                hotel_id=hotel.id,
-                max_distance_km=max_distance_km,
-            )
-
-            if nearest:
-                # Insert proximity record
-                await repo.insert_customer_proximity(
+            async with semaphore:
+                # Find nearest customer using PostGIS
+                nearest = await repo.find_nearest_customer(
                     hotel_id=hotel.id,
-                    existing_customer_id=nearest["existing_customer_id"],
-                    distance_km=Decimal(str(round(nearest["distance_km"], 1))),
+                    max_distance_km=max_distance_km,
                 )
-                proximity_log(
-                    f"  {hotel.name}: nearest customer is {nearest['customer_name']} "
-                    f"({round(nearest['distance_km'], 1)}km)"
-                )
-                processed_count += 1
-            else:
-                proximity_log(f"  {hotel.name}: no customer within {max_distance_km}km")
+
+                if nearest:
+                    # Insert proximity record with customer
+                    await repo.insert_customer_proximity(
+                        hotel_id=hotel.id,
+                        existing_customer_id=nearest["existing_customer_id"],
+                        distance_km=Decimal(str(round(nearest["distance_km"], 1))),
+                    )
+                    proximity_log(
+                        f"  {hotel.name}: nearest customer is {nearest['customer_name']} "
+                        f"({round(nearest['distance_km'], 1)}km)"
+                    )
+                    processed_count += 1
+                else:
+                    # Insert with NULL to mark as processed (no nearby customer)
+                    await repo.insert_customer_proximity_none(hotel_id=hotel.id)
+                    proximity_log(f"  {hotel.name}: no customer within {max_distance_km}km")
+
+        # Run all hotels in parallel
+        await asyncio.gather(*[process_hotel(h) for h in hotels])
 
         proximity_log(
             f"Proximity calculation complete: {processed_count}/{len(hotels)} "
@@ -217,3 +237,96 @@ class Service(IService):
     async def get_pending_proximity_count(self) -> int:
         """Count hotels waiting for proximity calculation."""
         return await repo.get_pending_proximity_count()
+
+    async def enrich_websites(
+        self,
+        limit: int = 100,
+        source_filter: str = None,
+        state_filter: str = None,
+        concurrency: int = 10,
+    ) -> dict:
+        """
+        Find websites for hotels that don't have them via Serper search.
+
+        Runs concurrently with semaphore-controlled parallelism.
+        Requires SERPER_API_KEY environment variable.
+
+        Args:
+            limit: Max hotels to process
+            source_filter: Filter by source (e.g., 'dbpr')
+            state_filter: Filter by state (e.g., 'FL')
+            concurrency: Max concurrent API requests (default 10)
+
+        Returns:
+            Stats dict with found/not_found/errors counts
+        """
+        if not SERPER_API_KEY:
+            log("Error: SERPER_API_KEY not found in environment")
+            return {"total": 0, "found": 0, "not_found": 0, "errors": 0}
+
+        # Claim hotels atomically (multi-worker safe)
+        hotels = await repo.claim_hotels_for_website_enrichment(
+            limit=limit,
+            source_filter=source_filter,
+            state_filter=state_filter,
+        )
+
+        if not hotels:
+            log("No hotels found needing website enrichment")
+            return {"total": 0, "found": 0, "not_found": 0, "errors": 0}
+
+        log(f"Claimed {len(hotels)} hotels for website enrichment (concurrency={concurrency})")
+
+        enricher = WebsiteEnricher(api_key=SERPER_API_KEY, delay_between_requests=0)
+        semaphore = asyncio.Semaphore(concurrency)
+
+        found = 0
+        not_found = 0
+        errors = 0
+        completed = 0
+
+        async def process_hotel(hotel: dict) -> tuple[str, bool]:
+            """Process a single hotel, returns (status, has_website)."""
+            nonlocal found, not_found, errors, completed
+
+            async with semaphore:
+                result = await enricher.find_website(
+                    name=hotel["name"],
+                    city=hotel["city"],
+                    state=hotel.get("state", "FL"),
+                    address=hotel.get("address"),
+                )
+
+                if result.website:
+                    found += 1
+                    await repo.update_hotel_website(hotel["id"], result.website)
+                    await repo.update_website_enrichment_status(
+                        hotel["id"], status=1, source="serper"
+                    )
+                elif result.error == "no_match":
+                    not_found += 1
+                    await repo.update_website_enrichment_status(
+                        hotel["id"], status=0, source="serper"
+                    )
+                else:
+                    errors += 1
+                    await repo.update_website_enrichment_status(
+                        hotel["id"], status=0, source="serper"
+                    )
+
+                completed += 1
+                if completed % 50 == 0:
+                    log(f"  Progress: {completed}/{len(hotels)} ({found} found)")
+
+        # Run all hotel enrichments concurrently
+        await asyncio.gather(*[process_hotel(h) for h in hotels])
+
+        log(f"Website enrichment complete: {found} found, {not_found} not found, {errors} errors")
+
+        return {
+            "total": len(hotels),
+            "found": found,
+            "not_found": not_found,
+            "errors": errors,
+            "api_calls": len(hotels),
+        }

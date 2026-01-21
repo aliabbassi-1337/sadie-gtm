@@ -176,7 +176,7 @@ async def worker_loop(
                 queue_url=queue_url,
                 max_messages=min(concurrency, 10),  # SQS max is 10
                 wait_time_seconds=20,
-                visibility_timeout=7200,  # 2 hours - safe buffer for retries
+                visibility_timeout=900,  # 15 min - enough for batch, fast retry on crash
             )
 
             if not messages:

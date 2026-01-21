@@ -225,11 +225,24 @@ def is_non_hotel_domain(url: str) -> bool:
 
 
 def is_junk_domain(url: str) -> bool:
-    """Check if URL is a junk domain that should be skipped."""
+    """Check if URL is a junk domain that should be skipped.
+
+    Uses proper domain matching to avoid false positives like
+    wyndhamhotels.com matching hotels.com.
+    """
     if not url:
         return True
-    url_lower = url.lower()
-    return any(junk in url_lower for junk in SKIP_JUNK_DOMAINS)
+
+    # Extract domain from URL
+    domain = extract_domain(url).lower()
+    if not domain:
+        return True
+
+    for junk in SKIP_JUNK_DOMAINS:
+        # Exact match or subdomain match (e.g., foo.hotels.com)
+        if domain == junk or domain.endswith("." + junk):
+            return True
+    return False
 
 
 # =============================================================================
@@ -278,7 +291,7 @@ def normalize_url(url: str) -> str:
     return url
 
 
-async def http_precheck(url: str, timeout: float = 3.0) -> Tuple[bool, str]:
+async def http_precheck(url: str, timeout: float = 24.0) -> Tuple[bool, str]:
     """Quick HTTP check before launching Playwright."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -929,8 +942,7 @@ class HotelProcessor:
 
         # Skip junk domains (unless already checked)
         if not skip_precheck:
-            website_lower = website.lower()
-            if any(junk in website_lower for junk in SKIP_JUNK_DOMAINS):
+            if is_junk_domain(website):
                 result.error = "junk_domain"
                 return result
 

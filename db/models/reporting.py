@@ -10,6 +10,7 @@ class HotelLead(BaseModel):
 
     id: int
     hotel_name: str
+    category: Optional[str] = None
     website: Optional[str] = None
 
     # Contact

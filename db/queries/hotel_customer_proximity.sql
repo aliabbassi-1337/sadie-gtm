@@ -36,6 +36,14 @@ ON CONFLICT (hotel_id) DO UPDATE SET
     computed_at = CURRENT_TIMESTAMP
 RETURNING id;
 
+-- name: insert_customer_proximity_none<!
+-- Insert record marking hotel as processed with no nearby customer (NULL values)
+INSERT INTO sadie_gtm.hotel_customer_proximity (hotel_id, existing_customer_id, distance_km)
+VALUES (:hotel_id, NULL, NULL)
+ON CONFLICT (hotel_id) DO UPDATE SET
+    computed_at = CURRENT_TIMESTAMP
+RETURNING id;
+
 -- name: get_customer_proximity_by_hotel_id^
 -- Get customer proximity for a specific hotel
 SELECT

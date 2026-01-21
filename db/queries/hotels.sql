@@ -121,6 +121,47 @@ WHERE h.status = 0
   AND LOWER(h.website) NOT LIKE '%accor.com%'
 LIMIT :limit;
 
+-- name: get_hotels_pending_detection_by_categories
+-- Get hotels that need booking engine detection, filtered by categories
+-- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet, in categories list
+SELECT
+    h.id,
+    h.name,
+    h.google_place_id,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.city,
+    h.state,
+    h.country,
+    h.address,
+    ST_Y(h.location::geometry) AS latitude,
+    ST_X(h.location::geometry) AS longitude,
+    h.rating,
+    h.review_count,
+    h.status,
+    h.source,
+    h.created_at,
+    h.updated_at
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.status = 0
+  AND hbe.hotel_id IS NULL
+  AND h.website IS NOT NULL
+  AND h.website != ''
+  AND h.category = ANY(:categories)
+  AND LOWER(h.website) NOT LIKE '%marriott.com%'
+  AND LOWER(h.website) NOT LIKE '%hilton.com%'
+  AND LOWER(h.website) NOT LIKE '%ihg.com%'
+  AND LOWER(h.website) NOT LIKE '%hyatt.com%'
+  AND LOWER(h.website) NOT LIKE '%wyndham.com%'
+  AND LOWER(h.website) NOT LIKE '%choicehotels.com%'
+  AND LOWER(h.website) NOT LIKE '%bestwestern.com%'
+  AND LOWER(h.website) NOT LIKE '%radissonhotels.com%'
+  AND LOWER(h.website) NOT LIKE '%accor.com%'
+LIMIT :limit;
+
 -- name: update_hotel_status!
 -- Update hotel status after detection
 UPDATE sadie_gtm.hotels
@@ -210,6 +251,7 @@ WHERE h.city = :city
 SELECT
     h.id,
     h.name AS hotel_name,
+    h.category,
     h.website,
     h.phone_google,
     h.phone_website,
@@ -239,7 +281,7 @@ WHERE h.state = :state
 SELECT
     COUNT(*) AS total_scraped,
     COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
-    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL THEN 1 END) AS booking_found,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL AND hbe.status = 1 THEN 1 END) AS booking_found,
     COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
     COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
     COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
@@ -255,7 +297,7 @@ WHERE h.city = :city
 SELECT
     COUNT(*) AS total_scraped,
     COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
-    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL THEN 1 END) AS booking_found,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL AND hbe.status = 1 THEN 1 END) AS booking_found,
     COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
     COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
     COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
@@ -414,3 +456,55 @@ SET address = COALESCE(:address, address),
     country = COALESCE(:country, country),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
+
+-- ============================================================================
+-- INGESTOR QUERIES
+-- ============================================================================
+
+-- name: get_hotel_by_name_city^
+-- Check if hotel exists by name and city (for dedup)
+SELECT id, category
+FROM sadie_gtm.hotels
+WHERE LOWER(name) = LOWER(:name)
+  AND LOWER(COALESCE(city, '')) = LOWER(COALESCE(:city, ''))
+LIMIT 1;
+
+-- name: update_hotel_category!
+-- Update hotel category
+UPDATE sadie_gtm.hotels
+SET category = :category, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: update_hotel_from_ingestor!
+-- Update hotel with data from ingestor (DBPR etc)
+-- Uses COALESCE to not overwrite existing data with NULL
+UPDATE sadie_gtm.hotels
+SET category = COALESCE(:category, category),
+    address = COALESCE(:address, address),
+    phone_google = COALESCE(:phone, phone_google),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: insert_hotel_with_category<!
+-- Insert a new hotel with category and return the ID
+INSERT INTO sadie_gtm.hotels (
+    name, website, source, status, address, city, state, country, phone_google, category
+) VALUES (
+    :name, :website, :source, :status, :address, :city, :state, :country, :phone, :category
+)
+RETURNING id;
+
+-- name: update_hotel_website!
+-- Update hotel website
+UPDATE sadie_gtm.hotels
+SET website = :website, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: update_hotel_location_point!
+-- Update hotel location from lat/lng
+-- SRID 4326 = WGS84 (standard GPS coordinate system)
+UPDATE sadie_gtm.hotels
+SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
