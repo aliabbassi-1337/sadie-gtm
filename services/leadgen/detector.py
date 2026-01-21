@@ -16,6 +16,12 @@ from playwright.async_api import async_playwright, Page, BrowserContext, Browser
 from playwright.async_api import TimeoutError as PWTimeoutError
 import httpx
 
+try:
+    from playwright_stealth import stealth_async
+    HAS_STEALTH = True
+except ImportError:
+    HAS_STEALTH = False
+
 from services.leadgen.location import LocationExtractor
 import random
 
@@ -1011,6 +1017,10 @@ class HotelProcessor:
         context = await self.context_queue.get()
         page = await context.new_page()
 
+        # Apply stealth to avoid bot detection
+        if HAS_STEALTH:
+            await stealth_async(page)
+
         homepage_network: Dict[str, str] = {}
 
         def capture_homepage_request(request):
@@ -1496,6 +1506,11 @@ class HotelProcessor:
         self._log(f"  Booking URL: {booking_url[:80]}...")
 
         page = await context.new_page()
+
+        # Apply stealth to avoid bot detection
+        if HAS_STEALTH:
+            await stealth_async(page)
+
         network_urls: Dict[str, str] = {}
         engine_name = ""
         engine_domain = ""
