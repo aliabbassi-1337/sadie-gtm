@@ -168,12 +168,16 @@ class Service(IService):
         self,
         limit: int = 100,
         max_distance_km: float = 100.0,
+        concurrency: int = 20,
     ) -> int:
         """
         Calculate distance to nearest Sadie customer for hotels.
         Uses PostGIS for efficient spatial queries.
-        Returns number of hotels processed.
+        Runs in parallel with semaphore-controlled concurrency.
+        Returns number of hotels with nearby customers found.
         """
+        import asyncio
+
         # Get hotels needing proximity calculation
         hotels = await repo.get_hotels_pending_proximity(limit=limit)
 
@@ -181,35 +185,44 @@ class Service(IService):
             proximity_log("No hotels pending proximity calculation")
             return 0
 
-        proximity_log(f"Processing {len(hotels)} hotels for proximity calculation")
+        proximity_log(f"Processing {len(hotels)} hotels for proximity calculation (concurrency={concurrency})")
 
+        semaphore = asyncio.Semaphore(concurrency)
         processed_count = 0
 
-        for hotel in hotels:
+        async def process_hotel(hotel):
+            nonlocal processed_count
+
             # Skip if hotel has no location
             if hotel.latitude is None or hotel.longitude is None:
-                continue
+                return
 
-            # Find nearest customer using PostGIS
-            nearest = await repo.find_nearest_customer(
-                hotel_id=hotel.id,
-                max_distance_km=max_distance_km,
-            )
-
-            if nearest:
-                # Insert proximity record
-                await repo.insert_customer_proximity(
+            async with semaphore:
+                # Find nearest customer using PostGIS
+                nearest = await repo.find_nearest_customer(
                     hotel_id=hotel.id,
-                    existing_customer_id=nearest["existing_customer_id"],
-                    distance_km=Decimal(str(round(nearest["distance_km"], 1))),
+                    max_distance_km=max_distance_km,
                 )
-                proximity_log(
-                    f"  {hotel.name}: nearest customer is {nearest['customer_name']} "
-                    f"({round(nearest['distance_km'], 1)}km)"
-                )
-                processed_count += 1
-            else:
-                proximity_log(f"  {hotel.name}: no customer within {max_distance_km}km")
+
+                if nearest:
+                    # Insert proximity record with customer
+                    await repo.insert_customer_proximity(
+                        hotel_id=hotel.id,
+                        existing_customer_id=nearest["existing_customer_id"],
+                        distance_km=Decimal(str(round(nearest["distance_km"], 1))),
+                    )
+                    proximity_log(
+                        f"  {hotel.name}: nearest customer is {nearest['customer_name']} "
+                        f"({round(nearest['distance_km'], 1)}km)"
+                    )
+                    processed_count += 1
+                else:
+                    # Insert with NULL to mark as processed (no nearby customer)
+                    await repo.insert_customer_proximity_none(hotel_id=hotel.id)
+                    proximity_log(f"  {hotel.name}: no customer within {max_distance_km}km")
+
+        # Run all hotels in parallel
+        await asyncio.gather(*[process_hotel(h) for h in hotels])
 
         proximity_log(
             f"Proximity calculation complete: {processed_count}/{len(hotels)} "

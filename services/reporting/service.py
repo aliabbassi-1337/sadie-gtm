@@ -140,13 +140,20 @@ class Service(IService):
             os.unlink(tmp_path)
 
     async def export_state(self, state: str, country: str = "USA") -> str:
-        """Generate Excel report for an entire state and upload to S3."""
-        logger.info(f"Generating state aggregate report for {state}")
+        """Generate Excel report for an entire state and upload to S3.
+
+        Uses s5cmd for fast upload with fallback to boto3.
+        """
+        import subprocess
+
+        logger.info(f"Generating state report for {state}")
 
         # Get data from database
         leads = await repo.get_leads_for_state(state)
         stats = await repo.get_state_stats(state)
         top_engines = await repo.get_top_engines_for_state(state)
+
+        logger.info(f"Found {len(leads)} leads for {state}")
 
         report_stats = ReportStats(
             location_name=state,
@@ -163,42 +170,34 @@ class Service(IService):
             tmp_path = tmp.name
 
         try:
-            # S3 path: HotelLeadGen/{country}/{state}/{state}.xlsx (state aggregate)
-            s3_key = f"HotelLeadGen/{country}/{state}/{state}.xlsx"
-            s3_uri = upload_file(tmp_path, s3_key)
-            logger.info(f"Uploaded state aggregate report to {s3_uri}")
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/{country}/{state}/{state}.xlsx"
+
+            # Try s5cmd first (faster)
+            result = subprocess.run(
+                ["s5cmd", "cp", tmp_path, s3_uri],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                # Fallback to boto3
+                logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
+                s3_key = f"HotelLeadGen/{country}/{state}/{state}.xlsx"
+                s3_uri = upload_file(tmp_path, s3_key)
+
+            logger.info(f"Uploaded state report to {s3_uri}")
             return s3_uri
         finally:
             os.unlink(tmp_path)
 
     async def export_state_with_cities(self, state: str, country: str = "USA") -> List[str]:
-        """Export all cities in a state plus state aggregate."""
-        logger.info(f"Exporting all cities in {state}")
+        """Export single Excel file for entire state.
 
-        uploaded_uris = []
-
-        # Get all cities in state
-        cities = await repo.get_cities_in_state(state)
-        logger.info(f"Found {len(cities)} cities in {state}")
-
-        # Export each city
-        for city in cities:
-            try:
-                uri = await self.export_city(city, state, country)
-                uploaded_uris.append(uri)
-            except Exception as e:
-                logger.error(f"Failed to export {city}, {state}: {e}")
-                continue
-
-        # Export state aggregate
-        try:
-            uri = await self.export_state(state, country)
-            uploaded_uris.append(uri)
-        except Exception as e:
-            logger.error(f"Failed to export state aggregate for {state}: {e}")
-
-        logger.info(f"Exported {len(uploaded_uris)} reports for {state}")
-        return uploaded_uris
+        Uses s5cmd for fast S3 upload.
+        """
+        # Just delegate to export_state - one file per state
+        uri = await self.export_state(state, country)
+        return [uri]
 
     def send_slack_notification(
         self,
@@ -238,7 +237,7 @@ class Service(IService):
     def _populate_leads_sheet(self, sheet, leads: List[HotelLead]) -> None:
         """Populate the leads sheet with hotel data."""
         # Define headers
-        headers = ["Hotel", "Website", "Booking Engine", "Room Count", "Proximity"]
+        headers = ["Hotel", "Category", "Website", "Booking Engine", "Room Count", "Proximity"]
 
         # Style definitions
         header_font = Font(bold=True, color="FFFFFF")
@@ -264,21 +263,25 @@ class Service(IService):
             # Hotel name
             sheet.cell(row=row, column=1, value=lead.hotel_name).border = thin_border
 
+            # Category
+            category = lead.category or ""
+            sheet.cell(row=row, column=2, value=category).border = thin_border
+
             # Website
             website = lead.website or ""
-            sheet.cell(row=row, column=2, value=website).border = thin_border
+            sheet.cell(row=row, column=3, value=website).border = thin_border
 
             # Booking engine (just the name, no domain)
             engine_name = lead.booking_engine_name or ""
-            sheet.cell(row=row, column=3, value=engine_name).border = thin_border
+            sheet.cell(row=row, column=4, value=engine_name).border = thin_border
 
             # Room count
             room_count = lead.room_count if lead.room_count else ""
-            sheet.cell(row=row, column=4, value=room_count).border = thin_border
+            sheet.cell(row=row, column=5, value=room_count).border = thin_border
 
             # Proximity: "Nearest: Hotel Name (X.Xkm)"
             proximity = self._format_proximity(lead)
-            sheet.cell(row=row, column=5, value=proximity).border = thin_border
+            sheet.cell(row=row, column=6, value=proximity).border = thin_border
 
         # Auto-adjust column widths
         for col in range(1, len(headers) + 1):

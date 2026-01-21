@@ -251,6 +251,7 @@ WHERE h.city = :city
 SELECT
     h.id,
     h.name AS hotel_name,
+    h.category,
     h.website,
     h.phone_google,
     h.phone_website,
@@ -280,7 +281,7 @@ WHERE h.state = :state
 SELECT
     COUNT(*) AS total_scraped,
     COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
-    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL THEN 1 END) AS booking_found,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL AND hbe.status = 1 THEN 1 END) AS booking_found,
     COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
     COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
     COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
@@ -296,7 +297,7 @@ WHERE h.city = :city
 SELECT
     COUNT(*) AS total_scraped,
     COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
-    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL THEN 1 END) AS booking_found,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL AND hbe.status = 1 THEN 1 END) AS booking_found,
     COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
     COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
     COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,

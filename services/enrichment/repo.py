@@ -166,6 +166,19 @@ async def insert_customer_proximity(
         return result
 
 
+async def insert_customer_proximity_none(hotel_id: int) -> int:
+    """Insert record marking hotel as processed with no nearby customer (NULL values).
+
+    Returns the hotel_customer_proximity ID.
+    """
+    async with get_conn() as conn:
+        result = await queries.insert_customer_proximity_none(
+            conn,
+            hotel_id=hotel_id,
+        )
+        return result
+
+
 async def get_customer_proximity_by_hotel_id(hotel_id: int) -> Optional[Dict[str, Any]]:
     """Get customer proximity for a specific hotel.
 
