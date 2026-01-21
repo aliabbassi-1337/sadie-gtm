@@ -22,10 +22,14 @@ SKIP_DOMAINS = {
     "booking.com", "expedia.com", "hotels.com", "tripadvisor.com",
     "trivago.com", "kayak.com", "priceline.com", "agoda.com",
     "orbitz.com", "travelocity.com", "hotwire.com",
-    "airbnb.com", "vrbo.com", "homeaway.com",
+    "airbnb.com", "vrbo.com", "homeaway.com", "momondo.com",
+    "hostelworld.com", "decolar.com", "despegar.com", "skyscanner.com",
+    # Meta-search / aggregators
+    "bluepillow.com", "vio.com", "wowotrip.com", "getaroom.com",
+    "hotellook.com", "hotelscombined.com", "roomkey.com",
     # Social media
     "yelp.com", "facebook.com", "instagram.com", "twitter.com",
-    "linkedin.com", "youtube.com", "pinterest.com",
+    "linkedin.com", "youtube.com", "pinterest.com", "tiktok.com",
     # Directories
     "yellowpages.com", "whitepages.com", "bbb.org",
     "mapquest.com", "google.com", "apple.com",
@@ -33,16 +37,54 @@ SKIP_DOMAINS = {
     "zomato.com", "opentable.com",
     "tripadvisor.ca", "yelp.ca", "b2bhint.com",
     "chamberofcommerce.com", "manta.com", "dnb.com",
+    "hotfrog.com", "citysearch.com", "foursquare.com",
+    "cylex.us.com", "localdatabase.com", "hotelsone.com",
+    "hotelguides.com", "2findlocal.com", "placedirectory.com",
     # Government/license sites
     "myfloridalicense.com", "sunbiz.org", "tallahassee.com", "jacksonville.com",
     "data.tallahassee.com", "data.jacksonville.com", "flcompanyregistry.com",
     # People search (garbage results)
     "spokeo.com", "intelius.com", "socialcatfish.com", "whitepages.com",
     "truepeoplesearch.com", "fastpeoplesearch.com", "beenverified.com",
+    "zabasearch.com", "peoplefinders.com", "radaris.com",
     # Chain hotels (not our target)
     "marriott.com", "hilton.com", "ihg.com", "wyndhamhotels.com",
     "choicehotels.com", "hyatt.com", "accor.com", "bestwestern.com",
+    "radissonhotels.com",
+    # News sites (articles about hotels, not the hotel itself)
+    "orlandosentinel.com", "miamiherald.com", "sun-sentinel.com",
+    "tampabay.com", "jacksonville.com", "floridatoday.com",
+    "news-press.com", "news-journalonline.com", "heraldtribune.com",
+    "naplesnews.com", "palmbeachpost.com", "tcpalm.com",
+    "bizjournals.com", "businesswire.com", "prnewswire.com",
+    "prweb.com", "globenewswire.com", "marketwatch.com",
+    "patch.com", "local10.com", "wsvn.com", "wplg.com",
+    "nytimes.com", "wsj.com", "usatoday.com", "cnn.com",
+    # Real estate / rentals (not short-term accommodation)
+    "zillow.com", "apartments.com", "rent.com", "trulia.com",
+    "realtor.com", "redfin.com", "hotpads.com", "apartmentfinder.com",
+    # Event / wedding venues
+    "weddingwire.com", "theknot.com", "eventective.com",
+    # Job sites
+    "indeed.com", "glassdoor.com", "ziprecruiter.com",
+    # Maps
+    "maps.google.com", "bing.com", "here.com",
+    # Review aggregators
+    "oyster.com", "cntraveler.com", "travelandleisure.com",
+    "fodors.com", "frommers.com", "lonelyplanet.com",
 }
+
+# URL patterns that indicate a bad result (news articles, listings, etc.)
+BAD_URL_PATTERNS = [
+    "/article/", "/news/", "/story/", "/press-release/",
+    "/blog/", "/review/", "/reviews/", "/listing/",
+    "/places/", "/map/", "/directory/", "/business/",
+    "/profile/", "/company/", "/location/", "/venue/",
+    "/event/", "/jobs/", "/careers/", "/apartments/",
+    "/rental/", "/rent/", "/sale/", "/buy/",
+    "/wiki/", "/about/", "/contact-us/",
+    "?hotel=", "?property=", "?listing=",
+]
 
 
 @dataclass
@@ -121,8 +163,12 @@ class WebsiteEnricher:
                     website = place.get("website")
                     if website:
                         domain = self._extract_domain(website)
+                        # Skip OTAs and directories
                         if domain and domain in SKIP_DOMAINS:
                             website = None  # Skip but keep coords
+                        # Skip bad URL patterns
+                        elif any(pattern in website.lower() for pattern in BAD_URL_PATTERNS):
+                            website = None
 
                     # Return first place with coords (website optional)
                     if lat and lng:
@@ -199,10 +245,25 @@ class WebsiteEnricher:
                     domain = self._extract_domain(url)
 
                     if domain and domain not in SKIP_DOMAINS:
+                        # Skip URLs that match bad patterns (news articles, listings, etc.)
+                        url_lower = url.lower()
+                        if any(pattern in url_lower for pattern in BAD_URL_PATTERNS):
+                            continue
+
                         # Verify it looks like a hotel site
                         title = item.get("title", "").lower()
                         snippet = item.get("snippet", "").lower()
                         name_lower = name.lower()
+
+                        # Skip results that look like news articles
+                        news_indicators = ["news", "article", "press release", "announces", "announced", "opening", "opens", "closed", "closing", "sold", "sells", "acquires", "acquired"]
+                        if any(ind in title for ind in news_indicators):
+                            continue
+
+                        # Skip results that are clearly directories/listings
+                        listing_indicators = ["listing", "directory", "business profile", "company profile", "reviews of", "review:", "yelp", "tripadvisor", "best hotels in", "top hotels", "hotels near"]
+                        if any(ind in title for ind in listing_indicators):
+                            continue
 
                         # Check if result seems related to the hotel
                         name_words = set(name_lower.split())
