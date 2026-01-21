@@ -295,7 +295,7 @@ class Service(IService):
     def _format_proximity(self, lead: HotelLead) -> str:
         """Format proximity string for a lead."""
         if not lead.nearest_customer_name or lead.nearest_customer_distance_km is None:
-            return ""
+            return "No nearby customer"
 
         distance = float(lead.nearest_customer_distance_km)
         return f"Nearest: {lead.nearest_customer_name} ({distance:.1f}km)"
