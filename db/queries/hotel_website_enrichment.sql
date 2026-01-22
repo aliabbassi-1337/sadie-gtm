@@ -58,8 +58,8 @@ WITH pending AS (
       AND h.name IS NOT NULL
       AND h.city IS NOT NULL
       AND hwe.id IS NULL
-      AND (:source_filter IS NULL OR h.source LIKE :source_filter)
-      AND (:state_filter IS NULL OR h.state = :state_filter)
+      AND (CAST(:source_filter AS TEXT) IS NULL OR h.source LIKE :source_filter)
+      AND (CAST(:state_filter AS TEXT) IS NULL OR h.state = :state_filter)
     ORDER BY h.created_at DESC
     LIMIT :limit
 ),

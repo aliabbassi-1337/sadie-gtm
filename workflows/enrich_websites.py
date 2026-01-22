@@ -84,11 +84,9 @@ async def main():
         logger.info(f"  Filtering to state: {args.state}")
 
     stats = await service.enrich_websites(
-        api_key=api_key,
         limit=args.limit,
         source_filter=args.source,
         state_filter=args.state,
-        delay=args.delay,
     )
 
     # Summary
