@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Tuple
 from loguru import logger
 
-from services.ingestor.dbpr import DBPRIngester, DBPRLicense, DBPRIngestStats, LICENSE_TYPES
+from services.ingestor.dbpr import DBPRIngestor, DBPRLicense, DBPRIngestStats, LICENSE_TYPES
 from services.ingestor import repo
 
 # Hotel status constants
@@ -74,7 +74,7 @@ class Service(IService):
         Returns:
             Tuple of (licenses, stats dict)
         """
-        ingester = DBPRIngester()
+        ingester = DBPRIngestor()
 
         if new_only:
             licenses, stats = await ingester.download_new_licenses()

@@ -72,6 +72,19 @@ SKIP_DOMAINS = {
     # Review aggregators
     "oyster.com", "cntraveler.com", "travelandleisure.com",
     "fodors.com", "frommers.com", "lonelyplanet.com",
+    # Hotel tech / PMS vendors (articles about hotels, not hotels)
+    "mews.com", "hoteltechreport.com", "hotel-online.com",
+    "hospitalityleaderonline.com", "hospitalitynet.org",
+    "hotelmanagement.net", "hotelnewsnow.com", "htrends.com",
+    "hotelsmag.com", "hotelbusiness.com", "lodgingmagazine.com",
+    "hotelier-indonesia.com", "ehotelier.com", "hotelexecutive.com",
+    "phocuswire.com", "skift.com", "tnooz.com",
+    # Job boards
+    "startup.jobs", "lever.co", "greenhouse.io", "workable.com",
+    # Software comparison sites
+    "g2.com", "capterra.com", "softwareadvice.com", "getapp.com",
+    # Vacation rental aggregators
+    "redawning.com", "vacasa.com", "evolve.com", "turnkeyvr.com",
 }
 
 # URL patterns that indicate a bad result (news articles, listings, etc.)
@@ -84,6 +97,11 @@ BAD_URL_PATTERNS = [
     "/rental/", "/rent/", "/sale/", "/buy/",
     "/wiki/", "/about/", "/contact-us/",
     "?hotel=", "?property=", "?listing=",
+    # Hotel tech content patterns
+    "/customers/", "/case-study/", "/resources/", "/events/",
+    "/compare/", "/matt-talks/", "/webinar/", "/podcast/",
+    "/ebook/", "/whitepaper/", "/report/", "/guide/",
+    "/doc/", "/documentation/", "/support/", "/help/",
 ]
 
 

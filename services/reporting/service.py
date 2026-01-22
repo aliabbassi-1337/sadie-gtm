@@ -237,7 +237,7 @@ class Service(IService):
     def _populate_leads_sheet(self, sheet, leads: List[HotelLead]) -> None:
         """Populate the leads sheet with hotel data."""
         # Define headers
-        headers = ["Hotel", "Category", "Website", "Booking Engine", "Room Count", "Proximity"]
+        headers = ["Hotel", "Category", "City", "Phone", "Email", "Website", "Booking Engine", "Room Count", "Proximity"]
 
         # Style definitions
         header_font = Font(bold=True, color="FFFFFF")
@@ -260,28 +260,43 @@ class Service(IService):
 
         # Write data rows
         for row, lead in enumerate(leads, 2):
+            col = 1
             # Hotel name
-            sheet.cell(row=row, column=1, value=lead.hotel_name).border = thin_border
+            sheet.cell(row=row, column=col, value=lead.hotel_name).border = thin_border
+            col += 1
 
             # Category
-            category = lead.category or ""
-            sheet.cell(row=row, column=2, value=category).border = thin_border
+            sheet.cell(row=row, column=col, value=lead.category or "").border = thin_border
+            col += 1
+
+            # City
+            sheet.cell(row=row, column=col, value=lead.city or "").border = thin_border
+            col += 1
+
+            # Phone (prefer website phone, fall back to Google)
+            phone = lead.phone_website or lead.phone_google or ""
+            sheet.cell(row=row, column=col, value=phone).border = thin_border
+            col += 1
+
+            # Email
+            sheet.cell(row=row, column=col, value=lead.email or "").border = thin_border
+            col += 1
 
             # Website
-            website = lead.website or ""
-            sheet.cell(row=row, column=3, value=website).border = thin_border
+            sheet.cell(row=row, column=col, value=lead.website or "").border = thin_border
+            col += 1
 
             # Booking engine (just the name, no domain)
-            engine_name = lead.booking_engine_name or ""
-            sheet.cell(row=row, column=4, value=engine_name).border = thin_border
+            sheet.cell(row=row, column=col, value=lead.booking_engine_name or "").border = thin_border
+            col += 1
 
             # Room count
             room_count = lead.room_count if lead.room_count else ""
-            sheet.cell(row=row, column=5, value=room_count).border = thin_border
+            sheet.cell(row=row, column=col, value=room_count).border = thin_border
+            col += 1
 
-            # Proximity: "Nearest: Hotel Name (X.Xkm)"
-            proximity = self._format_proximity(lead)
-            sheet.cell(row=row, column=6, value=proximity).border = thin_border
+            # Proximity
+            sheet.cell(row=row, column=col, value=self._format_proximity(lead)).border = thin_border
 
         # Auto-adjust column widths
         for col in range(1, len(headers) + 1):

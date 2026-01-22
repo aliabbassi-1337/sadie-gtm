@@ -41,7 +41,9 @@ local:
   # Step 5: Export final leads
   export:
     description: Export leads to Excel and upload to S3
-    command: uv run python workflows/export.py --all-states
+    command: uv run python workflows/export.py --state FL
+    # Use --state FL for full state export
+    # Use --city "Miami" --state FL for single city
 
   # Utility: Check pipeline status
   status:

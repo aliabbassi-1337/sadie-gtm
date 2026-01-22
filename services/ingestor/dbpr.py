@@ -126,7 +126,7 @@ class DBPRIngestStats:
     errors: int = 0
 
 
-class DBPRIngester:
+class DBPRIngestor:
     """Download and parse Florida DBPR lodging license data."""
 
     def __init__(self, timeout: float = 120.0):
