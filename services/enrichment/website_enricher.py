@@ -283,6 +283,16 @@ class WebsiteEnricher:
                         if any(ind in title for ind in listing_indicators):
                             continue
 
+                        # Skip results that look like case studies/marketing content
+                        marketing_indicators = ["case study", "customer story", "success story", "how", "why", "what is", "guide to", "tips for", "best practices", "vs.", "versus", "comparison", "alternative"]
+                        if any(ind in title for ind in marketing_indicators):
+                            continue
+
+                        # Skip known SaaS/tech company domains (not hotel websites)
+                        tech_domains = ["mews.com", "cloudbeds.com", "guestline.com", "opera.com", "apaleo.com", "protel.net", "hotelogix.com", "roomracoon.com", "littlehotelier.com", "sirvoy.com", "webrezpro.com", "innroad.com", "ezee.com", "hotelogix.com", "stayntouch.com"]
+                        if domain in tech_domains:
+                            continue
+
                         # Check if result seems related to the hotel
                         name_words = set(name_lower.split())
                         title_words = set(title.split())
