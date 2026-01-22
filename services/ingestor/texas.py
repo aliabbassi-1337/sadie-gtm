@@ -9,8 +9,8 @@ Data source: Texas Comptroller Open Records / Hotel Occupancy Tax files
 
 import csv
 from pathlib import Path
-from dataclasses import dataclass, field
 from typing import List, Optional, Dict
+from pydantic import BaseModel, Field
 from loguru import logger
 
 # Cache directory for Texas data files
@@ -45,8 +45,7 @@ COLUMNS = {
 }
 
 
-@dataclass
-class TexasHotel:
+class TexasHotel(BaseModel):
     """A hotel from Texas Comptroller hotel tax data."""
     taxpayer_number: str
     location_number: str
@@ -68,11 +67,10 @@ class TexasHotel:
     total_receipts: Optional[float] = None
 
     # Raw data
-    raw: Dict = field(default_factory=dict)
+    raw: Dict = Field(default_factory=dict)
 
 
-@dataclass
-class TexasIngestStats:
+class TexasIngestStats(BaseModel):
     """Stats from a Texas ingestion run."""
     files_processed: int = 0
     records_parsed: int = 0
@@ -214,6 +212,45 @@ class TexasIngestor:
         logger.info(f"  Parsed {len(hotels)} hotel records")
 
         return hotels, stats
+
+    def load_all_quarters(self) -> tuple[List[TexasHotel], TexasIngestStats]:
+        """
+        Load and merge hotel data from all available quarter directories.
+
+        Finds all directories in CACHE_DIR, loads each one, and deduplicates
+        across all quarters (keeping the most recent/best record for each hotel).
+
+        Returns tuple of (hotels, stats).
+        """
+        stats = TexasIngestStats()
+        all_hotels = []
+
+        if not CACHE_DIR.exists():
+            logger.error(f"Cache directory not found: {CACHE_DIR}")
+            return [], stats
+
+        # Find all quarter directories
+        quarter_dirs = sorted([d for d in CACHE_DIR.iterdir() if d.is_dir()])
+
+        if not quarter_dirs:
+            logger.error(f"No quarter directories found in {CACHE_DIR}")
+            return [], stats
+
+        logger.info(f"Found {len(quarter_dirs)} quarter directories")
+
+        for quarter_dir in quarter_dirs:
+            hotels, q_stats = self.load_quarterly_data(quarter_dir.name)
+            all_hotels.extend(hotels)
+            stats.files_processed += q_stats.files_processed
+            stats.records_parsed += q_stats.records_parsed
+
+        logger.info(f"Total records from all quarters: {len(all_hotels):,}")
+
+        # Deduplicate across all quarters
+        unique_hotels = self.deduplicate_hotels(all_hotels)
+        logger.info(f"Unique hotels after merge: {len(unique_hotels):,}")
+
+        return unique_hotels, stats
 
     def deduplicate_hotels(self, hotels: List[TexasHotel]) -> List[TexasHotel]:
         """

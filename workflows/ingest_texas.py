@@ -8,11 +8,11 @@ into the hotels database. Includes room counts from tax filings.
 Data source: Texas Comptroller Open Records
 
 Usage:
-    # Ingest from quarterly file (default: HOT 25 Q3)
+    # Ingest from all available quarters (merge-unique)
     uv run python workflows/ingest_texas.py
 
-    # Ingest from specific quarter directory
-    uv run python workflows/ingest_texas.py --quarter "HOT 2512"
+    # Ingest from specific quarter directory only
+    uv run python workflows/ingest_texas.py --quarter "HOT 25 Q3"
 
     # Dry run (parse but don't save)
     uv run python workflows/ingest_texas.py --dry-run
@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import sys
 import os
+from typing import Optional
 
 from loguru import logger
 
@@ -36,14 +37,15 @@ from services.ingestor import repo
 from db.client import init_db, close_db
 
 
-async def show_stats(quarter: str):
+async def show_stats(quarter: Optional[str]):
     """Show statistics about the Texas data without saving."""
     ingester = TexasIngestor()
 
-    hotels, stats = ingester.load_quarterly_data(quarter)
-
-    # Deduplicate
-    unique_hotels = ingester.deduplicate_hotels(hotels)
+    if quarter:
+        hotels, stats = ingester.load_quarterly_data(quarter)
+        unique_hotels = ingester.deduplicate_hotels(hotels)
+    else:
+        unique_hotels, stats = ingester.load_all_quarters()
 
     # Aggregate stats
     by_city = {}
@@ -79,15 +81,17 @@ async def show_stats(quarter: str):
         logger.info(f"  {city}: {count:,}")
 
 
-async def ingest_hotels(quarter: str, dry_run: bool = False):
+async def ingest_hotels(quarter: Optional[str], dry_run: bool = False):
     """Ingest Texas hotel data into database."""
     ingester = TexasIngestor()
 
-    # Load and parse
-    hotels, stats = ingester.load_quarterly_data(quarter)
+    # Load and parse - either single quarter or all quarters
+    if quarter:
+        hotels, stats = ingester.load_quarterly_data(quarter)
+        unique_hotels = ingester.deduplicate_hotels(hotels)
+    else:
+        unique_hotels, stats = ingester.load_all_quarters()
 
-    # Deduplicate
-    unique_hotels = ingester.deduplicate_hotels(hotels)
     logger.info(f"Unique hotels after deduplication: {len(unique_hotels):,}")
 
     if dry_run:
@@ -162,8 +166,8 @@ async def main():
     parser.add_argument(
         "--quarter", "-q",
         type=str,
-        default="HOT 25 Q3",
-        help="Quarter directory name (default: 'HOT 25 Q3')",
+        default=None,
+        help="Quarter directory name (default: load all quarters and merge)",
     )
     parser.add_argument(
         "--dry-run",
@@ -187,7 +191,8 @@ async def main():
         return
 
     # Run ingestion
-    logger.info(f"Starting Texas hotel ingestion from {args.quarter}...")
+    source = args.quarter if args.quarter else "all quarters"
+    logger.info(f"Starting Texas hotel ingestion from {source}...")
 
     hotels, stats = await ingest_hotels(args.quarter, args.dry_run)
 
