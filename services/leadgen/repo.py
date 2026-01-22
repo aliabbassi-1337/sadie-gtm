@@ -181,10 +181,12 @@ async def insert_hotel_booking_engine(
     booking_url: Optional[str] = None,
     detection_method: Optional[str] = None,
     status: int = 1,
+    ota_name: Optional[str] = None,
 ) -> None:
-    """Link hotel to detected booking engine.
+    """Link hotel to detected booking engine or OTA.
 
     status: -1=failed (non-retriable), 1=success (default)
+    ota_name: If hotel uses OTA (e.g., "Booking.com", "Expedia")
     """
     async with get_conn() as conn:
         await queries.insert_hotel_booking_engine(
@@ -194,6 +196,7 @@ async def insert_hotel_booking_engine(
             booking_url=booking_url,
             detection_method=detection_method,
             status=status,
+            ota_name=ota_name,
         )
 
 

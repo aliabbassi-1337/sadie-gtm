@@ -105,21 +105,45 @@ SKIP_CHAIN_DOMAINS = [
     "choicehotels.com", "bestwestern.com", "radissonhotels.com", "accor.com",
 ]
 
+# OTAs - we want to DETECT these, not skip them
+OTA_DOMAINS = {
+    "booking.com": "Booking.com",
+    "expedia.com": "Expedia",
+    "hotels.com": "Hotels.com",
+    "airbnb.com": "Airbnb",
+    "vrbo.com": "VRBO",
+    "agoda.com": "Agoda",
+    "priceline.com": "Priceline",
+    "hotwire.com": "Hotwire",
+    "hostelworld.com": "Hostelworld",
+    "trivago.com": "Trivago",
+    "kayak.com": "Kayak",
+}
+
 SKIP_JUNK_DOMAINS = [
     # Social media
     "facebook.com", "instagram.com", "twitter.com", "youtube.com", "tiktok.com",
     "linkedin.com",
     # Review sites
     "yelp.com", "tripadvisor.com", "google.com",
-    # Major OTAs
-    "booking.com", "expedia.com", "hotels.com", "airbnb.com", "vrbo.com",
-    # Meta-search / aggregators (detected via location mismatch analysis)
-    "bluepillow.com", "vio.com", "wowotrip.com", "trivago.com", "kayak.com",
-    "priceline.com", "agoda.com", "hostelworld.com", "hotwire.com",
-    "decolar.com", "despegar.com", "momondo.com", "skyscanner.com",
+    # Meta-search / aggregators (not OTAs - these don't actually book)
+    "bluepillow.com", "vio.com", "wowotrip.com", "momondo.com", "skyscanner.com",
+    "decolar.com", "despegar.com",
     # Government / parks
     "dnr.", "parks.", "recreation.", ".gov", ".edu", ".mil",
 ]
+
+
+def detect_ota(url: str) -> str:
+    """Check if URL is an OTA and return the OTA name, or empty string."""
+    if not url:
+        return ""
+    url_lower = url.lower()
+    domain = extract_domain(url)
+    for ota_domain, ota_name in OTA_DOMAINS.items():
+        if ota_domain in url_lower or ota_domain in domain:
+            return ota_name
+    return ""
 
 # Non-hotel website domains to skip (retail, food, banks, services, etc.)
 SKIP_NON_HOTEL_DOMAINS = [
@@ -303,6 +327,7 @@ class DetectionResult(BaseModel):
     room_count: str = ""
     detected_location: str = ""  # Location extracted from website content
     error: str = ""
+    ota_name: str = ""  # If hotel uses OTA (e.g., "Booking.com", "Expedia")
 
 
 # =============================================================================
@@ -1153,13 +1178,23 @@ class HotelProcessor:
             result.booking_engine = engine_name or ""
             result.booking_engine_domain = engine_domain
 
-            # Check for junk booking URLs
+            # Check for OTA booking URLs first (we want to report these)
+            if result.booking_url:
+                ota_name = detect_ota(result.booking_url)
+                if ota_name:
+                    self._log(f"  OTA detected: {ota_name}")
+                    result.ota_name = ota_name
+                    result.booking_engine = ""  # Clear engine since they use OTA
+                    result.booking_engine_domain = ""
+                    # Keep booking_url for reference
+                    # Not an error - just a different booking method
+
+            # Check for other junk booking URLs (social media, review sites)
             junk_booking_domains = [
                 "facebook.com", "instagram.com", "twitter.com", "youtube.com",
                 "linkedin.com", "yelp.com", "tripadvisor.com", "google.com",
-                "booking.com", "expedia.com", "hotels.com", "airbnb.com", "vrbo.com",
             ]
-            if result.booking_url:
+            if result.booking_url and not result.ota_name:
                 booking_domain = extract_domain(result.booking_url)
                 if any(junk in booking_domain for junk in junk_booking_domains):
                     self._log(f"  Junk booking URL detected: {booking_domain}")
@@ -1171,7 +1206,10 @@ class HotelProcessor:
             # Note: no_booking_found is not an error - it's a valid outcome
             # Don't set result.error for this case
 
-            self._log(f"  Engine: {result.booking_engine} ({result.booking_engine_domain or 'n/a'})")
+            if result.ota_name:
+                self._log(f"  OTA: {result.ota_name} | URL: {result.booking_url[:60] if result.booking_url else 'n/a'}")
+            else:
+                self._log(f"  Engine: {result.booking_engine} ({result.booking_engine_domain or 'n/a'})")
 
         except PWTimeoutError:
             result.error = "timeout"

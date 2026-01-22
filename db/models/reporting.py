@@ -63,12 +63,58 @@ class EngineCount(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DetectionFunnel(BaseModel):
+    """Comprehensive detection funnel metrics."""
+
+    total_hotels: int = 0
+    with_website: int = 0
+    launched: int = 0
+    detection_attempted: int = 0
+    engine_found: int = 0
+    ota_found: int = 0  # Hotels using OTAs (Booking.com, Expedia, etc.)
+    no_engine_found: int = 0
+    pending_detection: int = 0
+    # Failure breakdown
+    http_403: int = 0  # Bot protection
+    http_429: int = 0  # Rate limited
+    junk_url: int = 0  # Junk booking URL
+    junk_domain: int = 0  # Junk domain
+    non_hotel_name: int = 0  # Non-hotel business
+    timeout_err: int = 0  # Timeout
+    server_5xx: int = 0  # Server errors
+    browser_err: int = 0  # Browser exceptions
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @property
+    def detection_rate(self) -> float:
+        """Detection rate as percentage of attempted."""
+        if self.detection_attempted == 0:
+            return 0.0
+        return 100 * self.engine_found / self.detection_attempted
+
+    @property
+    def website_rate(self) -> float:
+        """Percentage of hotels with websites."""
+        if self.total_hotels == 0:
+            return 0.0
+        return 100 * self.with_website / self.total_hotels
+
+    @property
+    def launch_rate(self) -> float:
+        """Percentage of hotels launched (of those with engines)."""
+        if self.engine_found == 0:
+            return 0.0
+        return 100 * self.launched / self.engine_found
+
+
 class ReportStats(BaseModel):
     """Complete stats for a city/state report."""
 
     location_name: str  # City name or State name
     stats: CityStats
     top_engines: List[EngineCount]
+    funnel: Optional[DetectionFunnel] = None
 
 
 class LaunchableHotel(BaseModel):

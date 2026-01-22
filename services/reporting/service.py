@@ -139,19 +139,30 @@ class Service(IService):
         finally:
             os.unlink(tmp_path)
 
-    async def export_state(self, state: str, country: str = "USA") -> str:
+    async def export_state(
+        self,
+        state: str,
+        country: str = "USA",
+        source_pattern: Optional[str] = None,
+    ) -> str:
         """Generate Excel report for an entire state and upload to S3.
 
         Uses s5cmd for fast upload with fallback to boto3.
+
+        Args:
+            state: State code (e.g., 'FL')
+            country: Country code
+            source_pattern: Filter by source (e.g., 'dbpr%' for DBPR only)
         """
         import subprocess
 
         logger.info(f"Generating state report for {state}")
 
         # Get data from database
-        leads = await repo.get_leads_for_state(state)
-        stats = await repo.get_state_stats(state)
-        top_engines = await repo.get_top_engines_for_state(state)
+        leads = await repo.get_leads_for_state(state, source_pattern=source_pattern)
+        stats = await repo.get_state_stats(state, source_pattern=source_pattern)
+        top_engines = await repo.get_top_engines_for_state(state, source_pattern=source_pattern)
+        funnel = await repo.get_detection_funnel(state, source_pattern=source_pattern)
 
         logger.info(f"Found {len(leads)} leads for {state}")
 
@@ -159,6 +170,7 @@ class Service(IService):
             location_name=state,
             stats=stats,
             top_engines=top_engines,
+            funnel=funnel,
         )
 
         # Generate Excel workbook
@@ -170,7 +182,14 @@ class Service(IService):
             tmp_path = tmp.name
 
         try:
-            s3_uri = f"s3://sadie-gtm/HotelLeadGen/{country}/{state}/{state}.xlsx"
+            # Include source in filename if filtered
+            if source_pattern:
+                source_name = source_pattern.replace('%', '').replace('_', '-')
+                filename = f"{state}_{source_name}.xlsx"
+            else:
+                filename = f"{state}.xlsx"
+
+            s3_uri = f"s3://sadie-gtm/exports/{filename}"
 
             # Try s5cmd first (faster)
             result = subprocess.run(
@@ -182,7 +201,7 @@ class Service(IService):
             if result.returncode != 0:
                 # Fallback to boto3
                 logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
-                s3_key = f"HotelLeadGen/{country}/{state}/{state}.xlsx"
+                s3_key = f"exports/{filename}"
                 s3_uri = upload_file(tmp_path, s3_key)
 
             logger.info(f"Uploaded state report to {s3_uri}")
@@ -190,13 +209,18 @@ class Service(IService):
         finally:
             os.unlink(tmp_path)
 
-    async def export_state_with_cities(self, state: str, country: str = "USA") -> List[str]:
+    async def export_state_with_cities(
+        self,
+        state: str,
+        country: str = "USA",
+        source_pattern: Optional[str] = None,
+    ) -> List[str]:
         """Export single Excel file for entire state.
 
         Uses s5cmd for fast S3 upload.
         """
         # Just delegate to export_state - one file per state
-        uri = await self.export_state(state, country)
+        uri = await self.export_state(state, country, source_pattern)
         return [uri]
 
     def send_slack_notification(
@@ -316,107 +340,199 @@ class Service(IService):
         return f"Nearest: {lead.nearest_customer_name} ({distance:.1f}km)"
 
     def _populate_stats_sheet(self, sheet, report_stats: ReportStats) -> None:
-        """Populate the stats sheet with analytics dashboard."""
+        """Populate the stats sheet with comprehensive analytics dashboard."""
         stats = report_stats.stats
+        funnel = report_stats.funnel
         location = report_stats.location_name.upper()
 
         # Style definitions
         title_font = Font(bold=True, size=14)
         section_font = Font(bold=True, size=11)
-        header_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
 
         # Title
         sheet.cell(row=1, column=1, value=f"LEAD GENERATION DASHBOARD - {location}")
         sheet.cell(row=1, column=1).font = title_font
         sheet.merge_cells("A1:F1")
 
-        # FUNNEL Section (left side)
-        sheet.cell(row=3, column=1, value="FUNNEL")
-        sheet.cell(row=3, column=1).font = section_font
+        row = 3
 
-        # Calculate percentages
-        with_website_pct = (
-            (stats.with_website / stats.total_scraped * 100)
-            if stats.total_scraped > 0
-            else 0
-        )
-        booking_found_pct = (
-            (stats.booking_found / stats.with_website * 100)
-            if stats.with_website > 0
-            else 0
-        )
+        # =====================================================================
+        # DETECTION FUNNEL SECTION
+        # =====================================================================
+        sheet.cell(row=row, column=1, value="DETECTION FUNNEL")
+        sheet.cell(row=row, column=1).font = section_font
+        row += 1
 
-        # Funnel data
-        sheet.cell(row=4, column=1, value="Hotels Scraped")
-        sheet.cell(row=4, column=2, value=stats.total_scraped)
+        if funnel:
+            # Total hotels
+            sheet.cell(row=row, column=1, value="Total Hotels")
+            sheet.cell(row=row, column=2, value=funnel.total_hotels)
+            sheet.cell(row=row, column=3, value="100%")
+            row += 1
 
-        sheet.cell(row=5, column=1, value="With Website")
-        sheet.cell(row=5, column=2, value=f"{stats.with_website} ({with_website_pct:.1f}%)")
+            # With website
+            website_pct = f"{funnel.website_rate:.1f}%" if funnel.total_hotels else "0%"
+            sheet.cell(row=row, column=1, value="  → With Website")
+            sheet.cell(row=row, column=2, value=funnel.with_website)
+            sheet.cell(row=row, column=3, value=website_pct)
+            row += 1
 
-        sheet.cell(row=6, column=1, value="Booking Found")
-        sheet.cell(row=6, column=2, value=f"{stats.booking_found} ({booking_found_pct:.1f}%)")
+            # Detection attempted
+            attempted_pct = f"{100*funnel.detection_attempted/funnel.with_website:.1f}%" if funnel.with_website else "0%"
+            sheet.cell(row=row, column=1, value="    → Detection Attempted")
+            sheet.cell(row=row, column=2, value=funnel.detection_attempted)
+            sheet.cell(row=row, column=3, value=attempted_pct)
+            row += 1
 
-        # LEAD QUALITY Section (right side)
-        sheet.cell(row=3, column=4, value="LEAD QUALITY (of Booking Found)")
-        sheet.cell(row=3, column=4).font = section_font
+            # Engine found (success)
+            detection_rate = f"{funnel.detection_rate:.1f}%"
+            sheet.cell(row=row, column=1, value="      ✓ Engine Found")
+            sheet.cell(row=row, column=2, value=funnel.engine_found)
+            sheet.cell(row=row, column=3, value=detection_rate)
+            row += 1
+
+            # OTA found
+            ota_pct = f"{100*funnel.ota_found/funnel.detection_attempted:.1f}%" if funnel.detection_attempted else "0%"
+            sheet.cell(row=row, column=1, value="      → Uses OTA")
+            sheet.cell(row=row, column=2, value=funnel.ota_found)
+            sheet.cell(row=row, column=3, value=ota_pct)
+            row += 1
+
+            # No engine found
+            no_engine_pct = f"{100*funnel.no_engine_found/funnel.detection_attempted:.1f}%" if funnel.detection_attempted else "0%"
+            sheet.cell(row=row, column=1, value="      ✗ No Engine Found")
+            sheet.cell(row=row, column=2, value=funnel.no_engine_found)
+            sheet.cell(row=row, column=3, value=no_engine_pct)
+            row += 1
+
+            # Pending detection
+            sheet.cell(row=row, column=1, value="    → Pending Detection")
+            sheet.cell(row=row, column=2, value=funnel.pending_detection)
+            sheet.cell(row=row, column=3, value="(not attempted)")
+            row += 1
+
+            # Launched
+            launch_rate = f"{funnel.launch_rate:.1f}%"
+            sheet.cell(row=row, column=1, value="        → Launched")
+            sheet.cell(row=row, column=2, value=funnel.launched)
+            sheet.cell(row=row, column=3, value=launch_rate)
+            row += 2
+
+            # =====================================================================
+            # FAILURE BREAKDOWN SECTION
+            # =====================================================================
+            sheet.cell(row=row, column=1, value="FAILURE BREAKDOWN")
+            sheet.cell(row=row, column=1).font = section_font
+            row += 1
+
+            total_failures = funnel.detection_attempted - funnel.engine_found
+            def pct(val):
+                return f"({100*val/total_failures:.1f}%)" if total_failures > 0 else ""
+
+            sheet.cell(row=row, column=1, value="HTTP 403 (Bot Protection)")
+            sheet.cell(row=row, column=2, value=funnel.http_403)
+            sheet.cell(row=row, column=3, value=pct(funnel.http_403))
+            row += 1
+
+            sheet.cell(row=row, column=1, value="HTTP 429 (Rate Limited)")
+            sheet.cell(row=row, column=2, value=funnel.http_429)
+            sheet.cell(row=row, column=3, value=pct(funnel.http_429))
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Junk Booking URL")
+            sheet.cell(row=row, column=2, value=funnel.junk_url)
+            sheet.cell(row=row, column=3, value=pct(funnel.junk_url))
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Junk Domain")
+            sheet.cell(row=row, column=2, value=funnel.junk_domain)
+            sheet.cell(row=row, column=3, value=pct(funnel.junk_domain))
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Non-Hotel Name")
+            sheet.cell(row=row, column=2, value=funnel.non_hotel_name)
+            sheet.cell(row=row, column=3, value=pct(funnel.non_hotel_name))
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Timeout")
+            sheet.cell(row=row, column=2, value=funnel.timeout_err)
+            sheet.cell(row=row, column=3, value=pct(funnel.timeout_err))
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Server Error (5xx)")
+            sheet.cell(row=row, column=2, value=funnel.server_5xx)
+            sheet.cell(row=row, column=3, value=pct(funnel.server_5xx))
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Browser Exception")
+            sheet.cell(row=row, column=2, value=funnel.browser_err)
+            sheet.cell(row=row, column=3, value=pct(funnel.browser_err))
+            row += 2
+
+            # =====================================================================
+            # TARGET ANALYSIS
+            # =====================================================================
+            sheet.cell(row=row, column=1, value="70% TARGET ANALYSIS")
+            sheet.cell(row=row, column=1).font = section_font
+            row += 1
+
+            target_70 = int(0.7 * funnel.with_website)
+            gap = target_70 - funnel.engine_found
+            pool = funnel.pending_detection + funnel.no_engine_found
+
+            sheet.cell(row=row, column=1, value="Target (70% of with-website)")
+            sheet.cell(row=row, column=2, value=target_70)
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Current Engine Found")
+            sheet.cell(row=row, column=2, value=funnel.engine_found)
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Gap to 70%")
+            sheet.cell(row=row, column=2, value=max(0, gap))
+            row += 1
+
+            sheet.cell(row=row, column=1, value="Available Pool (pending+failed)")
+            sheet.cell(row=row, column=2, value=pool)
+            row += 2
+
+        # =====================================================================
+        # LEAD QUALITY SECTION
+        # =====================================================================
+        sheet.cell(row=row, column=1, value="LEAD QUALITY")
+        sheet.cell(row=row, column=1).font = section_font
+        row += 1
 
         total_with_booking = stats.tier_1_count + stats.tier_2_count
-        tier_1_pct = (
-            (stats.tier_1_count / total_with_booking * 100)
-            if total_with_booking > 0
-            else 0
-        )
-        tier_2_pct = (
-            (stats.tier_2_count / total_with_booking * 100)
-            if total_with_booking > 0
-            else 0
-        )
+        tier_1_pct = f"{stats.tier_1_count / total_with_booking * 100:.1f}%" if total_with_booking else "0%"
+        tier_2_pct = f"{stats.tier_2_count / total_with_booking * 100:.1f}%" if total_with_booking else "0%"
 
-        sheet.cell(row=4, column=4, value="Tier 1 (Known Engine)")
-        sheet.cell(row=4, column=5, value=f"{stats.tier_1_count} ({tier_1_pct:.1f}%)")
+        sheet.cell(row=row, column=1, value="Tier 1 (Known Engine)")
+        sheet.cell(row=row, column=2, value=stats.tier_1_count)
+        sheet.cell(row=row, column=3, value=tier_1_pct)
+        row += 1
 
-        sheet.cell(row=5, column=4, value="Tier 2 (Unknown Engine)")
-        sheet.cell(row=5, column=5, value=f"{stats.tier_2_count} ({tier_2_pct:.1f}%)")
+        sheet.cell(row=row, column=1, value="Tier 2 (Unknown Engine)")
+        sheet.cell(row=row, column=2, value=stats.tier_2_count)
+        sheet.cell(row=row, column=3, value=tier_2_pct)
+        row += 2
 
-        sheet.cell(row=6, column=4, value="Total")
-        sheet.cell(row=6, column=5, value=f"{total_with_booking} (100%)")
+        # =====================================================================
+        # TOP ENGINES SECTION
+        # =====================================================================
+        sheet.cell(row=row, column=1, value="TOP ENGINES")
+        sheet.cell(row=row, column=1).font = section_font
+        row += 1
 
-        # CONTACT INFO Section
-        sheet.cell(row=8, column=1, value="CONTACT INFO")
-        sheet.cell(row=8, column=1).font = section_font
-
-        with_phone_pct = (
-            (stats.with_phone / stats.total_scraped * 100)
-            if stats.total_scraped > 0
-            else 0
-        )
-        with_email_pct = (
-            (stats.with_email / stats.total_scraped * 100)
-            if stats.total_scraped > 0
-            else 0
-        )
-
-        sheet.cell(row=9, column=1, value="With Phone")
-        sheet.cell(row=9, column=2, value=f"{stats.with_phone} ({with_phone_pct:.1f}%)")
-
-        sheet.cell(row=10, column=1, value="With Email")
-        sheet.cell(row=10, column=2, value=f"{stats.with_email} ({with_email_pct:.1f}%)")
-
-        # TOP ENGINES Section (right side)
-        sheet.cell(row=8, column=4, value="TOP ENGINES")
-        sheet.cell(row=8, column=4).font = section_font
-
-        for idx, engine in enumerate(report_stats.top_engines):
-            row = 9 + idx
-            sheet.cell(row=row, column=4, value=engine.engine_name)
-            sheet.cell(row=row, column=5, value=engine.hotel_count)
+        for engine in report_stats.top_engines[:15]:  # Top 15
+            sheet.cell(row=row, column=1, value=engine.engine_name)
+            sheet.cell(row=row, column=2, value=engine.hotel_count)
+            row += 1
 
         # Auto-adjust column widths
-        sheet.column_dimensions["A"].width = 20
-        sheet.column_dimensions["B"].width = 18
-        sheet.column_dimensions["C"].width = 5
-        sheet.column_dimensions["D"].width = 28
-        sheet.column_dimensions["E"].width = 15
+        sheet.column_dimensions["A"].width = 30
+        sheet.column_dimensions["B"].width = 12
+        sheet.column_dimensions["C"].width = 15
 
     # =========================================================================
     # LAUNCHER METHODS
