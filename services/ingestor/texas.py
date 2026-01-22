@@ -254,27 +254,21 @@ class TexasIngestor:
 
     def deduplicate_hotels(self, hotels: List[TexasHotel]) -> List[TexasHotel]:
         """
-        Deduplicate hotels by name + city.
+        Deduplicate by taxpayer_number + location_number (official unique key).
 
-        Keeps the record with the most recent quarter and highest room count.
+        Keeps the most recent quarter's record.
         """
-        seen = {}  # (name, city) -> hotel
+        seen = {}  # (taxpayer_number, location_number) -> hotel
 
         for hotel in hotels:
-            key = (hotel.name.upper(), hotel.city.upper())
+            key = (hotel.taxpayer_number, hotel.location_number)
 
             if key not in seen:
                 seen[key] = hotel
             else:
                 existing = seen[key]
-                # Prefer record with room count
-                if hotel.room_count and not existing.room_count:
-                    seen[key] = hotel
-                # Prefer higher room count
-                elif hotel.room_count and existing.room_count and hotel.room_count > existing.room_count:
-                    seen[key] = hotel
-                # Prefer more recent quarter
-                elif hotel.reporting_quarter and existing.reporting_quarter:
+                # Keep most recent quarter
+                if hotel.reporting_quarter and existing.reporting_quarter:
                     if hotel.reporting_quarter > existing.reporting_quarter:
                         seen[key] = hotel
 
