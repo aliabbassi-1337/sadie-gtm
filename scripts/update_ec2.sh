@@ -1,18 +1,39 @@
 #!/bin/bash
 # Update code and restart workers on all EC2 instances
-# Usage: ./scripts/update_ec2.sh [--restart]
+# Usage: ./scripts/update_ec2.sh [--no-restart]
+#
+# Gets IPs dynamically from AWS - no hardcoded values
 
 set -e
 
-# Read IPs from zshrc
-IPS=$(grep "^alias ip" ~/.zshrc | sed 's/alias ip[0-9]*=//')
-
 KEY="$HOME/.ssh/m3-air.pem"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-RESTART=${1:-"--restart"}  # Default to restart
+RESTART=true
 
-echo "=== Syncing code to all EC2 instances ==="
-echo "Source: $PROJECT_DIR"
+if [ "$1" == "--no-restart" ]; then
+    RESTART=false
+fi
+
+# Get running instance IPs from AWS
+echo "Fetching EC2 instance IPs from AWS..."
+IPS=$(aws ec2 describe-instances \
+    --region eu-north-1 \
+    --filters "Name=instance-state-name,Values=running" "Name=tag:Project,Values=sadie-gtm" \
+    --query 'Reservations[*].Instances[*].PublicIpAddress' \
+    --output text 2>/dev/null)
+
+# Fallback to zshrc if AWS query fails or returns empty
+if [ -z "$IPS" ]; then
+    echo "AWS query returned no results, falling back to ~/.zshrc..."
+    IPS=$(grep "^alias ip" ~/.zshrc | sed 's/alias ip[0-9]*=//' | tr '\n' ' ')
+fi
+
+if [ -z "$IPS" ]; then
+    echo "ERROR: No instance IPs found"
+    exit 1
+fi
+
+echo "Found instances: $IPS"
 echo ""
 
 for ip in $IPS; do
@@ -30,10 +51,36 @@ for ip in $IPS; do
         "$PROJECT_DIR/" ubuntu@$ip:~/sadie-gtm/ 2>/dev/null \
         && echo "  Synced" || { echo "  SYNC FAILED"; continue; }
 
+    # Set up systemd service if it doesn't exist
+    ssh -i "$KEY" -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@$ip '
+        if ! sudo systemctl cat detection &>/dev/null; then
+            echo "  Creating systemd service..."
+            sudo tee /etc/systemd/system/detection.service > /dev/null << EOF
+[Unit]
+Description=Sadie GTM Detection Consumer
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/sadie-gtm
+ExecStart=/home/ubuntu/.local/bin/uv run python workflows/detection_consumer.py --concurrency 8
+Restart=always
+RestartSec=10
+Environment=HOME=/home/ubuntu
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            sudo systemctl daemon-reload
+            sudo systemctl enable detection
+        fi
+    ' 2>/dev/null
+
     # Restart service if requested
-    if [ "$RESTART" == "--restart" ]; then
+    if [ "$RESTART" == "true" ]; then
         ssh -i "$KEY" -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@$ip \
-            "sudo systemctl restart detection 2>/dev/null && echo '  Restarted' || echo '  No systemd service'" 2>/dev/null
+            "sudo systemctl restart detection && echo '  Restarted'" 2>/dev/null || echo "  Restart failed"
     fi
 
     echo ""
