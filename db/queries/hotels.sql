@@ -276,6 +276,38 @@ LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
   AND h.status = 1;
 
+-- name: get_leads_for_state_by_source
+-- Get hotel leads for a state filtered by source pattern
+-- Only returns launched hotels (status=1)
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.category,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE h.state = :state
+  AND h.status = 1
+  AND h.source LIKE :source_pattern;
+
 -- name: get_city_stats^
 -- Get stats for a city (for analytics tab)
 SELECT
@@ -307,6 +339,22 @@ LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state;
 
+-- name: get_state_stats_by_source^
+-- Get stats for a state filtered by source pattern (for analytics tab)
+SELECT
+    COUNT(*) AS total_scraped,
+    COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS with_website,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL AND hbe.status = 1 THEN 1 END) AS booking_found,
+    COUNT(CASE WHEN h.phone_google IS NOT NULL OR h.phone_website IS NOT NULL THEN 1 END) AS with_phone,
+    COUNT(CASE WHEN h.email IS NOT NULL THEN 1 END) AS with_email,
+    COUNT(CASE WHEN be.tier = 1 THEN 1 END) AS tier_1_count,
+    COUNT(CASE WHEN be.tier = 2 THEN 1 END) AS tier_2_count
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.state = :state
+  AND h.source LIKE :source_pattern;
+
 -- name: get_top_engines_for_city
 -- Get top booking engines for a city (launched hotels only)
 SELECT
@@ -330,6 +378,19 @@ JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
   AND h.status = 1
+GROUP BY be.name;
+
+-- name: get_top_engines_for_state_by_source
+-- Get top booking engines for a state filtered by source (launched hotels only)
+SELECT
+    be.name AS engine_name,
+    COUNT(*) AS hotel_count
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.state = :state
+  AND h.status = 1
+  AND h.source LIKE :source_pattern
 GROUP BY be.name;
 
 -- name: get_cities_in_state

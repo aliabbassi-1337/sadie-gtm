@@ -12,10 +12,15 @@ async def get_leads_for_city(city: str, state: str) -> List[HotelLead]:
         return [HotelLead.model_validate(dict(row)) for row in results]
 
 
-async def get_leads_for_state(state: str) -> List[HotelLead]:
-    """Get hotel leads for an entire state."""
+async def get_leads_for_state(state: str, source_pattern: str = None) -> List[HotelLead]:
+    """Get hotel leads for an entire state, optionally filtered by source."""
     async with get_conn() as conn:
-        results = await queries.get_leads_for_state(conn, state=state)
+        if source_pattern:
+            results = await queries.get_leads_for_state_by_source(
+                conn, state=state, source_pattern=source_pattern
+            )
+        else:
+            results = await queries.get_leads_for_state(conn, state=state)
         return [HotelLead.model_validate(dict(row)) for row in results]
 
 
@@ -28,10 +33,15 @@ async def get_city_stats(city: str, state: str) -> CityStats:
         return CityStats()
 
 
-async def get_state_stats(state: str) -> CityStats:
-    """Get analytics stats for a state."""
+async def get_state_stats(state: str, source_pattern: str = None) -> CityStats:
+    """Get analytics stats for a state, optionally filtered by source."""
     async with get_conn() as conn:
-        result = await queries.get_state_stats(conn, state=state)
+        if source_pattern:
+            result = await queries.get_state_stats_by_source(
+                conn, state=state, source_pattern=source_pattern
+            )
+        else:
+            result = await queries.get_state_stats(conn, state=state)
         if result:
             return CityStats.model_validate(dict(result))
         return CityStats()
@@ -44,10 +54,15 @@ async def get_top_engines_for_city(city: str, state: str) -> List[EngineCount]:
         return [EngineCount.model_validate(dict(row)) for row in results]
 
 
-async def get_top_engines_for_state(state: str) -> List[EngineCount]:
-    """Get top booking engines for a state."""
+async def get_top_engines_for_state(state: str, source_pattern: str = None) -> List[EngineCount]:
+    """Get top booking engines for a state, optionally filtered by source."""
     async with get_conn() as conn:
-        results = await queries.get_top_engines_for_state(conn, state=state)
+        if source_pattern:
+            results = await queries.get_top_engines_for_state_by_source(
+                conn, state=state, source_pattern=source_pattern
+            )
+        else:
+            results = await queries.get_top_engines_for_state(conn, state=state)
         return [EngineCount.model_validate(dict(row)) for row in results]
 
 

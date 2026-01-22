@@ -94,8 +94,17 @@ async def export_state_workflow(
     country: str = "USA",
     local_only: bool = False,
     notify: bool = True,
+    source: str = None,
 ) -> list:
-    """Export all cities in a state plus state aggregate."""
+    """Export all cities in a state plus state aggregate.
+
+    Args:
+        state: State code (e.g., 'FL')
+        country: Country code
+        local_only: Save locally instead of S3
+        notify: Send Slack notification
+        source: Filter by source pattern (e.g., 'dbpr%' for DBPR only)
+    """
     await init_db()
 
     try:
@@ -106,9 +115,9 @@ async def export_state_workflow(
             from services.reporting import repo
             from db.models.reporting import ReportStats
 
-            leads = await repo.get_leads_for_state(state)
-            stats = await repo.get_state_stats(state)
-            top_engines = await repo.get_top_engines_for_state(state)
+            leads = await repo.get_leads_for_state(state, source_pattern=source)
+            stats = await repo.get_state_stats(state, source_pattern=source)
+            top_engines = await repo.get_top_engines_for_state(state, source_pattern=source)
 
             report_stats = ReportStats(
                 location_name=state,
@@ -118,14 +127,19 @@ async def export_state_workflow(
 
             workbook = service._create_workbook(leads, report_stats)
 
-            filename = f"{state.replace(' ', '_')}.xlsx"
+            # Include source in filename if filtered
+            if source:
+                source_name = source.replace('%', '').replace('_', '-')
+                filename = f"{state}_{source_name}.xlsx"
+            else:
+                filename = f"{state}.xlsx"
             workbook.save(filename)
-            logger.info(f"Exported to local file: {filename}")
+            logger.info(f"Exported {len(leads)} leads to local file: {filename}")
             return [filename]
         else:
             # Get lead count for notification
             from services.reporting import repo
-            leads = await repo.get_leads_for_state(state)
+            leads = await repo.get_leads_for_state(state, source_pattern=source)
             lead_count = len(leads)
 
             uris = await service.export_state_with_cities(state, country)
@@ -162,6 +176,9 @@ def main():
     # Slack notification (on by default)
     parser.add_argument("--no-notify", action="store_true", help="Disable Slack notification")
 
+    # Source filter
+    parser.add_argument("--source", type=str, help="Filter by source pattern (e.g., 'dbpr%%' for DBPR only)")
+
     args = parser.parse_args()
 
     # Configure logging
@@ -186,6 +203,7 @@ def main():
             args.country,
             args.local,
             not args.no_notify,
+            args.source,
         ))
         print(f"\nExported {len(results)} reports:")
         for r in results:
