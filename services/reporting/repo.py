@@ -2,7 +2,7 @@
 
 from typing import List, Optional
 from db.client import queries, get_conn
-from db.models.reporting import HotelLead, CityStats, EngineCount, LaunchableHotel
+from db.models.reporting import HotelLead, CityStats, EngineCount, LaunchableHotel, DetectionFunnel
 
 
 async def get_leads_for_city(city: str, state: str) -> List[HotelLead]:
@@ -71,6 +71,20 @@ async def get_cities_in_state(state: str) -> List[str]:
     async with get_conn() as conn:
         results = await queries.get_cities_in_state(conn, state=state)
         return [row["city"] for row in results]
+
+
+async def get_detection_funnel(state: str, source_pattern: str = None) -> DetectionFunnel:
+    """Get comprehensive detection funnel metrics for a state."""
+    async with get_conn() as conn:
+        if source_pattern:
+            result = await queries.get_detection_funnel_by_source(
+                conn, state=state, source_pattern=source_pattern
+            )
+        else:
+            result = await queries.get_detection_funnel(conn, state=state)
+        if result:
+            return DetectionFunnel.model_validate(dict(result))
+        return DetectionFunnel()
 
 
 # ============================================================================

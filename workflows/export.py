@@ -142,7 +142,7 @@ async def export_state_workflow(
             leads = await repo.get_leads_for_state(state, source_pattern=source)
             lead_count = len(leads)
 
-            uris = await service.export_state_with_cities(state, country)
+            uris = await service.export_state_with_cities(state, country, source_pattern=source)
             logger.info(f"Exported {len(uris)} reports to S3")
 
             if notify:
