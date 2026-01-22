@@ -124,10 +124,21 @@ async def update_hotel_contact_info(
         )
 
 
+def _normalize_engine_name(name: str) -> str:
+    """Normalize booking engine name for consistency.
+
+    - Strip whitespace
+    - Replace underscores with spaces
+    - Preserve existing casing (brands have specific casing)
+    """
+    return name.strip().replace("_", " ")
+
+
 async def get_booking_engine_by_name(name: str) -> Optional[BookingEngine]:
-    """Get booking engine by name."""
+    """Get booking engine by name (case-insensitive, normalized)."""
+    normalized_name = _normalize_engine_name(name)
     async with get_conn() as conn:
-        result = await queries.get_booking_engine_by_name(conn, name=name)
+        result = await queries.get_booking_engine_by_name(conn, name=normalized_name)
         if result:
             return BookingEngine.model_validate(dict(result))
         return None
@@ -151,11 +162,13 @@ async def insert_booking_engine(
     """Insert a new booking engine and return the ID.
 
     tier=2 means unknown/discovered engine.
+    Name is normalized (underscores to spaces, trimmed).
     """
+    normalized_name = _normalize_engine_name(name)
     async with get_conn() as conn:
         result = await queries.insert_booking_engine(
             conn,
-            name=name,
+            name=normalized_name,
             domains=domains,
             tier=tier,
         )
