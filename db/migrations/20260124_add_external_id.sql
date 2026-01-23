@@ -4,6 +4,10 @@
 --   - dbpr_license: Florida DBPR license number
 --   - google_place: Google Places API place_id
 
+-- Drop old source unique constraint - no longer needed with external_id approach
+-- Source is now just the data source name, not a unique identifier
+ALTER TABLE sadie_gtm.hotels DROP CONSTRAINT IF EXISTS hotels_source_unique;
+
 ALTER TABLE sadie_gtm.hotels ADD COLUMN IF NOT EXISTS external_id TEXT;
 ALTER TABLE sadie_gtm.hotels ADD COLUMN IF NOT EXISTS external_id_type TEXT;
 
