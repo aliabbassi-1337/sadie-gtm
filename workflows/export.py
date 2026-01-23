@@ -4,17 +4,17 @@ Workflow: Export Reports
 Generates Excel reports for hotel leads and uploads to S3.
 
 Usage:
-    # Export a single city
-    uv run python workflows/export.py city --city "Miami Beach" --state FL
+    # Export all FL hotels with booking engines
+    uv run python workflows/export.py --state FL
 
-    # Export all cities in a state plus state aggregate
-    uv run python workflows/export.py state --state FL
+    # Export only DBPR leads (filter by source)
+    uv run python workflows/export.py --state FL --source dbpr
 
-    # Export a city without uploading to S3 (local file only)
-    uv run python workflows/export.py city --city Miami --state FL --local
+    # Export locally without S3 upload
+    uv run python workflows/export.py --state FL --source dbpr --local
 
-    # Export and send Slack notification
-    uv run python workflows/export.py city --city Miami --state FL --notify
+    # Export single city
+    uv run python workflows/export.py --city "Miami Beach" --state FL
 """
 
 import sys
@@ -142,7 +142,7 @@ async def export_state_workflow(
             leads = await repo.get_leads_for_state(state, source_pattern=source)
             lead_count = len(leads)
 
-            uris = await service.export_state_with_cities(state, country)
+            uris = await service.export_state_with_cities(state, country, source_pattern=source)
             logger.info(f"Exported {len(uris)} reports to S3")
 
             if notify:
@@ -177,7 +177,7 @@ def main():
     parser.add_argument("--no-notify", action="store_true", help="Disable Slack notification")
 
     # Source filter
-    parser.add_argument("--source", type=str, help="Filter by source pattern (e.g., 'dbpr%%' for DBPR only)")
+    parser.add_argument("--source", type=str, help="Filter by source (e.g., 'dbpr' for DBPR leads only)")
 
     args = parser.parse_args()
 
@@ -198,12 +198,15 @@ def main():
 
     elif args.state and not args.city:
         # Export all cities in state
+        source = args.source
+        if source and '%' not in source:
+            source = f"%{source}%"
         results = asyncio.run(export_state_workflow(
             args.state,
             args.country,
             args.local,
             not args.no_notify,
-            args.source,
+            source,
         ))
         print(f"\nExported {len(results)} reports:")
         for r in results:

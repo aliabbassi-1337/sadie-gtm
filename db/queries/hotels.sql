@@ -393,6 +393,133 @@ WHERE h.state = :state
   AND h.source LIKE :source_pattern
 GROUP BY be.name;
 
+-- name: get_detection_funnel^
+-- Get comprehensive detection funnel metrics for a state
+-- Used for Stats sheet breakdown
+WITH base AS (
+    SELECT
+        COUNT(*) as total_hotels,
+        COUNT(CASE WHEN website IS NOT NULL AND website != '' THEN 1 END) as with_website,
+        COUNT(CASE WHEN status = 1 THEN 1 END) as launched
+    FROM sadie_gtm.hotels
+    WHERE state = :state
+),
+detection AS (
+    SELECT
+        COUNT(DISTINCT h.id) as detection_attempted,
+        COUNT(DISTINCT CASE WHEN hbe.status = 1 AND hbe.booking_engine_id IS NOT NULL AND be.tier > 0 THEN h.id END) as engine_found,
+        COUNT(DISTINCT CASE WHEN hbe.status = 1 AND hbe.booking_engine_id IS NOT NULL AND be.tier = 0 THEN h.id END) as ota_found,
+        COUNT(DISTINCT CASE WHEN hbe.status != 1 THEN h.id END) as no_engine_found
+    FROM sadie_gtm.hotels h
+    JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+    LEFT JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
+    WHERE h.state = :state
+),
+pending AS (
+    -- Hotels truly pending: status=0, has website, no HBE record yet
+    SELECT COUNT(*) as pending_detection
+    FROM sadie_gtm.hotels h
+    WHERE h.state = :state
+    AND h.status = 0
+    AND h.website IS NOT NULL AND h.website != ''
+    AND NOT EXISTS (SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe WHERE hbe.hotel_id = h.id)
+),
+failures AS (
+    SELECT
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:precheck_failed: HTTP 403%') as http_403,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:precheck_failed: HTTP 429%') as http_429,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:junk_booking_url%') as junk_url,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:junk_domain%') as junk_domain,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:non_hotel_name%') as non_hotel_name,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:precheck_failed: timeout%') as timeout_err,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:precheck_failed: HTTP 5%') as server_5xx,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:exception%') as browser_err
+    FROM sadie_gtm.hotel_booking_engines hbe
+    JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
+    WHERE h.state = :state
+)
+SELECT
+    b.total_hotels,
+    b.with_website,
+    b.launched,
+    d.detection_attempted,
+    d.engine_found,
+    d.ota_found,
+    d.no_engine_found,
+    p.pending_detection,
+    f.http_403,
+    f.http_429,
+    f.junk_url,
+    f.junk_domain,
+    f.non_hotel_name,
+    f.timeout_err,
+    f.server_5xx,
+    f.browser_err
+FROM base b, detection d, pending p, failures f;
+
+-- name: get_detection_funnel_by_source^
+-- Get comprehensive detection funnel metrics for a state filtered by source
+WITH base AS (
+    SELECT
+        COUNT(*) as total_hotels,
+        COUNT(CASE WHEN website IS NOT NULL AND website != '' THEN 1 END) as with_website,
+        COUNT(CASE WHEN status = 1 THEN 1 END) as launched
+    FROM sadie_gtm.hotels
+    WHERE state = :state AND source LIKE :source_pattern
+),
+detection AS (
+    SELECT
+        COUNT(DISTINCT h.id) as detection_attempted,
+        COUNT(DISTINCT CASE WHEN hbe.status = 1 AND hbe.booking_engine_id IS NOT NULL AND be.tier > 0 THEN h.id END) as engine_found,
+        COUNT(DISTINCT CASE WHEN hbe.status = 1 AND hbe.booking_engine_id IS NOT NULL AND be.tier = 0 THEN h.id END) as ota_found,
+        COUNT(DISTINCT CASE WHEN hbe.status != 1 THEN h.id END) as no_engine_found
+    FROM sadie_gtm.hotels h
+    JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+    LEFT JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
+    WHERE h.state = :state AND h.source LIKE :source_pattern
+),
+pending AS (
+    -- Hotels truly pending: status=0, has website, no HBE record yet
+    SELECT COUNT(*) as pending_detection
+    FROM sadie_gtm.hotels h
+    WHERE h.state = :state AND h.source LIKE :source_pattern
+    AND h.status = 0
+    AND h.website IS NOT NULL AND h.website != ''
+    AND NOT EXISTS (SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe WHERE hbe.hotel_id = h.id)
+),
+failures AS (
+    SELECT
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:precheck_failed: HTTP 403%') as http_403,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:precheck_failed: HTTP 429%') as http_429,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:junk_booking_url%') as junk_url,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:junk_domain%') as junk_domain,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:non_hotel_name%') as non_hotel_name,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:precheck_failed: timeout%') as timeout_err,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:precheck_failed: HTTP 5%') as server_5xx,
+        COUNT(*) FILTER (WHERE detection_method LIKE 'error:exception%') as browser_err
+    FROM sadie_gtm.hotel_booking_engines hbe
+    JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
+    WHERE h.state = :state AND h.source LIKE :source_pattern
+)
+SELECT
+    b.total_hotels,
+    b.with_website,
+    b.launched,
+    d.detection_attempted,
+    d.engine_found,
+    d.ota_found,
+    d.no_engine_found,
+    p.pending_detection,
+    f.http_403,
+    f.http_429,
+    f.junk_url,
+    f.junk_domain,
+    f.non_hotel_name,
+    f.timeout_err,
+    f.server_5xx,
+    f.browser_err
+FROM base b, detection d, pending p, failures f;
+
 -- name: get_cities_in_state
 -- Get all cities in a state that have launched hotels
 SELECT DISTINCT city

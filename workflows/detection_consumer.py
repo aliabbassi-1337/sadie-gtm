@@ -266,7 +266,7 @@ Examples:
 
 Environment:
   SQS_DETECTION_QUEUE_URL - Required. The SQS queue URL.
-  AWS_REGION - Optional. Defaults to us-east-1.
+  AWS_REGION - Optional. Defaults to eu-north-1.
         """
     )
 

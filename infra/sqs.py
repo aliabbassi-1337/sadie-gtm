@@ -12,7 +12,7 @@ def get_sqs_client():
     """Get SQS client using environment credentials."""
     return boto3.client(
         "sqs",
-        region_name=os.getenv("AWS_REGION", "us-east-1"),
+        region_name=os.getenv("AWS_REGION", "eu-north-1"),
     )
 
 

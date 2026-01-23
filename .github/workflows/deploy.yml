@@ -1,0 +1,36 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/key.pem
+          chmod 600 ~/.ssh/key.pem
+
+      - name: Deploy to EC2 instances
+        run: |
+          IPS="13.61.104.62 13.60.49.110 13.51.72.58 16.171.195.105 13.60.28.77 13.53.197.203 51.20.191.25"
+
+          for ip in $IPS; do
+            echo "=== Deploying to $ip ==="
+
+            ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip '
+              cd ~/sadie-gtm
+              git pull origin main
+              sudo systemctl restart detection
+            ' || echo "Failed: $ip"
+
+            echo "Done with $ip"
+          done
+
+          echo "=== Deployment complete ==="
+
