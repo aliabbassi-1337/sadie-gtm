@@ -206,42 +206,46 @@ class Service(IService):
         }
 
     async def _save_texas_hotels(self, hotels: List[TexasHotel]) -> int:
-        """Save Texas hotels to hotels table."""
+        """Save Texas hotels to hotels table using batch inserts."""
+        logger.info(f"Starting batch insert of {len(hotels)} hotels...")
+
+        BATCH_SIZE = 500
         saved = 0
-        logger.info(f"Starting to save {len(hotels)} hotels to database...")
 
-        for i, hotel in enumerate(hotels):
-            if (i + 1) % 500 == 0:
-                logger.info(f"  Progress: {i + 1}/{len(hotels)} ({saved} saved)")
+        for batch_start in range(0, len(hotels), BATCH_SIZE):
+            batch = hotels[batch_start:batch_start + BATCH_SIZE]
 
-            try:
-                # Use tax ID as unique source identifier for dedup
-                source_id = f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}"
-
-                hotel_id = await repo.insert_hotel(
-                    name=hotel.name,
-                    source=source_id,
-                    status=HOTEL_STATUS_PENDING,
-                    address=hotel.address,
-                    city=hotel.city,
-                    state=hotel.state,
-                    country="USA",
-                    phone=hotel.phone,
-                    category="hotel",
+            # Prepare batch data
+            records = [
+                (
+                    hotel.name,
+                    f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}",
+                    HOTEL_STATUS_PENDING,
+                    hotel.address,
+                    hotel.city,
+                    hotel.state,
+                    "USA",
+                    hotel.phone,
+                    "hotel",
                 )
-                if hotel_id:
-                    saved += 1
+                for hotel in batch
+            ]
 
-                    # Insert room count if available
-                    if hotel.room_count:
-                        await repo.insert_room_count(
-                            hotel_id=hotel_id,
-                            room_count=hotel.room_count,
-                            source="texas_hot",
-                        )
+            # Batch insert via repo layer
+            batch_saved = await repo.batch_insert_hotels(records)
+            saved += batch_saved
 
-            except Exception as e:
-                logger.debug(f"Failed to save {hotel.name}: {e}")
-                continue
+            logger.info(f"  Batch {batch_start//BATCH_SIZE + 1}: {batch_start + len(batch)}/{len(hotels)} processed")
 
+        # Batch insert room counts
+        logger.info("Inserting room counts...")
+        room_records = [
+            (hotel.room_count, f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}", "texas_hot")
+            for hotel in hotels if hotel.room_count
+        ]
+
+        if room_records:
+            await repo.batch_insert_room_counts(room_records)
+
+        logger.info(f"Batch insert complete: {saved} hotels processed")
         return saved
