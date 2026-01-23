@@ -216,7 +216,6 @@ class Service(IService):
 
         BATCH_SIZE = 500
         saved = 0
-        external_ids_saved = 0
 
         for batch_start in range(0, len(hotels), BATCH_SIZE):
             batch = hotels[batch_start:batch_start + BATCH_SIZE]
@@ -226,7 +225,7 @@ class Service(IService):
             records = [
                 (
                     hotel.name,
-                    "texas_hot",  # Clean source category
+                    "texas_hot",
                     HOTEL_STATUS_PENDING,
                     hotel.address,
                     hotel.city,
@@ -234,17 +233,14 @@ class Service(IService):
                     "USA",
                     hotel.phone,
                     "hotel",
-                    f"{hotel.taxpayer_number}:{hotel.location_number}",  # external_id
+                    f"{hotel.taxpayer_number}:{hotel.location_number}",
                 )
                 for hotel in batch
             ]
 
             # Batch insert via repo layer
-            batch_saved, batch_external = await repo.batch_insert_hotels_with_external_ids(
-                records, id_type="texas_hot"
-            )
+            batch_saved = await repo.batch_insert_hotels(records, external_id_type="texas_hot")
             saved += batch_saved
-            external_ids_saved += batch_external
 
             logger.info(f"  Batch {batch_start//BATCH_SIZE + 1}: {batch_start + len(batch)}/{len(hotels)} processed")
 
@@ -256,7 +252,7 @@ class Service(IService):
         ]
 
         if room_records:
-            await repo.batch_insert_room_counts_by_external_id(room_records, id_type="texas_hot")
+            await repo.batch_insert_room_counts(room_records, external_id_type="texas_hot")
 
-        logger.info(f"Batch insert complete: {saved} hotels, {external_ids_saved} external IDs")
+        logger.info(f"Batch insert complete: {saved} hotels")
         return saved

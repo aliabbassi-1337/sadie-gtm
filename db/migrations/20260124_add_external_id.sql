@@ -1,44 +1,34 @@
--- Create hotel_external_ids table for source-specific deduplication
--- Stores external identifiers from various sources:
---   - google_place: Google Places API place_id
+-- Add external_id columns for source-specific deduplication
+-- Stores the primary external identifier from the data source:
 --   - texas_hot: "taxpayer_number:location_number"
 --   - dbpr_license: Florida DBPR license number
---   - booking_engine: Booking engine's hotel ID (from reverse lookup)
+--   - google_place: Google Places API place_id
 
-CREATE TABLE IF NOT EXISTS sadie_gtm.hotel_external_ids (
-  id SERIAL PRIMARY KEY,
-  hotel_id INT NOT NULL REFERENCES sadie_gtm.hotels(id) ON DELETE CASCADE,
-  id_type TEXT NOT NULL,
-  external_id TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(id_type, external_id)  -- prevents same external ID pointing to different hotels
-);
+ALTER TABLE sadie_gtm.hotels ADD COLUMN IF NOT EXISTS external_id TEXT;
+ALTER TABLE sadie_gtm.hotels ADD COLUMN IF NOT EXISTS external_id_type TEXT;
 
-CREATE INDEX IF NOT EXISTS idx_hotel_external_ids_hotel
-ON sadie_gtm.hotel_external_ids(hotel_id);
-
-CREATE INDEX IF NOT EXISTS idx_hotel_external_ids_lookup
-ON sadie_gtm.hotel_external_ids(id_type, external_id);
-
--- Migrate existing google_place_id from hotels table
-INSERT INTO sadie_gtm.hotel_external_ids (hotel_id, id_type, external_id)
-SELECT id, 'google_place', google_place_id
-FROM sadie_gtm.hotels
-WHERE google_place_id IS NOT NULL
-ON CONFLICT (id_type, external_id) DO NOTHING;
+-- Partial unique index: enforces uniqueness when external_id is present
+-- Hotels without external_id use name+city dedup in application code
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hotels_external_id
+ON sadie_gtm.hotels(external_id_type, external_id)
+WHERE external_id IS NOT NULL;
 
 -- Migrate existing Texas hotels: extract external_id from compound source
--- e.g., "texas_hot:10105515737:00006" -> external_id="10105515737:00006"
-INSERT INTO sadie_gtm.hotel_external_ids (hotel_id, id_type, external_id)
-SELECT id, 'texas_hot', SUBSTRING(source FROM 'texas_hot:(.+)')
-FROM sadie_gtm.hotels
-WHERE source LIKE 'texas_hot:%'
-ON CONFLICT (id_type, external_id) DO NOTHING;
-
--- Clean up Texas source strings to just category
+-- e.g., "texas_hot:10105515737:00006" -> external_id="10105515737:00006", source="texas_hot"
 UPDATE sadie_gtm.hotels
-SET source = 'texas_hot'
+SET
+    external_id = SUBSTRING(source FROM 'texas_hot:(.+)'),
+    external_id_type = 'texas_hot',
+    source = 'texas_hot'
 WHERE source LIKE 'texas_hot:%';
 
--- Drop google_place_id column from hotels (now in external_ids table)
+-- Migrate google_place_id to external_id (if column exists)
+UPDATE sadie_gtm.hotels
+SET
+    external_id = google_place_id,
+    external_id_type = 'google_place'
+WHERE google_place_id IS NOT NULL
+  AND external_id IS NULL;
+
+-- Drop google_place_id column (now redundant)
 ALTER TABLE sadie_gtm.hotels DROP COLUMN IF EXISTS google_place_id;
