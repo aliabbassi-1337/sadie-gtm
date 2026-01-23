@@ -133,37 +133,40 @@ class Service(IService):
         }
 
     async def _save_dbpr_licenses(self, licenses: List[DBPRLicense]) -> int:
-        """Save DBPR licenses to hotels table."""
+        """Save DBPR licenses to hotels table using batch inserts."""
+        logger.info(f"Starting batch insert of {len(licenses)} licenses...")
+
+        BATCH_SIZE = 500
         saved = 0
 
-        for i, lic in enumerate(licenses):
-            if (i + 1) % 1000 == 0:
-                logger.info(f"  Saving... {i + 1}/{len(licenses)}")
+        for batch_start in range(0, len(licenses), BATCH_SIZE):
+            batch = licenses[batch_start:batch_start + BATCH_SIZE]
 
-            try:
-                # Clean source category (e.g., "dbpr_hotel", "dbpr_motel")
-                source = f"dbpr_{lic.license_type.lower().replace(' ', '_').replace('-', '_')}"
-
-                # Insert with external_id (license number) for dedup
-                result = await repo.insert_hotel(
-                    name=lic.business_name or lic.licensee_name,
-                    source=source,
-                    external_id=lic.license_number,
-                    id_type="dbpr_license",
-                    status=HOTEL_STATUS_PENDING,
-                    address=lic.address,
-                    city=lic.city,
-                    state=lic.state,
-                    phone=lic.phone,
+            # Prepare batch data with external_id as last element
+            # (name, source, status, address, city, state, country, phone, category, external_id)
+            records = [
+                (
+                    lic.business_name or lic.licensee_name,
+                    "dbpr_license",
+                    HOTEL_STATUS_PENDING,
+                    lic.address,
+                    lic.city,
+                    lic.state or "FL",
+                    "USA",
+                    lic.phone,
+                    lic.license_type.lower(),  # hotel, motel, etc.
+                    lic.license_number,
                 )
-                if result:
-                    saved += 1
+                for lic in batch
+            ]
 
-            except Exception as e:
-                # Likely duplicate - skip silently
-                logger.debug(f"Failed to save {lic.license_number}: {e}")
-                continue
+            # Batch insert via repo layer
+            batch_saved = await repo.batch_insert_hotels(records, external_id_type="dbpr_license")
+            saved += batch_saved
 
+            logger.info(f"  Batch {batch_start//BATCH_SIZE + 1}: {batch_start + len(batch)}/{len(licenses)} processed, {saved} new")
+
+        logger.info(f"Batch insert complete: {saved} new hotels")
         return saved
 
     def get_dbpr_license_types(self) -> Dict[str, str]:

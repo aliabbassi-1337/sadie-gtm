@@ -37,7 +37,7 @@ from loguru import logger
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.ingestor import IngestorService
+from services.ingestor import Service as IngestorService
 from services.ingestor.dbpr import LICENSE_TYPES, RANK_CODES, DBPRIngestor
 from db.client import init_db
 
