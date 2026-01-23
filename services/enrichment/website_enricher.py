@@ -174,7 +174,7 @@ CHAIN_NAME_PATTERNS = [
     "clarion", "econo lodge", "rodeway", "mainstay", "suburban",
     "ascend", "cambria",
     # Best Western
-    "best western", "glo", "surestay", "aiden", "sadie",
+    "best western", "glo", "surestay", "aiden",
     # Radisson
     "radisson", "park plaza", "park inn", "country inn",
     # Accor
