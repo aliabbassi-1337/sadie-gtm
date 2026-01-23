@@ -4,6 +4,7 @@ Ingestor Repository - Database operations for ingested data.
 
 from typing import Optional
 from db.client import queries, get_conn
+from db.queries.batch import BATCH_INSERT_HOTELS, BATCH_INSERT_ROOM_COUNTS
 
 
 async def insert_hotel(
@@ -109,11 +110,7 @@ async def batch_insert_hotels(records: list[tuple]) -> int:
         Number of records processed
     """
     async with get_conn() as conn:
-        await conn.executemany('''
-            INSERT INTO sadie_gtm.hotels (name, source, status, address, city, state, country, phone_google, category)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (source) DO NOTHING
-        ''', records)
+        await conn.executemany(BATCH_INSERT_HOTELS, records)
         return len(records)
 
 
@@ -129,11 +126,5 @@ async def batch_insert_room_counts(records: list[tuple]) -> int:
         Number of records processed
     """
     async with get_conn() as conn:
-        await conn.executemany('''
-            INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status)
-            SELECT h.id, $1, $3, 1
-            FROM sadie_gtm.hotels h
-            WHERE h.source = $2
-            ON CONFLICT (hotel_id) DO UPDATE SET room_count = EXCLUDED.room_count
-        ''', records)
+        await conn.executemany(BATCH_INSERT_ROOM_COUNTS, records)
         return len(records)
