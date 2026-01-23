@@ -8,12 +8,13 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: Sadie GTM Ec2
 
     steps:
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/key.pem
+          echo "${{ secrets.EC2_SSH_KEY }}" | base64 -d > ~/.ssh/key.pem
           chmod 600 ~/.ssh/key.pem
 
       - name: Deploy to EC2 instances

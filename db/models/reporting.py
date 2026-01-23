@@ -69,6 +69,7 @@ class ReportStats(BaseModel):
     location_name: str  # City name or State name
     stats: CityStats
     top_engines: List[EngineCount]
+    funnel: Optional[dict] = None
 
 
 class LaunchableHotel(BaseModel):

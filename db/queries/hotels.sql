@@ -110,15 +110,6 @@ WHERE h.status = 0
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
-  AND LOWER(h.website) NOT LIKE '%marriott.com%'
-  AND LOWER(h.website) NOT LIKE '%hilton.com%'
-  AND LOWER(h.website) NOT LIKE '%ihg.com%'
-  AND LOWER(h.website) NOT LIKE '%hyatt.com%'
-  AND LOWER(h.website) NOT LIKE '%wyndham.com%'
-  AND LOWER(h.website) NOT LIKE '%choicehotels.com%'
-  AND LOWER(h.website) NOT LIKE '%bestwestern.com%'
-  AND LOWER(h.website) NOT LIKE '%radissonhotels.com%'
-  AND LOWER(h.website) NOT LIKE '%accor.com%'
 LIMIT :limit;
 
 -- name: get_hotels_pending_detection_by_categories
@@ -151,15 +142,6 @@ WHERE h.status = 0
   AND h.website IS NOT NULL
   AND h.website != ''
   AND h.category = ANY(:categories)
-  AND LOWER(h.website) NOT LIKE '%marriott.com%'
-  AND LOWER(h.website) NOT LIKE '%hilton.com%'
-  AND LOWER(h.website) NOT LIKE '%ihg.com%'
-  AND LOWER(h.website) NOT LIKE '%hyatt.com%'
-  AND LOWER(h.website) NOT LIKE '%wyndham.com%'
-  AND LOWER(h.website) NOT LIKE '%choicehotels.com%'
-  AND LOWER(h.website) NOT LIKE '%bestwestern.com%'
-  AND LOWER(h.website) NOT LIKE '%radissonhotels.com%'
-  AND LOWER(h.website) NOT LIKE '%accor.com%'
 LIMIT :limit;
 
 -- name: update_hotel_status!
@@ -702,4 +684,85 @@ UPDATE sadie_gtm.hotels
 SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
+
+-- ============================================================================
+-- RETRY QUERIES
+-- ============================================================================
+
+-- name: get_hotels_for_retry
+-- Get hotels with retryable errors (timeout, 5xx, browser exceptions)
+SELECT
+    h.id,
+    h.name,
+    h.website,
+    h.city,
+    h.state,
+    hbe.detection_method
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.state = :state
+  AND (
+    hbe.detection_method LIKE 'error:precheck_failed: timeout%'
+    OR hbe.detection_method LIKE 'error:precheck_failed: HTTP 5%'
+    OR hbe.detection_method LIKE 'error:exception%'
+  )
+LIMIT :limit;
+
+-- name: get_hotels_for_retry_by_source
+-- Get hotels with retryable errors, filtered by source
+SELECT
+    h.id,
+    h.name,
+    h.website,
+    h.city,
+    h.state,
+    hbe.detection_method
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.state = :state
+  AND h.source LIKE :source_pattern
+  AND (
+    hbe.detection_method LIKE 'error:precheck_failed: timeout%'
+    OR hbe.detection_method LIKE 'error:precheck_failed: HTTP 5%'
+    OR hbe.detection_method LIKE 'error:exception%'
+  )
+LIMIT :limit;
+
+-- name: delete_hbe_for_retry!
+-- Delete HBE record to allow retry
+DELETE FROM sadie_gtm.hotel_booking_engines
+WHERE hotel_id = :hotel_id;
+
+-- name: delete_hbe_batch_for_retry*!
+-- Delete HBE records for batch retry
+DELETE FROM sadie_gtm.hotel_booking_engines
+WHERE hotel_id = ANY(:hotel_ids);
+
+-- name: reset_hotels_for_retry*!
+-- Reset hotel status to 0 (pending) for retry
+UPDATE sadie_gtm.hotels
+SET status = 0, updated_at = CURRENT_TIMESTAMP
+WHERE id = ANY(:hotel_ids);
+
+-- ============================================================================
+-- BATCH INSERT QUERIES (for Texas/bulk ingestion)
+-- ============================================================================
+-- Note: These are used with conn.executemany() which requires positional params ($1, $2, etc.)
+-- The repo layer handles the executemany call directly
+
+-- name: batch_insert_hotels_sql
+-- SQL for batch inserting hotels (used with executemany in repo layer)
+-- Params: name, source, status, address, city, state, country, phone, category
+INSERT INTO sadie_gtm.hotels (name, source, status, address, city, state, country, phone_google, category)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (source) DO NOTHING;
+
+-- name: batch_insert_room_counts_sql
+-- SQL for batch inserting room counts (used with executemany in repo layer)
+-- Params: room_count, source (to lookup hotel_id), source_name
+INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status)
+SELECT h.id, $1, $3, 1
+FROM sadie_gtm.hotels h
+WHERE h.source = $2
+ON CONFLICT (hotel_id) DO UPDATE SET room_count = EXCLUDED.room_count;
 

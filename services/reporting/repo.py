@@ -73,6 +73,22 @@ async def get_cities_in_state(state: str) -> List[str]:
         return [row["city"] for row in results]
 
 
+async def get_detection_funnel(state: str) -> dict:
+    """Get detection funnel stats for a state."""
+    async with get_conn() as conn:
+        result = await queries.get_detection_funnel(conn, state=state)
+        return dict(result) if result else {}
+
+
+async def get_detection_funnel_by_source(state: str, source_pattern: str) -> dict:
+    """Get detection funnel stats for a state filtered by source."""
+    async with get_conn() as conn:
+        result = await queries.get_detection_funnel_by_source(
+            conn, state=state, source_pattern=source_pattern
+        )
+        return dict(result) if result else {}
+
+
 # ============================================================================
 # LAUNCHER FUNCTIONS
 # ============================================================================
