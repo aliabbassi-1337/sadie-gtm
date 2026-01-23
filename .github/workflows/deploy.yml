@@ -10,9 +10,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
@@ -46,20 +43,11 @@ jobs:
           for ip in $IPS; do
             echo "=== Deploying to $ip ==="
 
-            # Rsync code (exclude .venv, .git, .env, etc.)
-            rsync -avz --delete \
-              --exclude '.venv' \
-              --exclude '.git' \
-              --exclude '__pycache__' \
-              --exclude '*.pyc' \
-              --exclude '.env' \
-              --exclude '*.xlsx' \
-              -e "ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no" \
-              ./ ubuntu@$ip:~/sadie-gtm/ || { echo "Rsync failed for $ip"; continue; }
-
-            # Restart service
-            ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip \
-              "sudo systemctl restart detection" || echo "Restart failed for $ip"
+            ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip '
+              cd ~/sadie-gtm
+              git pull origin main
+              sudo systemctl restart detection
+            ' || echo "Failed: $ip"
 
             echo "Done with $ip"
           done
