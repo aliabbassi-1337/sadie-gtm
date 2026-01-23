@@ -144,7 +144,10 @@ class Service(IService):
         leads = await repo.get_leads_for_state(state, source_pattern=source_pattern)
         stats = await repo.get_state_stats(state, source_pattern=source_pattern)
         top_engines = await repo.get_top_engines_for_state(state, source_pattern=source_pattern)
-        funnel = await repo.get_detection_funnel(state, source_pattern=source_pattern)
+        if source_pattern:
+            funnel = await repo.get_detection_funnel_by_source(state, source_pattern)
+        else:
+            funnel = await repo.get_detection_funnel(state)
 
         logger.info(f"Found {len(leads)} leads for {state}")
 

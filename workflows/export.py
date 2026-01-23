@@ -132,7 +132,7 @@ def main():
             args.country,
             not args.no_notify,
         ))
-        print(f"\nExported: {result}")
+        logger.info(f"Exported: {result}")
 
     elif args.state and not args.city:
         # Export all cities in state
@@ -145,7 +145,7 @@ def main():
             not args.no_notify,
             source,
         ))
-        print(f"\nExported: {result}")
+        logger.info(f"Exported: {result}")
 
     else:
         parser.error("Provide --city and --state, or just --state for full state export")

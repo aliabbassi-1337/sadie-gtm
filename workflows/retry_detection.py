@@ -72,8 +72,10 @@ async def retry_workflow(
         if dry_run:
             logger.info("Dry run - not deleting HBE records")
             logger.info("Sample hotels:")
-            for h in hotels[:10]:
-                logger.info(f"  {h['id']}: {h['name']} - {h['detection_method'][:60]}")
+            for h in hotels[:20]:
+                logger.info(f"  {h['id']}: {h['name']}")
+                logger.info(f"       Website: {h['website']}")
+                logger.info(f"       Error: {h['detection_method'][:80]}")
             return 0
 
         # Delete HBE records and reset status to allow retry
