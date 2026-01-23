@@ -36,14 +36,6 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def export_state_with_cities(self, state: str, country: str = "USA") -> List[str]:
-        """Export all cities in a state plus state aggregate.
-
-        Returns list of S3 URIs for all uploaded reports.
-        """
-        pass
-
-    @abstractmethod
     def send_slack_notification(
         self,
         location: str,
@@ -194,15 +186,6 @@ class Service(IService):
             return s3_uri
         finally:
             os.unlink(tmp_path)
-
-    async def export_state_with_cities(self, state: str, country: str = "USA", source_pattern: str = None) -> List[str]:
-        """Export single Excel file for entire state.
-
-        Uses s5cmd for fast S3 upload.
-        """
-        # Just delegate to export_state - one file per state
-        uri = await self.export_state(state, country, source_pattern=source_pattern)
-        return [uri]
 
     def send_slack_notification(
         self,
