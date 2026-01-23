@@ -273,7 +273,7 @@ class Service(IService):
 
         if not hotels:
             log("No hotels found needing website enrichment")
-            return {"total": 0, "found": 0, "not_found": 0, "errors": 0}
+            return {"total": 0, "found": 0, "not_found": 0, "errors": 0, "api_calls": 0}
 
         log(f"Claimed {len(hotels)} hotels for website enrichment (concurrency={concurrency})")
 
