@@ -1,7 +1,7 @@
 """Tests for ingestor repository with external_id functionality."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 
 class TestGetHotelByExternalId:
