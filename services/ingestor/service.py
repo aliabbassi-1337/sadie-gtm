@@ -141,10 +141,15 @@ class Service(IService):
                 logger.info(f"  Saving... {i + 1}/{len(licenses)}")
 
             try:
-                # Insert (will skip duplicates based on name+city)
+                # Clean source category (e.g., "dbpr_hotel", "dbpr_motel")
+                source = f"dbpr_{lic.license_type.lower().replace(' ', '_').replace('-', '_')}"
+
+                # Insert with external_id (license number) for dedup
                 result = await repo.insert_hotel(
                     name=lic.business_name or lic.licensee_name,
-                    source=f"dbpr_{lic.license_type.lower().replace(' ', '_').replace('-', '_')}",
+                    source=source,
+                    external_id=lic.license_number,
+                    id_type="dbpr_license",
                     status=HOTEL_STATUS_PENDING,
                     address=lic.address,
                     city=lic.city,
