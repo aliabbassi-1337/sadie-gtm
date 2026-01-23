@@ -40,12 +40,7 @@ async def export_city_workflow(
 
     try:
         service = Service()
-        from services.reporting import repo
-
-        leads = await repo.get_leads_for_city(city, state)
-        lead_count = len(leads)
-
-        s3_uri = await service.export_city(city, state, country)
+        s3_uri, lead_count = await service.export_city(city, state, country)
         logger.info(f"Exported to S3: {s3_uri}")
 
         if notify:
@@ -79,12 +74,7 @@ async def export_state_workflow(
 
     try:
         service = Service()
-        from services.reporting import repo
-
-        leads = await repo.get_leads_for_state(state, source_pattern=source)
-        lead_count = len(leads)
-
-        s3_uri = await service.export_state(state, country, source_pattern=source)
+        s3_uri, lead_count = await service.export_state(state, country, source_pattern=source)
         logger.info(f"Exported to S3: {s3_uri}")
 
         if notify:

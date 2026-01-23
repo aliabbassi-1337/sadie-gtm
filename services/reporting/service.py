@@ -20,18 +20,20 @@ class IService(ABC):
     """Reporting Service - Generate and deliver reports to stakeholders."""
 
     @abstractmethod
-    async def export_city(self, city: str, state: str, country: str = "USA") -> str:
+    async def export_city(self, city: str, state: str, country: str = "USA") -> tuple[str, int]:
         """Generate Excel report for a city and upload to S3.
 
-        Returns S3 URI of uploaded report.
+        Returns:
+            Tuple of (s3_uri, lead_count)
         """
         pass
 
     @abstractmethod
-    async def export_state(self, state: str, country: str = "USA") -> str:
+    async def export_state(self, state: str, country: str = "USA", source_pattern: str = None) -> tuple[str, int]:
         """Generate Excel report for an entire state and upload to S3.
 
-        Returns S3 URI of uploaded report.
+        Returns:
+            Tuple of (s3_uri, lead_count)
         """
         pass
 
@@ -99,8 +101,12 @@ class Service(IService):
     def __init__(self) -> None:
         pass
 
-    async def export_city(self, city: str, state: str, country: str = "USA") -> str:
-        """Generate Excel report for a city and upload to S3."""
+    async def export_city(self, city: str, state: str, country: str = "USA") -> tuple[str, int]:
+        """Generate Excel report for a city and upload to S3.
+
+        Returns:
+            Tuple of (s3_uri, lead_count)
+        """
         logger.info(f"Generating report for {city}, {state}")
 
         # Get data from database
@@ -127,14 +133,17 @@ class Service(IService):
             s3_key = f"HotelLeadGen/{country}/{state}/{city}.xlsx"
             s3_uri = upload_file(tmp_path, s3_key)
             logger.info(f"Uploaded city report to {s3_uri}")
-            return s3_uri
+            return s3_uri, len(leads)
         finally:
             os.unlink(tmp_path)
 
-    async def export_state(self, state: str, country: str = "USA", source_pattern: str = None) -> str:
+    async def export_state(self, state: str, country: str = "USA", source_pattern: str = None) -> tuple[str, int]:
         """Generate Excel report for an entire state and upload to S3.
 
         Uses s5cmd for fast upload with fallback to boto3.
+
+        Returns:
+            Tuple of (s3_uri, lead_count)
         """
         import subprocess
 
@@ -188,7 +197,7 @@ class Service(IService):
                 s3_uri = upload_file(tmp_path, s3_key)
 
             logger.info(f"Uploaded state report to {s3_uri}")
-            return s3_uri
+            return s3_uri, len(leads)
         finally:
             os.unlink(tmp_path)
 
