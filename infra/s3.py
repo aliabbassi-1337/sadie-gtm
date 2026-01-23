@@ -12,7 +12,7 @@ def get_s3_client():
     """Get S3 client using environment credentials."""
     return boto3.client(
         "s3",
-        region_name=os.getenv("AWS_REGION", "us-east-1"),
+        region_name=os.getenv("AWS_REGION", "eu-north-1"),
     )
 
 

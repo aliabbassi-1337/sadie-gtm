@@ -51,11 +51,16 @@ for ip in $IPS; do
         "$PROJECT_DIR/" ubuntu@$ip:~/sadie-gtm/ 2>/dev/null \
         && echo "  Synced" || { echo "  SYNC FAILED"; continue; }
 
-    # Set up systemd service if it doesn't exist
+    # Fix .env (remove export statements) and update systemd service
     ssh -i "$KEY" -o ConnectTimeout=10 -o StrictHostKeyChecking=no ubuntu@$ip '
-        if ! sudo systemctl cat detection &>/dev/null; then
-            echo "  Creating systemd service..."
-            sudo tee /etc/systemd/system/detection.service > /dev/null << EOF
+        # Fix .env file - remove export statements
+        if [ -f ~/sadie-gtm/.env ]; then
+            sed -i "s/^export //" ~/sadie-gtm/.env
+            echo "  Fixed .env"
+        fi
+
+        # Always update systemd service (includes EnvironmentFile now)
+        sudo tee /etc/systemd/system/detection.service > /dev/null << EOF
 [Unit]
 Description=Sadie GTM Detection Consumer
 After=network.target
@@ -68,13 +73,14 @@ ExecStart=/home/ubuntu/.local/bin/uv run python workflows/detection_consumer.py 
 Restart=always
 RestartSec=10
 Environment=HOME=/home/ubuntu
+EnvironmentFile=/home/ubuntu/sadie-gtm/.env
 
 [Install]
 WantedBy=multi-user.target
 EOF
-            sudo systemctl daemon-reload
-            sudo systemctl enable detection
-        fi
+        sudo systemctl daemon-reload
+        sudo systemctl enable detection
+        echo "  Updated systemd service"
     ' 2>/dev/null
 
     # Restart service if requested

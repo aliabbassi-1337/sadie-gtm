@@ -363,7 +363,37 @@ class Service(IService):
                     )
                 return
 
-            if result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "unknown_booking_api"):
+            if result.ota_name:
+                # Hotel uses an OTA (Booking.com, Expedia, etc.)
+                # Look up OTA as a booking engine (tier=0)
+                engine = await repo.get_booking_engine_by_name(result.ota_name)
+                if engine:
+                    engine_id = engine.id
+                else:
+                    # OTA not in database yet - add it with tier=0
+                    engine_id = await repo.insert_booking_engine(
+                        name=result.ota_name,
+                        domains=None,
+                        tier=0,  # OTAs are tier 0
+                    )
+
+                await repo.insert_hotel_booking_engine(
+                    hotel_id=result.hotel_id,
+                    booking_engine_id=engine_id,
+                    booking_url=result.booking_url or None,
+                    detection_method=f"ota:{result.ota_name}",
+                    status=1,  # Success - we know how they book
+                )
+
+                # Save contact info
+                if result.phone_website or result.email:
+                    await repo.update_hotel_contact_info(
+                        hotel_id=result.hotel_id,
+                        phone_website=result.phone_website or None,
+                        email=result.email or None,
+                    )
+
+            elif result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "unknown_booking_api"):
                 # Found a booking engine
                 # Get or create booking engine record
                 engine = await repo.get_booking_engine_by_name(result.booking_engine)

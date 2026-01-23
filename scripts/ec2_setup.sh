@@ -56,8 +56,8 @@ SADIE_DB_USER=postgres.yunairadgmaqesxejqap
 SADIE_DB_PASSWORD=SadieGTM321-
 
 # AWS
-export SQS_DETECTION_QUEUE_URL=https://sqs.eu-north-1.amazonaws.com/760711518969/detection-queue
-export AWS_REGION=eu-north-1
+SQS_DETECTION_QUEUE_URL=https://sqs.eu-north-1.amazonaws.com/760711518969/detection-queue
+AWS_REGION=eu-north-1
 EOF
 fi
 
@@ -76,6 +76,7 @@ ExecStart=/home/ubuntu/.local/bin/uv run python workflows/detection_consumer.py 
 Restart=always
 RestartSec=10
 Environment=HOME=/home/ubuntu
+EnvironmentFile=/home/ubuntu/sadie-gtm/.env
 
 [Install]
 WantedBy=multi-user.target
