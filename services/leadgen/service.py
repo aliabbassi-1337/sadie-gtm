@@ -282,7 +282,8 @@ class Service(IService):
         for h in hotels:
             hotel_dicts.append({
                 "name": h.name,
-                "google_place_id": h.google_place_id,  # Primary dedup key
+                "external_id": h.external_id,  # Primary dedup key
+                "external_id_type": h.external_id_type,
                 "website": h.website,
                 "phone_google": h.phone,
                 "phone_website": None,
@@ -1173,10 +1174,10 @@ class Service(IService):
                 # Deduplicate before saving
                 unique_batch = []
                 for h in batch_hotels:
-                    if h.google_place_id:
-                        if h.google_place_id in seen_ids:
+                    if h.external_id:
+                        if h.external_id in seen_ids:
                             continue
-                        seen_ids.add(h.google_place_id)
+                        seen_ids.add(h.external_id)
                     unique_batch.append(h)
                 
                 if save_to_db and unique_batch:
@@ -1368,10 +1369,10 @@ class Service(IService):
             nonlocal total_saved
             unique_batch = []
             for h in batch_hotels:
-                if h.google_place_id:
-                    if h.google_place_id in seen_ids:
+                if h.external_id:
+                    if h.external_id in seen_ids:
                         continue
-                    seen_ids.add(h.google_place_id)
+                    seen_ids.add(h.external_id)
                 unique_batch.append(h)
 
             if save_to_db and unique_batch:

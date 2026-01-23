@@ -19,7 +19,8 @@ async def get_hotel_by_id(hotel_id: int) -> Optional[Hotel]:
 
 async def insert_hotel(
     name: str,
-    google_place_id: Optional[str] = None,
+    external_id: Optional[str] = None,
+    external_id_type: Optional[str] = None,
     website: Optional[str] = None,
     phone_google: Optional[str] = None,
     phone_website: Optional[str] = None,
@@ -40,7 +41,8 @@ async def insert_hotel(
         result = await queries.insert_hotel(
             conn,
             name=name,
-            google_place_id=google_place_id,
+            external_id=external_id,
+            external_id_type=external_id_type,
             website=website,
             phone_google=phone_google,
             phone_website=phone_website,
@@ -244,7 +246,8 @@ async def insert_hotels_bulk(hotels: List[dict]) -> int:
                     await queries.insert_hotel(
                         conn,
                         name=hotel.get("name"),
-                        google_place_id=hotel.get("google_place_id"),
+                        external_id=hotel.get("external_id"),
+                        external_id_type=hotel.get("external_id_type"),
                         website=hotel.get("website"),
                         phone_google=hotel.get("phone_google"),
                         phone_website=hotel.get("phone_website"),
