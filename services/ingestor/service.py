@@ -207,60 +207,45 @@ class Service(IService):
 
     async def _save_texas_hotels(self, hotels: List[TexasHotel]) -> int:
         """Save Texas hotels to hotels table using batch inserts."""
-        from db.client import get_conn
-
         logger.info(f"Starting batch insert of {len(hotels)} hotels...")
 
         BATCH_SIZE = 500
         saved = 0
 
-        async with get_conn() as conn:
-            for batch_start in range(0, len(hotels), BATCH_SIZE):
-                batch = hotels[batch_start:batch_start + BATCH_SIZE]
+        for batch_start in range(0, len(hotels), BATCH_SIZE):
+            batch = hotels[batch_start:batch_start + BATCH_SIZE]
 
-                # Prepare batch data
-                records = [
-                    (
-                        hotel.name,
-                        f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}",
-                        HOTEL_STATUS_PENDING,
-                        hotel.address,
-                        hotel.city,
-                        hotel.state,
-                        "USA",
-                        hotel.phone,
-                        "hotel",
-                    )
-                    for hotel in batch
-                ]
-
-                # Batch insert with ON CONFLICT
-                result = await conn.executemany('''
-                    INSERT INTO sadie_gtm.hotels (name, source, status, address, city, state, country, phone_website, category)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    ON CONFLICT (source) DO NOTHING
-                ''', records)
-
-                batch_saved = len(batch)  # Approximate, ON CONFLICT may skip some
-                saved += batch_saved
-
-                logger.info(f"  Batch {batch_start//BATCH_SIZE + 1}: {batch_start + len(batch)}/{len(hotels)} processed")
-
-            # Now batch insert room counts
-            logger.info("Inserting room counts...")
-            room_records = [
-                (hotel.room_count, f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}", "texas_hot")
-                for hotel in hotels if hotel.room_count
+            # Prepare batch data
+            records = [
+                (
+                    hotel.name,
+                    f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}",
+                    HOTEL_STATUS_PENDING,
+                    hotel.address,
+                    hotel.city,
+                    hotel.state,
+                    "USA",
+                    hotel.phone,
+                    "hotel",
+                )
+                for hotel in batch
             ]
 
-            if room_records:
-                await conn.executemany('''
-                    INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status)
-                    SELECT h.id, $1, $3, 1
-                    FROM sadie_gtm.hotels h
-                    WHERE h.source = $2
-                    ON CONFLICT (hotel_id) DO UPDATE SET room_count = EXCLUDED.room_count
-                ''', room_records)
+            # Batch insert via repo layer
+            batch_saved = await repo.batch_insert_hotels(records)
+            saved += batch_saved
+
+            logger.info(f"  Batch {batch_start//BATCH_SIZE + 1}: {batch_start + len(batch)}/{len(hotels)} processed")
+
+        # Batch insert room counts
+        logger.info("Inserting room counts...")
+        room_records = [
+            (hotel.room_count, f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}", "texas_hot")
+            for hotel in hotels if hotel.room_count
+        ]
+
+        if room_records:
+            await repo.batch_insert_room_counts(room_records)
 
         logger.info(f"Batch insert complete: {saved} hotels processed")
         return saved

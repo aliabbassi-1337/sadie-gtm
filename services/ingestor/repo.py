@@ -96,3 +96,44 @@ async def insert_room_count(
             status=status,
         )
         return result
+
+
+async def batch_insert_hotels(records: list[tuple]) -> int:
+    """
+    Batch insert hotels using executemany.
+
+    Args:
+        records: List of tuples (name, source, status, address, city, state, country, phone, category)
+
+    Returns:
+        Number of records processed
+    """
+    async with get_conn() as conn:
+        await conn.executemany('''
+            INSERT INTO sadie_gtm.hotels (name, source, status, address, city, state, country, phone_google, category)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (source) DO NOTHING
+        ''', records)
+        return len(records)
+
+
+async def batch_insert_room_counts(records: list[tuple]) -> int:
+    """
+    Batch insert room counts using executemany.
+
+    Args:
+        records: List of tuples (room_count, source, source_name)
+                 source is used to lookup hotel_id
+
+    Returns:
+        Number of records processed
+    """
+    async with get_conn() as conn:
+        await conn.executemany('''
+            INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status)
+            SELECT h.id, $1, $3, 1
+            FROM sadie_gtm.hotels h
+            WHERE h.source = $2
+            ON CONFLICT (hotel_id) DO UPDATE SET room_count = EXCLUDED.room_count
+        ''', records)
+        return len(records)
