@@ -21,7 +21,7 @@ from services.leadgen.reverse_lookup import (
     ReverseLookupStats,
 )
 from db.models.hotel import Hotel
-from db.client import init_db
+from db.client import init_db, get_conn, queries
 from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, DEFAULT_CELL_SIZE_KM
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
@@ -1347,19 +1347,17 @@ class Service(IService):
         )
 
         # Preload existing hotels from DB to skip already-covered cells
-        pool = await init_db()
-        existing = await pool.fetch('''
-            SELECT google_place_id, ST_Y(location::geometry) as lat, ST_X(location::geometry) as lng
-            FROM sadie_gtm.hotels
-            WHERE google_place_id IS NOT NULL
-            AND ST_Within(
-                location::geometry,
-                ST_MakeEnvelope($1, $2, $3, $4, 4326)
+        async with get_conn() as conn:
+            existing = await queries.get_hotels_in_bbox(
+                conn, lng_min=lng_min, lat_min=lat_min, lng_max=lng_max, lat_max=lat_max
             )
-        ''', lng_min, lat_min, lng_max, lat_max)
 
-        existing_place_ids = {r['google_place_id'] for r in existing if r['google_place_id']}
-        existing_locations = {(round(r['lat'], 4), round(r['lng'], 4)) for r in existing}
+        # Filter to google_place external_ids
+        existing_place_ids = {
+            r['external_id'] for r in existing
+            if r['external_id_type'] == 'google_place' and r['external_id']
+        }
+        existing_locations = {(round(r['lat'], 4), round(r['lng'], 4)) for r in existing if r['lat']}
         scraper.preload_existing(existing_place_ids, existing_locations)
 
         total_saved = 0

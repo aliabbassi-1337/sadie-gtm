@@ -141,10 +141,15 @@ class Service(IService):
                 logger.info(f"  Saving... {i + 1}/{len(licenses)}")
 
             try:
-                # Insert (will skip duplicates based on name+city)
+                # Clean source category (e.g., "dbpr_hotel", "dbpr_motel")
+                source = f"dbpr_{lic.license_type.lower().replace(' ', '_').replace('-', '_')}"
+
+                # Insert with external_id (license number) for dedup
                 result = await repo.insert_hotel(
                     name=lic.business_name or lic.licensee_name,
-                    source=f"dbpr_{lic.license_type.lower().replace(' ', '_').replace('-', '_')}",
+                    source=source,
+                    external_id=lic.license_number,
+                    id_type="dbpr_license",
                     status=HOTEL_STATUS_PENDING,
                     address=lic.address,
                     city=lic.city,
@@ -215,11 +220,12 @@ class Service(IService):
         for batch_start in range(0, len(hotels), BATCH_SIZE):
             batch = hotels[batch_start:batch_start + BATCH_SIZE]
 
-            # Prepare batch data
+            # Prepare batch data with external_id as last element
+            # (name, source, status, address, city, state, country, phone, category, external_id)
             records = [
                 (
                     hotel.name,
-                    f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}",
+                    "texas_hot",
                     HOTEL_STATUS_PENDING,
                     hotel.address,
                     hotel.city,
@@ -227,25 +233,26 @@ class Service(IService):
                     "USA",
                     hotel.phone,
                     "hotel",
+                    f"{hotel.taxpayer_number}:{hotel.location_number}",
                 )
                 for hotel in batch
             ]
 
             # Batch insert via repo layer
-            batch_saved = await repo.batch_insert_hotels(records)
+            batch_saved = await repo.batch_insert_hotels(records, external_id_type="texas_hot")
             saved += batch_saved
 
             logger.info(f"  Batch {batch_start//BATCH_SIZE + 1}: {batch_start + len(batch)}/{len(hotels)} processed")
 
-        # Batch insert room counts
+        # Batch insert room counts using external_id lookup
         logger.info("Inserting room counts...")
         room_records = [
-            (hotel.room_count, f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}", "texas_hot")
+            (hotel.room_count, f"{hotel.taxpayer_number}:{hotel.location_number}", "texas_hot")
             for hotel in hotels if hotel.room_count
         ]
 
         if room_records:
-            await repo.batch_insert_room_counts(room_records)
+            await repo.batch_insert_room_counts(room_records, external_id_type="texas_hot")
 
-        logger.info(f"Batch insert complete: {saved} hotels processed")
+        logger.info(f"Batch insert complete: {saved} hotels")
         return saved
