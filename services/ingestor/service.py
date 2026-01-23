@@ -214,9 +214,12 @@ class Service(IService):
                 logger.info(f"  Saving... {i + 1}/{len(hotels)}")
 
             try:
+                # Use tax ID as unique source identifier for dedup
+                source_id = f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}"
+
                 hotel_id = await repo.insert_hotel(
                     name=hotel.name,
-                    source="texas_hot",
+                    source=source_id,
                     status=HOTEL_STATUS_PENDING,
                     address=hotel.address,
                     city=hotel.city,

@@ -21,12 +21,21 @@ async def insert_hotel(
     """
     Insert a hotel from ingestion source.
 
-    If duplicate exists, updates with ingestor data (category, address, phone).
-    Returns hotel ID.
+    Dedup strategy:
+    - If source contains unique ID (e.g., "texas_hot:12345:00001"), dedup on source
+    - Otherwise, dedup on name + city
+
+    Returns hotel ID (None if duplicate).
     """
     async with get_conn() as conn:
-        # Check for existing by name + city (dedup)
-        existing = await queries.get_hotel_by_name_city(conn, name=name, city=city)
+        existing = None
+
+        # If source has unique ID format (contains ":"), dedup on source
+        if ":" in source:
+            existing = await queries.get_hotel_by_source(conn, source=source)
+        else:
+            # Fallback to name + city dedup
+            existing = await queries.get_hotel_by_name_city(conn, name=name, city=city)
 
         if existing:
             # Update with ingestor data (won't overwrite existing non-null values)
@@ -37,7 +46,7 @@ async def insert_hotel(
                 address=address,
                 phone=phone,
             )
-            return existing["id"]
+            return None  # Return None for duplicates
 
         # Insert new hotel
         hotel_id = await queries.insert_hotel_with_category(
