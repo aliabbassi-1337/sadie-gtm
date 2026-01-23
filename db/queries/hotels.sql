@@ -756,3 +756,9 @@ WHERE hotel_id = :hotel_id;
 DELETE FROM sadie_gtm.hotel_booking_engines
 WHERE hotel_id = ANY(:hotel_ids);
 
+-- name: reset_hotels_for_retry*!
+-- Reset hotel status to 0 (pending) for retry
+UPDATE sadie_gtm.hotels
+SET status = 0, updated_at = CURRENT_TIMESTAMP
+WHERE id = ANY(:hotel_ids);
+

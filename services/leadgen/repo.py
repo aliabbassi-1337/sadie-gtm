@@ -472,3 +472,10 @@ async def delete_hbe_for_retry(hotel_ids: List[int]) -> None:
     """Delete HBE records to allow retry."""
     async with get_conn() as conn:
         await queries.delete_hbe_batch_for_retry(conn, hotel_ids=hotel_ids)
+
+
+async def reset_hotels_for_retry(hotel_ids: List[int]) -> None:
+    """Reset hotel status to 0 (pending) and delete HBE records for retry."""
+    async with get_conn() as conn:
+        await queries.delete_hbe_batch_for_retry(conn, hotel_ids=hotel_ids)
+        await queries.reset_hotels_for_retry(conn, hotel_ids=hotel_ids)

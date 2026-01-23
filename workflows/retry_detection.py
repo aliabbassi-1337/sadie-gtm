@@ -76,11 +76,11 @@ async def retry_workflow(
                 logger.info(f"  {h['id']}: {h['name']} - {h['detection_method'][:60]}")
             return 0
 
-        # Delete HBE records to allow retry
+        # Delete HBE records and reset status to allow retry
         hotel_ids = [h["id"] for h in hotels]
-        await repo.delete_hbe_for_retry(hotel_ids)
+        await repo.reset_hotels_for_retry(hotel_ids)
 
-        logger.info(f"Reset {len(hotel_ids)} hotels for retry")
+        logger.info(f"Reset {len(hotel_ids)} hotels for retry (status=0, HBE deleted)")
         logger.info("Run detection workflow to retry these hotels")
 
         return len(hotel_ids)
