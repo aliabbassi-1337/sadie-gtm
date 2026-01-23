@@ -657,6 +657,13 @@ WHERE LOWER(name) = LOWER(:name)
   AND LOWER(COALESCE(city, '')) = LOWER(COALESCE(:city, ''))
 LIMIT 1;
 
+-- name: get_hotel_by_source^
+-- Check if hotel exists by source (for sources with unique IDs like texas_hot:12345:00001)
+SELECT id, category
+FROM sadie_gtm.hotels
+WHERE source = :source
+LIMIT 1;
+
 -- name: update_hotel_category!
 -- Update hotel category
 UPDATE sadie_gtm.hotels

@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Tuple
 from loguru import logger
 
 from services.ingestor.dbpr import DBPRIngestor, DBPRLicense, DBPRIngestStats, LICENSE_TYPES
+from services.ingestor.texas import TexasIngestor, TexasHotel, TexasIngestStats
 from services.ingestor import repo
 
 # Hotel status constants
@@ -49,6 +50,24 @@ class IService(ABC):
     @abstractmethod
     def get_dbpr_license_types(self) -> Dict[str, str]:
         """Get mapping of DBPR license type codes to names."""
+        pass
+
+    @abstractmethod
+    async def ingest_texas(
+        self,
+        quarter: Optional[str] = None,
+        save_to_db: bool = True,
+    ) -> Tuple[List[TexasHotel], dict]:
+        """
+        Ingest Texas hotel occupancy tax data.
+
+        Args:
+            quarter: Specific quarter directory (e.g., "HOT 25 Q3"). If None, loads all quarters.
+            save_to_db: Whether to save to hotels table
+
+        Returns:
+            Tuple of (hotels, stats dict)
+        """
         pass
 
 
@@ -145,3 +164,83 @@ class Service(IService):
     def get_dbpr_license_types(self) -> Dict[str, str]:
         """Get mapping of DBPR license type codes to names."""
         return LICENSE_TYPES.copy()
+
+    async def ingest_texas(
+        self,
+        quarter: Optional[str] = None,
+        save_to_db: bool = True,
+    ) -> Tuple[List[TexasHotel], dict]:
+        """
+        Ingest Texas hotel occupancy tax data.
+
+        Args:
+            quarter: Specific quarter directory (e.g., "HOT 25 Q3"). If None, loads all quarters.
+            save_to_db: Whether to save to hotels table
+
+        Returns:
+            Tuple of (hotels, stats dict)
+        """
+        ingestor = TexasIngestor()
+
+        # Load data - either single quarter or all quarters
+        if quarter:
+            hotels, stats = ingestor.load_quarterly_data(quarter)
+            unique_hotels = ingestor.deduplicate_hotels(hotels)
+        else:
+            unique_hotels, stats = ingestor.load_all_quarters()
+
+        logger.info(f"Loaded {len(unique_hotels)} unique Texas hotels")
+
+        # Save to database
+        if save_to_db and unique_hotels:
+            saved = await self._save_texas_hotels(unique_hotels)
+            stats.records_saved = saved
+            logger.info(f"Saved {saved} hotels to database")
+
+        return unique_hotels, {
+            "files_processed": stats.files_processed,
+            "records_parsed": stats.records_parsed,
+            "records_saved": stats.records_saved,
+            "duplicates_skipped": stats.duplicates_skipped,
+            "errors": stats.errors,
+        }
+
+    async def _save_texas_hotels(self, hotels: List[TexasHotel]) -> int:
+        """Save Texas hotels to hotels table."""
+        saved = 0
+
+        for i, hotel in enumerate(hotels):
+            if (i + 1) % 1000 == 0:
+                logger.info(f"  Saving... {i + 1}/{len(hotels)}")
+
+            try:
+                # Use tax ID as unique source identifier for dedup
+                source_id = f"texas_hot:{hotel.taxpayer_number}:{hotel.location_number}"
+
+                hotel_id = await repo.insert_hotel(
+                    name=hotel.name,
+                    source=source_id,
+                    status=HOTEL_STATUS_PENDING,
+                    address=hotel.address,
+                    city=hotel.city,
+                    state=hotel.state,
+                    country="USA",
+                    phone=hotel.phone,
+                    category="hotel",
+                )
+                if hotel_id:
+                    saved += 1
+
+                    # Insert room count if available
+                    if hotel.room_count:
+                        await repo.insert_room_count(
+                            hotel_id=hotel_id,
+                            room_count=hotel.room_count,
+                            source="texas_hot",
+                        )
+
+            except Exception as e:
+                logger.debug(f"Failed to save {hotel.name}: {e}")
+                continue
+
+        return saved
