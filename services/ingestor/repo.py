@@ -4,6 +4,7 @@ Ingestor Repository - Database operations for ingested data.
 
 from typing import Optional
 from db.client import queries, get_conn
+from db.queries.batch import BATCH_INSERT_HOTELS, BATCH_INSERT_ROOM_COUNTS
 
 
 async def insert_hotel(
@@ -96,3 +97,34 @@ async def insert_room_count(
             status=status,
         )
         return result
+
+
+async def batch_insert_hotels(records: list[tuple]) -> int:
+    """
+    Batch insert hotels using executemany.
+
+    Args:
+        records: List of tuples (name, source, status, address, city, state, country, phone, category)
+
+    Returns:
+        Number of records processed
+    """
+    async with get_conn() as conn:
+        await conn.executemany(BATCH_INSERT_HOTELS, records)
+        return len(records)
+
+
+async def batch_insert_room_counts(records: list[tuple]) -> int:
+    """
+    Batch insert room counts using executemany.
+
+    Args:
+        records: List of tuples (room_count, source, source_name)
+                 source is used to lookup hotel_id
+
+    Returns:
+        Number of records processed
+    """
+    async with get_conn() as conn:
+        await conn.executemany(BATCH_INSERT_ROOM_COUNTS, records)
+        return len(records)
