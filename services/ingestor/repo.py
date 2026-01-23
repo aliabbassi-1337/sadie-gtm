@@ -13,15 +13,10 @@ async def get_hotel_by_external_id(external_id_type: str, external_id: str) -> O
     Returns hotel_id if found, None otherwise.
     """
     async with get_conn() as conn:
-        result = await conn.fetchval(
-            """
-            SELECT id FROM sadie_gtm.hotels
-            WHERE external_id_type = $1 AND external_id = $2
-            """,
-            external_id_type,
-            external_id,
+        result = await queries.get_hotel_by_external_id(
+            conn, external_id_type=external_id_type, external_id=external_id
         )
-        return result
+        return result["id"] if result else None
 
 
 async def insert_hotel(
@@ -50,15 +45,10 @@ async def insert_hotel(
     async with get_conn() as conn:
         # Check external_id first if provided
         if external_id and external_id_type:
-            existing_id = await conn.fetchval(
-                """
-                SELECT id FROM sadie_gtm.hotels
-                WHERE external_id_type = $1 AND external_id = $2
-                """,
-                external_id_type,
-                external_id,
+            existing = await queries.get_hotel_by_external_id(
+                conn, external_id_type=external_id_type, external_id=external_id
             )
-            if existing_id:
+            if existing:
                 return None  # Already exists
 
         # Check name + city dedup
@@ -76,39 +66,45 @@ async def insert_hotel(
             )
             # Also set external_id if not already set
             if external_id and external_id_type:
-                await conn.execute(
-                    """
-                    UPDATE sadie_gtm.hotels
-                    SET external_id = $1, external_id_type = $2
-                    WHERE id = $3 AND external_id IS NULL
-                    """,
-                    external_id,
-                    external_id_type,
-                    hotel_id,
+                await queries.update_hotel_external_id(
+                    conn,
+                    hotel_id=hotel_id,
+                    external_id=external_id,
+                    external_id_type=external_id_type,
                 )
             return None  # Return None for duplicates
 
-        # Insert new hotel
-        hotel_id = await conn.fetchval(
-            """
-            INSERT INTO sadie_gtm.hotels
-                (name, website, source, status, address, city, state, country, phone_google, category, external_id, external_id_type)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            RETURNING id
-            """,
-            name,
-            website,
-            source,
-            status,
-            address,
-            city,
-            state,
-            country,
-            phone,
-            category,
-            external_id,
-            external_id_type,
-        )
+        # Insert new hotel with external_id
+        if external_id and external_id_type:
+            hotel_id = await queries.insert_hotel_with_external_id(
+                conn,
+                name=name,
+                website=website,
+                source=source,
+                status=status,
+                address=address,
+                city=city,
+                state=state,
+                country=country,
+                phone=phone,
+                category=category,
+                external_id=external_id,
+                external_id_type=external_id_type,
+            )
+        else:
+            hotel_id = await queries.insert_hotel_with_category(
+                conn,
+                name=name,
+                website=website,
+                source=source,
+                status=status,
+                address=address,
+                city=city,
+                state=state,
+                country=country,
+                phone=phone,
+                category=category,
+            )
 
         return hotel_id
 
@@ -156,17 +152,11 @@ async def batch_insert_hotels(
 
     async with get_conn() as conn:
         if external_id_type:
-            # New format: (name, source, status, address, city, state, country, phone, category, external_id)
             # Check which external_ids already exist
             external_ids = [r[9] for r in records if len(r) > 9 and r[9]]
             if external_ids:
-                existing = await conn.fetch(
-                    """
-                    SELECT external_id FROM sadie_gtm.hotels
-                    WHERE external_id_type = $1 AND external_id = ANY($2)
-                    """,
-                    external_id_type,
-                    external_ids,
+                existing = await queries.get_hotels_by_external_ids(
+                    conn, external_id_type=external_id_type, external_ids=external_ids
                 )
                 existing_set = {r["external_id"] for r in existing}
                 records = [r for r in records if len(r) <= 9 or r[9] not in existing_set]
@@ -175,7 +165,6 @@ async def batch_insert_hotels(
                 return 0
 
             # Add external_id_type to each record
-            # Format: (name, source, status, address, city, state, country, phone, category, external_id, external_id_type)
             full_records = [
                 (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9] if len(r) > 9 else None, external_id_type)
                 for r in records

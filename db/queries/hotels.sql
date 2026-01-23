@@ -743,3 +743,34 @@ WHERE hotel_id = ANY(:hotel_ids);
 UPDATE sadie_gtm.hotels
 SET status = 0, updated_at = CURRENT_TIMESTAMP
 WHERE id = ANY(:hotel_ids);
+
+-- ============================================================================
+-- EXTERNAL ID QUERIES
+-- ============================================================================
+
+-- name: get_hotel_by_external_id^
+-- Look up hotel by external ID
+SELECT id FROM sadie_gtm.hotels
+WHERE external_id_type = :external_id_type AND external_id = :external_id;
+
+-- name: get_hotels_by_external_ids
+-- Batch lookup hotels by external IDs
+SELECT id, external_id FROM sadie_gtm.hotels
+WHERE external_id_type = :external_id_type AND external_id = ANY(:external_ids);
+
+-- name: update_hotel_external_id!
+-- Set external_id on existing hotel (only if not already set)
+UPDATE sadie_gtm.hotels
+SET external_id = :external_id,
+    external_id_type = :external_id_type,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id AND external_id IS NULL;
+
+-- name: insert_hotel_with_external_id<!
+-- Insert a new hotel with external_id and return the ID
+INSERT INTO sadie_gtm.hotels (
+    name, website, source, status, address, city, state, country, phone_google, category, external_id, external_id_type
+) VALUES (
+    :name, :website, :source, :status, :address, :city, :state, :country, :phone, :category, :external_id, :external_id_type
+)
+RETURNING id;
