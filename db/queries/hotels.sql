@@ -743,26 +743,3 @@ WHERE hotel_id = ANY(:hotel_ids);
 UPDATE sadie_gtm.hotels
 SET status = 0, updated_at = CURRENT_TIMESTAMP
 WHERE id = ANY(:hotel_ids);
-
--- ============================================================================
--- BATCH INSERT QUERIES (for Texas/bulk ingestion)
--- ============================================================================
--- Note: These are used with conn.executemany() which requires positional params ($1, $2, etc.)
--- The repo layer handles the executemany call directly
-
--- name: batch_insert_hotels_sql
--- SQL for batch inserting hotels (used with executemany in repo layer)
--- Params: name, source, status, address, city, state, country, phone, category
-INSERT INTO sadie_gtm.hotels (name, source, status, address, city, state, country, phone_google, category)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-ON CONFLICT (source) DO NOTHING;
-
--- name: batch_insert_room_counts_sql
--- SQL for batch inserting room counts (used with executemany in repo layer)
--- Params: room_count, source (to lookup hotel_id), source_name
-INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status)
-SELECT h.id, $1, $3, 1
-FROM sadie_gtm.hotels h
-WHERE h.source = $2
-ON CONFLICT (hotel_id) DO UPDATE SET room_count = EXCLUDED.room_count;
-
