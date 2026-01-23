@@ -283,11 +283,13 @@ class Service(IService):
         found = 0
         not_found = 0
         errors = 0
+        skipped_chains = 0
+        api_calls = 0
         completed = 0
 
         async def process_hotel(hotel: dict) -> tuple[str, bool]:
             """Process a single hotel, returns (status, has_website)."""
-            nonlocal found, not_found, errors, completed
+            nonlocal found, not_found, errors, skipped_chains, api_calls, completed
 
             async with semaphore:
                 result = await enricher.find_website(
@@ -299,34 +301,44 @@ class Service(IService):
 
                 if result.website:
                     found += 1
+                    api_calls += 1
                     await repo.update_hotel_website(hotel["id"], result.website)
                     await repo.update_website_enrichment_status(
                         hotel["id"], status=1, source="serper"
                     )
+                elif result.error == "chain_hotel":
+                    skipped_chains += 1
+                    # Mark as processed but no API call made
+                    await repo.update_website_enrichment_status(
+                        hotel["id"], status=0, source="chain_skip"
+                    )
                 elif result.error == "no_match":
                     not_found += 1
+                    api_calls += 1
                     await repo.update_website_enrichment_status(
                         hotel["id"], status=0, source="serper"
                     )
                 else:
                     errors += 1
+                    api_calls += 1
                     await repo.update_website_enrichment_status(
                         hotel["id"], status=0, source="serper"
                     )
 
                 completed += 1
                 if completed % 50 == 0:
-                    log(f"  Progress: {completed}/{len(hotels)} ({found} found)")
+                    log(f"  Progress: {completed}/{len(hotels)} ({found} found, {skipped_chains} chains skipped)")
 
         # Run all hotel enrichments concurrently
         await asyncio.gather(*[process_hotel(h) for h in hotels])
 
-        log(f"Website enrichment complete: {found} found, {not_found} not found, {errors} errors")
+        log(f"Website enrichment complete: {found} found, {not_found} not found, {skipped_chains} chains skipped, {errors} errors")
 
         return {
             "total": len(hotels),
             "found": found,
             "not_found": not_found,
+            "skipped_chains": skipped_chains,
             "errors": errors,
-            "api_calls": len(hotels),
+            "api_calls": api_calls,
         }

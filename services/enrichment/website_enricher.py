@@ -147,6 +147,51 @@ BAD_URL_PATTERNS = [
     "/search?", "/results?", "/find?",
 ]
 
+# Chain hotel name patterns - skip enrichment for these (waste of API calls)
+CHAIN_NAME_PATTERNS = [
+    # Marriott brands
+    "marriott", "ritz carlton", "westin", "sheraton", "w hotel",
+    "st. regis", "st regis", "le meridien", "four points", "aloft",
+    "springhill", "residence inn", "fairfield", "courtyard", "ac hotel",
+    "moxy", "protea", "element", "towneplace",
+    # Hilton brands
+    "hilton", "waldorf", "conrad", "canopy", "signia", "curio",
+    "doubletree", "tapestry", "embassy suites", "hilton garden",
+    "hampton inn", "hampton by", "tru by hilton", "homewood suites",
+    "home2 suites", "spark by hilton",
+    # IHG brands
+    "intercontinental", "kimpton", "regent", "six senses", "vignette",
+    "hotel indigo", "crowne plaza", "hualuxe", "even hotel",
+    "holiday inn", "avid hotel", "candlewood", "staybridge", "atwell",
+    # Hyatt brands
+    "hyatt", "park hyatt", "andaz", "thompson hotel", "grand hyatt",
+    "hyatt regency", "hyatt place", "hyatt house", "hyatt centric",
+    # Wyndham brands
+    "wyndham", "dolce", "registry", "ramada", "days inn", "super 8",
+    "la quinta", "wingate", "hawthorn", "microtel", "travelodge", "trademark",
+    # Choice Hotels
+    "comfort inn", "comfort suites", "quality inn", "sleep inn",
+    "clarion", "econo lodge", "rodeway", "mainstay", "suburban",
+    "ascend", "cambria",
+    # Best Western
+    "best western", "glo", "surestay", "aiden", "sadie",
+    # Radisson
+    "radisson", "park plaza", "park inn", "country inn",
+    # Accor
+    "sofitel", "pullman", "mgallery", "swissotel", "novotel",
+    "mercure", "ibis", "greet", "motel 6",
+    # Others
+    "extended stay america", "red roof", "motel 6", "studio 6",
+]
+
+
+def is_chain_hotel(name: str) -> bool:
+    """Check if hotel name indicates a chain hotel."""
+    if not name:
+        return False
+    name_lower = name.lower()
+    return any(chain in name_lower for chain in CHAIN_NAME_PATTERNS)
+
 
 @dataclass
 class EnrichmentResult:
@@ -356,6 +401,11 @@ class WebsiteEnricher:
             city=city,
             search_query="",
         )
+
+        # Skip chain hotels - they don't have independent websites worth finding
+        if is_chain_hotel(name):
+            result.error = "chain_hotel"
+            return result
 
         cleaned_name = clean_hotel_name(name)
 
