@@ -774,3 +774,17 @@ INSERT INTO sadie_gtm.hotels (
     :name, :website, :source, :status, :address, :city, :state, :country, :phone, :category, :external_id, :external_id_type
 )
 RETURNING id;
+
+-- name: get_hotels_in_bbox
+-- Get hotels within a bounding box for dedup during scraping
+SELECT
+    external_id,
+    external_id_type,
+    ST_Y(location::geometry) as lat,
+    ST_X(location::geometry) as lng
+FROM sadie_gtm.hotels
+WHERE location IS NOT NULL
+AND ST_Within(
+    location::geometry,
+    ST_MakeEnvelope(:lng_min, :lat_min, :lng_max, :lat_max, 4326)
+);
