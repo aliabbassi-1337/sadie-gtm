@@ -7,7 +7,7 @@
 set -e
 
 S3_BUCKET="sadie-gtm"
-S3_EXPORTS="s3://$S3_BUCKET/exports"
+S3_EXPORTS="s3://$S3_BUCKET/HotelLeadGen/USA/FL"
 REGION="eu-north-1"
 ONEDRIVE_PATH="$HOME/Library/CloudStorage/OneDrive-SharedLibraries-ValsoftCorporation/Sadie Shared - Sadie Lead Gen/USA/FL"
 
