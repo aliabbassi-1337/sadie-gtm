@@ -110,15 +110,6 @@ WHERE h.status = 0
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
-  AND LOWER(h.website) NOT LIKE '%marriott.com%'
-  AND LOWER(h.website) NOT LIKE '%hilton.com%'
-  AND LOWER(h.website) NOT LIKE '%ihg.com%'
-  AND LOWER(h.website) NOT LIKE '%hyatt.com%'
-  AND LOWER(h.website) NOT LIKE '%wyndham.com%'
-  AND LOWER(h.website) NOT LIKE '%choicehotels.com%'
-  AND LOWER(h.website) NOT LIKE '%bestwestern.com%'
-  AND LOWER(h.website) NOT LIKE '%radissonhotels.com%'
-  AND LOWER(h.website) NOT LIKE '%accor.com%'
 LIMIT :limit;
 
 -- name: get_hotels_pending_detection_by_categories
@@ -151,15 +142,6 @@ WHERE h.status = 0
   AND h.website IS NOT NULL
   AND h.website != ''
   AND h.category = ANY(:categories)
-  AND LOWER(h.website) NOT LIKE '%marriott.com%'
-  AND LOWER(h.website) NOT LIKE '%hilton.com%'
-  AND LOWER(h.website) NOT LIKE '%ihg.com%'
-  AND LOWER(h.website) NOT LIKE '%hyatt.com%'
-  AND LOWER(h.website) NOT LIKE '%wyndham.com%'
-  AND LOWER(h.website) NOT LIKE '%choicehotels.com%'
-  AND LOWER(h.website) NOT LIKE '%bestwestern.com%'
-  AND LOWER(h.website) NOT LIKE '%radissonhotels.com%'
-  AND LOWER(h.website) NOT LIKE '%accor.com%'
 LIMIT :limit;
 
 -- name: update_hotel_status!

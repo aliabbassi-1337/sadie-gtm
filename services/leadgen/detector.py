@@ -285,6 +285,34 @@ def is_junk_domain(url: str) -> bool:
     return False
 
 
+def get_chain_name(url: str) -> Optional[str]:
+    """Check if URL is a big chain hotel domain. Returns chain name or None."""
+    if not url:
+        return None
+
+    domain = extract_domain(url).lower()
+    if not domain:
+        return None
+
+    chain_map = {
+        "marriott.com": "Marriott",
+        "hilton.com": "Hilton",
+        "ihg.com": "IHG",
+        "hyatt.com": "Hyatt",
+        "wyndham.com": "Wyndham",
+        "wyndhamhotels.com": "Wyndham",
+        "choicehotels.com": "Choice Hotels",
+        "bestwestern.com": "Best Western",
+        "radissonhotels.com": "Radisson",
+        "accor.com": "Accor",
+    }
+
+    for chain_domain, chain_name in chain_map.items():
+        if domain == chain_domain or domain.endswith("." + chain_domain):
+            return chain_name
+    return None
+
+
 # =============================================================================
 # DATA MODELS
 # =============================================================================

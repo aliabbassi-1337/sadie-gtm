@@ -306,10 +306,13 @@ class Service(IService):
         Detect booking engines for hotels with status=0 (scraped).
 
         1. Query hotels pending detection
-        2. Run batch detection (visits websites, detects engines)
-        3. Update database with results
-        4. Return detection results
+        2. Handle chain hotels (create HBE record, set status=-1)
+        3. Run batch detection (visits websites, detects engines)
+        4. Update database with results
+        5. Return detection results
         """
+        from services.leadgen.detector import get_chain_name
+
         # Get hotels to process
         hotels = await repo.get_hotels_pending_detection(limit=limit)
         if not hotels:
@@ -318,24 +321,81 @@ class Service(IService):
 
         logger.info(f"Processing {len(hotels)} hotels for detection")
 
+        # Separate chain hotels from non-chain hotels
+        chain_hotels = []
+        non_chain_hotels = []
+        for h in hotels:
+            chain_name = get_chain_name(h.website) if h.website else None
+            if chain_name:
+                chain_hotels.append((h, chain_name))
+            else:
+                non_chain_hotels.append(h)
+
+        # Handle chain hotels - create HBE record and set status=-1
+        results = []
+        if chain_hotels:
+            logger.info(f"Found {len(chain_hotels)} chain hotels, marking as detected")
+            for hotel, chain_name in chain_hotels:
+                # Get or create booking engine for this chain
+                engine = await repo.get_booking_engine_by_name(chain_name)
+                if engine:
+                    engine_id = engine.id
+                else:
+                    engine_id = await repo.insert_booking_engine(
+                        name=chain_name,
+                        domains=None,
+                        tier=0,  # Chains are tier 0 (not our target)
+                    )
+
+                # Create HBE record
+                await repo.insert_hotel_booking_engine(
+                    hotel_id=hotel.id,
+                    booking_engine_id=engine_id,
+                    booking_url=hotel.website,
+                    detection_method=f"chain:{chain_name}",
+                    status=1,  # Success - detected
+                )
+
+                # Set hotel status to -1 (rejected - chain hotel)
+                await repo.update_hotel_status(
+                    hotel_id=hotel.id,
+                    status=-1,
+                )
+
+                results.append(DetectionResult(
+                    hotel_id=hotel.id,
+                    booking_engine=chain_name,
+                    detection_method=f"chain:{chain_name}",
+                ))
+
+        if not non_chain_hotels:
+            logger.info("All hotels were chains, no detection needed")
+            return results
+
+        logger.info(f"Running detection for {len(non_chain_hotels)} non-chain hotels")
+
         # Convert to dicts for detector
         hotel_dicts = [
             {"id": h.id, "name": h.name, "website": h.website, "city": h.city or ""}
-            for h in hotels
+            for h in non_chain_hotels
         ]
 
         # Run detection
         detector = BatchDetector(self.detection_config)
-        results = await detector.detect_batch(hotel_dicts)
+        detection_results = await detector.detect_batch(hotel_dicts)
 
         # Update database with results
-        for result in results:
+        for result in detection_results:
             await self._save_detection_result(result)
 
+        # Combine chain results with detection results
+        results.extend(detection_results)
+
         # Log summary
+        chains = sum(1 for r in results if r.detection_method and r.detection_method.startswith("chain:"))
         detected = sum(1 for r in results if r.booking_engine and r.booking_engine not in ("", "unknown", "unknown_third_party"))
         failed = sum(1 for r in results if r.error)
-        logger.info(f"Detection complete: {detected} detected, {failed} errors, {len(results) - detected - failed} no engine")
+        logger.info(f"Detection complete: {chains} chains, {detected - chains} engines detected, {failed} errors, {len(results) - detected - failed} no engine")
 
         return results
 
