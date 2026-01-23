@@ -201,6 +201,24 @@ class IService(ABC):
         """Get list of dorks for reverse lookup (for dry-run display)."""
         pass
 
+    @abstractmethod
+    async def get_hotels_for_retry(
+        self,
+        state: str,
+        limit: int = 100,
+        source_pattern: Optional[str] = None,
+    ) -> List[dict]:
+        """Get hotels with retryable errors (timeout, 5xx, browser exceptions)."""
+        pass
+
+    @abstractmethod
+    async def reset_hotels_for_retry(self, hotel_ids: List[int]) -> int:
+        """Reset hotel status and delete HBE records to allow retry.
+
+        Returns number of hotels reset.
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self, detection_config: DetectionConfig = None, api_key: Optional[str] = None) -> None:
@@ -1327,3 +1345,31 @@ class Service(IService):
             "non_lodging_skipped": stats.non_lodging_skipped,
             "out_of_bounds": stats.out_of_bounds,
         }
+
+    # =========================================================================
+    # RETRY METHODS
+    # =========================================================================
+
+    async def get_hotels_for_retry(
+        self,
+        state: str,
+        limit: int = 100,
+        source_pattern: Optional[str] = None,
+    ) -> List[dict]:
+        """Get hotels with retryable errors (timeout, 5xx, browser exceptions)."""
+        return await repo.get_hotels_for_retry(
+            state=state,
+            limit=limit,
+            source_pattern=source_pattern,
+        )
+
+    async def reset_hotels_for_retry(self, hotel_ids: List[int]) -> int:
+        """Reset hotel status and delete HBE records to allow retry.
+
+        Returns number of hotels reset.
+        """
+        if not hotel_ids:
+            return 0
+        await repo.reset_hotels_for_retry(hotel_ids)
+        logger.info(f"Reset {len(hotel_ids)} hotels for retry (status=0, HBE deleted)")
+        return len(hotel_ids)
