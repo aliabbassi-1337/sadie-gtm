@@ -10,43 +10,58 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy to EC2 instances
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/key.pem
+          chmod 600 ~/.ssh/key.pem
+
+      - name: Get EC2 instance IPs
+        id: get-ips
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: eu-north-1
         run: |
-          # Setup SSH
-          mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/key.pem
-          chmod 600 ~/.ssh/key.pem
-
-          # Get EC2 instance IPs
-          pip install awscli > /dev/null
           IPS=$(aws ec2 describe-instances \
             --region eu-north-1 \
             --filters "Name=instance-state-name,Values=running" "Name=tag:Project,Values=sadie-gtm" \
             --query 'Reservations[*].Instances[*].PublicIpAddress' \
             --output text)
+          echo "ips=$IPS" >> $GITHUB_OUTPUT
+          echo "Found instances: $IPS"
+
+      - name: Deploy to EC2 instances
+        run: |
+          IPS="${{ steps.get-ips.outputs.ips }}"
 
           if [ -z "$IPS" ]; then
             echo "No running instances found"
             exit 1
           fi
 
-          echo "Deploying to: $IPS"
-
-          # Deploy to each instance
           for ip in $IPS; do
             echo "=== Deploying to $ip ==="
-            ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip '
-              cd ~/sadie-gtm
-              git fetch origin main
-              git reset --hard origin/main
-              sudo systemctl restart detection
-              echo "Done"
-            ' || echo "Failed to deploy to $ip"
+
+            # Rsync code (exclude .venv, .git, .env, etc.)
+            rsync -avz --delete \
+              --exclude '.venv' \
+              --exclude '.git' \
+              --exclude '__pycache__' \
+              --exclude '*.pyc' \
+              --exclude '.env' \
+              --exclude '*.xlsx' \
+              -e "ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no" \
+              ./ ubuntu@$ip:~/sadie-gtm/ || { echo "Rsync failed for $ip"; continue; }
+
+            # Restart service
+            ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip \
+              "sudo systemctl restart detection" || echo "Restart failed for $ip"
+
+            echo "Done with $ip"
           done
 
           echo "=== Deployment complete ==="
