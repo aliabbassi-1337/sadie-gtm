@@ -13,15 +13,20 @@ async def run():
         user=os.getenv('SADIE_DB_USER'),
         password=os.getenv('SADIE_DB_PASSWORD'),
     )
-    print('Deleting duplicates...')
-    deleted = await conn.execute('''
-        DELETE FROM sadie_gtm.hotels a USING sadie_gtm.hotels b
-        WHERE a.id < b.id AND a.source = b.source
+
+    # Debug: check table state
+    total = await conn.fetchval('SELECT COUNT(*) FROM sadie_gtm.hotels')
+    print(f'Total hotels: {total}')
+
+    constraint = await conn.fetch('''
+        SELECT constraint_name FROM information_schema.table_constraints
+        WHERE table_schema = 'sadie_gtm' AND table_name = 'hotels' AND constraint_type = 'UNIQUE'
     ''')
-    print(f'Deleted: {deleted}')
-    print('Adding constraint...')
-    await conn.execute('ALTER TABLE sadie_gtm.hotels ADD CONSTRAINT hotels_source_unique UNIQUE (source);')
+    print(f'Unique constraints: {[r["constraint_name"] for r in constraint]}')
+
+    dupes = await conn.fetchval('SELECT COUNT(*) FROM (SELECT source FROM sadie_gtm.hotels GROUP BY source HAVING COUNT(*) > 1) t')
+    print(f'Duplicate sources remaining: {dupes}')
+
     await conn.close()
-    print('Done')
 
 asyncio.run(run())
