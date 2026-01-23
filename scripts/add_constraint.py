@@ -14,18 +14,9 @@ async def run():
         password=os.getenv('SADIE_DB_PASSWORD'),
     )
 
-    # Debug: check table state
-    total = await conn.fetchval('SELECT COUNT(*) FROM sadie_gtm.hotels')
-    print(f'Total hotels: {total}')
-
-    constraint = await conn.fetch('''
-        SELECT constraint_name FROM information_schema.table_constraints
-        WHERE table_schema = 'sadie_gtm' AND table_name = 'hotels' AND constraint_type = 'UNIQUE'
-    ''')
-    print(f'Unique constraints: {[r["constraint_name"] for r in constraint]}')
-
-    dupes = await conn.fetchval('SELECT COUNT(*) FROM (SELECT source FROM sadie_gtm.hotels GROUP BY source HAVING COUNT(*) > 1) t')
-    print(f'Duplicate sources remaining: {dupes}')
+    print('Dropping old name+city+website constraint...')
+    await conn.execute('DROP INDEX IF EXISTS sadie_gtm.idx_hotels_name_city_website_unique')
+    print('Done')
 
     await conn.close()
 
