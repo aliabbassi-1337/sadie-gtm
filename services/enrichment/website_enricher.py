@@ -208,8 +208,8 @@ class WebsiteEnricher:
     def __init__(
         self,
         api_key: str,
-        delay_between_requests: float = 0.1,
-        max_concurrent: int = 5,
+        delay_between_requests: float = 0.0,
+        max_concurrent: int = 50,
         max_retries: int = 3,
         validate_urls: bool = True,
     ):
@@ -477,7 +477,8 @@ class WebsiteEnricher:
                 if not result.validated:
                     logger.debug(f"URL failed validation: {result.website}")
 
-            await asyncio.sleep(self.delay)
+            if self.delay > 0:
+                await asyncio.sleep(self.delay)
             return result
 
     async def enrich_batch(
