@@ -114,6 +114,10 @@ async def process_message(
     except Exception as e:
         # Don't delete message - SQS will retry after visibility timeout
         logger.error(f"Error processing message (will retry): {e}")
+        # Send critical errors to Slack (DB errors, etc)
+        error_str = str(e).lower()
+        if any(x in error_str for x in ['database', 'connection', 'asyncpg', 'postgres', 'timeout']):
+            slack.send_error("Detection Consumer", f"DB/Connection error: {e}")
         raise  # Re-raise so worker_loop knows it failed
 
 
@@ -198,6 +202,10 @@ async def worker_loop(
                 if isinstance(result, Exception):
                     logger.error(f"Error processing message: {result}")
                     total_errors += 1
+                    # Alert on critical errors
+                    error_str = str(result).lower()
+                    if any(x in error_str for x in ['database', 'connection', 'asyncpg', 'postgres']):
+                        slack.send_error("Detection Consumer", f"Critical error: {result}")
                 else:
                     processed, detected, errors = result
                     total_processed += processed
