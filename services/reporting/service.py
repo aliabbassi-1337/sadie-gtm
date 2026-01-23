@@ -443,6 +443,17 @@ class Service(IService):
         sheet.cell(row=row, column=1, value="Tier 2 (Unknown Engine)")
         sheet.cell(row=row, column=2, value=stats.tier_2_count)
         sheet.cell(row=row, column=3, value=f"{tier_2_pct:.1f}%")
+        row += 2
+
+        # TOP ENGINES Section
+        sheet.cell(row=row, column=1, value="TOP ENGINES")
+        sheet.cell(row=row, column=1).font = section_font
+        row += 1
+
+        for engine in report_stats.top_engines:
+            sheet.cell(row=row, column=1, value=engine.engine_name)
+            sheet.cell(row=row, column=2, value=engine.hotel_count)
+            row += 1
 
         # Auto-adjust column widths
         sheet.column_dimensions["A"].width = 35
