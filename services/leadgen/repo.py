@@ -448,3 +448,27 @@ async def get_total_region_area_km2(state: str) -> float:
     async with get_conn() as conn:
         result = await queries.get_total_area_km2(conn, state=state)
         return float(result) if result else 0.0
+
+
+async def get_hotels_for_retry(
+    state: str,
+    limit: int = 100,
+    source_pattern: str = None,
+) -> List[dict]:
+    """Get hotels with retryable errors (timeout, 5xx, browser exceptions)."""
+    async with get_conn() as conn:
+        if source_pattern:
+            results = await queries.get_hotels_for_retry_by_source(
+                conn, state=state, source_pattern=source_pattern, limit=limit
+            )
+        else:
+            results = await queries.get_hotels_for_retry(
+                conn, state=state, limit=limit
+            )
+        return [dict(row) for row in results]
+
+
+async def delete_hbe_for_retry(hotel_ids: List[int]) -> None:
+    """Delete HBE records to allow retry."""
+    async with get_conn() as conn:
+        await queries.delete_hbe_batch_for_retry(conn, hotel_ids=hotel_ids)

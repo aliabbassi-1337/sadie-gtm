@@ -703,3 +703,56 @@ SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
+-- ============================================================================
+-- RETRY QUERIES
+-- ============================================================================
+
+-- name: get_hotels_for_retry
+-- Get hotels with retryable errors (timeout, 5xx, browser exceptions)
+SELECT
+    h.id,
+    h.name,
+    h.website,
+    h.city,
+    h.state,
+    hbe.detection_method
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.state = :state
+  AND (
+    hbe.detection_method LIKE 'error:precheck_failed: timeout%'
+    OR hbe.detection_method LIKE 'error:precheck_failed: HTTP 5%'
+    OR hbe.detection_method LIKE 'error:exception%'
+  )
+LIMIT :limit;
+
+-- name: get_hotels_for_retry_by_source
+-- Get hotels with retryable errors, filtered by source
+SELECT
+    h.id,
+    h.name,
+    h.website,
+    h.city,
+    h.state,
+    hbe.detection_method
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.state = :state
+  AND h.source LIKE :source_pattern
+  AND (
+    hbe.detection_method LIKE 'error:precheck_failed: timeout%'
+    OR hbe.detection_method LIKE 'error:precheck_failed: HTTP 5%'
+    OR hbe.detection_method LIKE 'error:exception%'
+  )
+LIMIT :limit;
+
+-- name: delete_hbe_for_retry!
+-- Delete HBE record to allow retry
+DELETE FROM sadie_gtm.hotel_booking_engines
+WHERE hotel_id = :hotel_id;
+
+-- name: delete_hbe_batch_for_retry*!
+-- Delete HBE records for batch retry
+DELETE FROM sadie_gtm.hotel_booking_engines
+WHERE hotel_id = ANY(:hotel_ids);
+
