@@ -208,10 +208,11 @@ class Service(IService):
     async def _save_texas_hotels(self, hotels: List[TexasHotel]) -> int:
         """Save Texas hotels to hotels table."""
         saved = 0
+        logger.info(f"Starting to save {len(hotels)} hotels to database...")
 
         for i, hotel in enumerate(hotels):
-            if (i + 1) % 1000 == 0:
-                logger.info(f"  Saving... {i + 1}/{len(hotels)}")
+            if (i + 1) % 500 == 0:
+                logger.info(f"  Progress: {i + 1}/{len(hotels)} ({saved} saved)")
 
             try:
                 # Use tax ID as unique source identifier for dedup
