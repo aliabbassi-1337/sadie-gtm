@@ -142,7 +142,7 @@ async def export_state_workflow(
             leads = await repo.get_leads_for_state(state, source_pattern=source)
             lead_count = len(leads)
 
-            uris = await service.export_state_with_cities(state, country)
+            uris = await service.export_state_with_cities(state, country, source_pattern=source)
             logger.info(f"Exported {len(uris)} reports to S3")
 
             if notify:
@@ -198,12 +198,15 @@ def main():
 
     elif args.state and not args.city:
         # Export all cities in state
+        source = args.source
+        if source and not source.endswith('%'):
+            source = f"{source}%"
         results = asyncio.run(export_state_workflow(
             args.state,
             args.country,
             args.local,
             not args.no_notify,
-            args.source,
+            source,
         ))
         print(f"\nExported {len(results)} reports:")
         for r in results:

@@ -139,7 +139,7 @@ class Service(IService):
         finally:
             os.unlink(tmp_path)
 
-    async def export_state(self, state: str, country: str = "USA") -> str:
+    async def export_state(self, state: str, country: str = "USA", source_pattern: str = None) -> str:
         """Generate Excel report for an entire state and upload to S3.
 
         Uses s5cmd for fast upload with fallback to boto3.
@@ -149,9 +149,9 @@ class Service(IService):
         logger.info(f"Generating state report for {state}")
 
         # Get data from database
-        leads = await repo.get_leads_for_state(state)
-        stats = await repo.get_state_stats(state)
-        top_engines = await repo.get_top_engines_for_state(state)
+        leads = await repo.get_leads_for_state(state, source_pattern=source_pattern)
+        stats = await repo.get_state_stats(state, source_pattern=source_pattern)
+        top_engines = await repo.get_top_engines_for_state(state, source_pattern=source_pattern)
 
         logger.info(f"Found {len(leads)} leads for {state}")
 
@@ -170,7 +170,12 @@ class Service(IService):
             tmp_path = tmp.name
 
         try:
-            s3_uri = f"s3://sadie-gtm/HotelLeadGen/{country}/{state}/{state}.xlsx"
+            if source_pattern:
+                source_name = source_pattern.replace('%', '').replace('_', '-')
+                filename = f"{state}_{source_name}.xlsx"
+            else:
+                filename = f"{state}.xlsx"
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/{country}/{state}/{filename}"
 
             # Try s5cmd first (faster)
             result = subprocess.run(
@@ -190,13 +195,13 @@ class Service(IService):
         finally:
             os.unlink(tmp_path)
 
-    async def export_state_with_cities(self, state: str, country: str = "USA") -> List[str]:
+    async def export_state_with_cities(self, state: str, country: str = "USA", source_pattern: str = None) -> List[str]:
         """Export single Excel file for entire state.
 
         Uses s5cmd for fast S3 upload.
         """
         # Just delegate to export_state - one file per state
-        uri = await self.export_state(state, country)
+        uri = await self.export_state(state, country, source_pattern=source_pattern)
         return [uri]
 
     def send_slack_notification(
