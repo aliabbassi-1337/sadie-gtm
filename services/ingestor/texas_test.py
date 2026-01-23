@@ -36,13 +36,13 @@ class TestParsing:
     @pytest.mark.no_db
     def test_parse_single_row(self):
         """Parse a single row correctly."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text(SAMPLE_ROWS[1])  # GUEST MOTEL
 
-            hotels = ingester.parse_csv(csv_path)
+            hotels = ingestor.parse_csv(csv_path)
 
         assert len(hotels) == 1
         hotel = hotels[0]
@@ -61,13 +61,13 @@ class TestParsing:
     @pytest.mark.no_db
     def test_parse_multiple_rows(self):
         """Parse multiple rows correctly."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text("\n".join(SAMPLE_ROWS))
 
-            hotels = ingester.parse_csv(csv_path)
+            hotels = ingestor.parse_csv(csv_path)
 
         assert len(hotels) == 4
 
@@ -80,39 +80,39 @@ class TestParsing:
     @pytest.mark.no_db
     def test_phone_formatting(self):
         """Phone numbers are formatted correctly."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text(SAMPLE_ROWS[3])  # SRUTI has location phone
 
-            hotels = ingester.parse_csv(csv_path)
+            hotels = ingestor.parse_csv(csv_path)
 
         assert hotels[0].phone == "713-869-9211"
 
     @pytest.mark.no_db
     def test_fallback_to_taxpayer_phone(self):
         """Falls back to taxpayer phone when location phone is empty."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text(SAMPLE_ROWS[2])  # INTOWN SUITES - no location phone
 
-            hotels = ingester.parse_csv(csv_path)
+            hotels = ingestor.parse_csv(csv_path)
 
         assert hotels[0].phone == "770-799-5000"
 
     @pytest.mark.no_db
     def test_out_of_state_taxpayer(self):
         """Correctly handles out-of-state taxpayer with TX location."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text(SAMPLE_ROWS[2])  # INTOWN SUITES - GA taxpayer
 
-            hotels = ingester.parse_csv(csv_path)
+            hotels = ingestor.parse_csv(csv_path)
 
         hotel = hotels[0]
         assert hotel.state == "TX"
@@ -121,7 +121,7 @@ class TestParsing:
     @pytest.mark.no_db
     def test_state_filter(self):
         """State filter excludes non-TX locations."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         non_tx_row = SAMPLE_ROWS[2].replace(',"TX","77598",', ',"OK","73301",')
 
@@ -129,7 +129,7 @@ class TestParsing:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text(non_tx_row)
 
-            hotels = ingester.parse_csv(csv_path, state_filter="TX")
+            hotels = ingestor.parse_csv(csv_path, state_filter="TX")
 
         assert len(hotels) == 0
 
@@ -140,14 +140,14 @@ class TestDeduplication:
     @pytest.mark.no_db
     def test_keeps_all_unique_locations(self):
         """Same taxpayer with different locations are all kept."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text("\n".join(MULTI_LOCATION_ROWS))
 
-            hotels = ingester.parse_csv(csv_path)
-            unique = ingester.deduplicate_hotels(hotels)
+            hotels = ingestor.parse_csv(csv_path)
+            unique = ingestor.deduplicate_hotels(hotels)
 
         assert len(unique) == 4
         location_numbers = {h.location_number for h in unique}
@@ -156,14 +156,14 @@ class TestDeduplication:
     @pytest.mark.no_db
     def test_keeps_most_recent_quarter(self):
         """When same hotel appears in multiple quarters, keep most recent."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text("\n".join(DUPLICATE_QUARTER_ROWS))
 
-            hotels = ingester.parse_csv(csv_path)
-            unique = ingester.deduplicate_hotels(hotels)
+            hotels = ingestor.parse_csv(csv_path)
+            unique = ingestor.deduplicate_hotels(hotels)
 
         assert len(unique) == 1
         assert unique[0].reporting_quarter == "2025Q3"
@@ -172,7 +172,7 @@ class TestDeduplication:
     @pytest.mark.no_db
     def test_dedup_by_tax_id_not_name(self):
         """Dedup uses tax ID - same name different tax IDs are kept."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         row1 = '10000000001,"OWNER A","ADDR","CITY","TX","77777",101,"5551234567",00001,"HOLIDAY INN","123 MAIN ST","HOUSTON","TX","77001",101,"",100,20200101,,2025Q3,50,10000.00,10000.00,'
         row2 = '10000000002,"OWNER B","ADDR","CITY","TX","77777",101,"5559876543",00001,"HOLIDAY INN","456 OTHER ST","HOUSTON","TX","77002",101,"",80,20200101,,2025Q3,50,8000.00,8000.00,'
@@ -181,8 +181,8 @@ class TestDeduplication:
             csv_path = Path(tmpdir) / "test.csv"
             csv_path.write_text(f"{row1}\n{row2}")
 
-            hotels = ingester.parse_csv(csv_path)
-            unique = ingester.deduplicate_hotels(hotels)
+            hotels = ingestor.parse_csv(csv_path)
+            unique = ingestor.deduplicate_hotels(hotels)
 
         assert len(unique) == 2
 
@@ -193,7 +193,7 @@ class TestLoadQuarters:
     @pytest.mark.no_db
     def test_load_quarterly_data(self):
         """Load data from a quarter directory."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             quarter_dir = Path(tmpdir) / "HOT 25 Q3"
@@ -205,7 +205,7 @@ class TestLoadQuarters:
             texas_module.CACHE_DIR = Path(tmpdir)
 
             try:
-                hotels, stats = ingester.load_quarterly_data("HOT 25 Q3")
+                hotels, stats = ingestor.load_quarterly_data("HOT 25 Q3")
             finally:
                 texas_module.CACHE_DIR = original_cache
 
@@ -216,7 +216,7 @@ class TestLoadQuarters:
     @pytest.mark.no_db
     def test_load_all_quarters_merges(self):
         """Load and merge data from multiple quarters."""
-        ingester = TexasIngestor()
+        ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir)
@@ -234,7 +234,7 @@ class TestLoadQuarters:
             texas_module.CACHE_DIR = cache_dir
 
             try:
-                hotels, stats = ingester.load_all_quarters()
+                hotels, stats = ingestor.load_all_quarters()
             finally:
                 texas_module.CACHE_DIR = original_cache
 

@@ -55,3 +55,35 @@ async def insert_hotel(
         )
 
         return hotel_id
+
+
+async def insert_room_count(
+    hotel_id: int,
+    room_count: int,
+    source: str,
+    confidence: Optional[float] = None,
+    status: int = 1,
+) -> Optional[int]:
+    """
+    Insert or update room count for a hotel.
+
+    Args:
+        hotel_id: Hotel ID
+        room_count: Number of rooms
+        source: Data source (e.g., "texas_hot", "enrichment")
+        confidence: Confidence score (0-1)
+        status: -1=processing, 0=failed, 1=success
+
+    Returns:
+        Room count record ID
+    """
+    async with get_conn() as conn:
+        result = await queries.insert_room_count(
+            conn,
+            hotel_id=hotel_id,
+            room_count=room_count,
+            source=source,
+            confidence=confidence,
+            status=status,
+        )
+        return result
