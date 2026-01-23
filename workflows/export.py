@@ -199,8 +199,8 @@ def main():
     elif args.state and not args.city:
         # Export all cities in state
         source = args.source
-        if source and not source.endswith('%'):
-            source = f"{source}%"
+        if source and '%' not in source:
+            source = f"%{source}%"
         results = asyncio.run(export_state_workflow(
             args.state,
             args.country,
