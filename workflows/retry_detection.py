@@ -22,7 +22,7 @@ import argparse
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.leadgen import repo
+from services.leadgen.service import Service
 
 
 async def retry_workflow(
@@ -38,10 +38,11 @@ async def retry_workflow(
     await init_db()
 
     try:
+        service = Service()
         source_pattern = f"%{source}%" if source else None
 
         # Get hotels with retryable errors
-        hotels = await repo.get_hotels_for_retry(
+        hotels = await service.get_hotels_for_retry(
             state=state,
             limit=limit,
             source_pattern=source_pattern,
@@ -80,12 +81,11 @@ async def retry_workflow(
 
         # Delete HBE records and reset status to allow retry
         hotel_ids = [h["id"] for h in hotels]
-        await repo.reset_hotels_for_retry(hotel_ids)
+        reset_count = await service.reset_hotels_for_retry(hotel_ids)
 
-        logger.info(f"Reset {len(hotel_ids)} hotels for retry (status=0, HBE deleted)")
         logger.info("Run detection workflow to retry these hotels")
 
-        return len(hotel_ids)
+        return reset_count
 
     finally:
         await close_db()
@@ -111,7 +111,7 @@ def main():
         args.dry_run,
     ))
 
-    print(f"\nReset {count} hotels for retry")
+    logger.info(f"Reset {count} hotels for retry")
 
 
 if __name__ == "__main__":
