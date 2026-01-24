@@ -15,10 +15,12 @@ ON CONFLICT (name, city) DO UPDATE SET
     external_id_type = COALESCE(EXCLUDED.external_id_type, sadie_gtm.hotels.external_id_type);
 
 -- BATCH_INSERT_ROOM_COUNTS
--- Params: (room_count, external_id_type, external_id, source_name)
+-- Params: (room_count, external_id_type, external_id, source_name, confidence)
 -- Lookup hotel by external_id
-INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status)
-SELECT h.id, $1, $4, 1
+INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status, confidence)
+SELECT h.id, $1, $4, 1, $5
 FROM sadie_gtm.hotels h
 WHERE h.external_id_type = $2 AND h.external_id = $3
-ON CONFLICT (hotel_id) DO UPDATE SET room_count = EXCLUDED.room_count;
+ON CONFLICT (hotel_id) DO UPDATE SET
+    room_count = EXCLUDED.room_count,
+    confidence = EXCLUDED.confidence;
