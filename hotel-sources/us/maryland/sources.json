@@ -1,0 +1,27 @@
+{
+  "state": "Maryland",
+  "country": "US",
+  "last_updated": "2026-01-24",
+  "files": [
+    {
+      "filename": "maryland_hotels_statewide.csv",
+      "source": "Maryland Department of Planning / SDAT CAMA Data",
+      "description": "Statewide property assessment data - 1,274 hotels/motels/B&Bs with room counts but NO NAMES (parcel IDs only)",
+      "has_room_count": true,
+      "has_names": false,
+      "coverage": "Statewide (all 24 counties)",
+      "url": "https://planning.maryland.gov/Pages/OurProducts/DownloadFiles.aspx",
+      "records": 1274,
+      "total_rooms": 81096
+    },
+    {
+      "filename": "maryland_montgomery_hotel_tax.csv",
+      "source": "Montgomery County Open Data",
+      "description": "Hotel tax filings - 173 hotels with taxable amounts",
+      "has_room_count": false,
+      "coverage": "Montgomery County only",
+      "url": "https://data.montgomerycountymd.gov/Finance-Tax-Property/Hotel-Tax/2jez-gq75"
+    }
+  ],
+  "notes": "Parcel data has room counts but no hotel names. Would need to match parcels to business names via address geocoding."
+}

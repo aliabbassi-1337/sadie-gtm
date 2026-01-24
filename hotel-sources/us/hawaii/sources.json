@@ -1,0 +1,21 @@
+{
+  "state": "Hawaii",
+  "country": "US",
+  "last_updated": "2026-01-24",
+  "files": [
+    {
+      "filename": "hawaii_vpi_properties_2023.xlsx",
+      "source": "Hawaii Tourism Authority",
+      "description": "Visitor Plant Inventory - list of all lodging properties",
+      "has_room_count": true,
+      "url": "https://www.hawaiitourismauthority.org/research/visitor-plant-inventory/"
+    },
+    {
+      "filename": "hawaii_visitor_plant_inventory_2025.pdf",
+      "source": "DBEDT",
+      "description": "2025 VPI summary report with statistics",
+      "has_room_count": true,
+      "url": "https://files.hawaii.gov/dbedt/visitor/visitor-plant/2025VPI.pdf"
+    }
+  ]
+}

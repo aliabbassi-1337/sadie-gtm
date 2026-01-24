@@ -1,0 +1,24 @@
+{
+  "state": "Texas",
+  "country": "US",
+  "last_updated": "2026-01-24",
+  "files": [
+    {
+      "filename": "texas_hotels.csv",
+      "source": "Texas Comptroller Hotel Occupancy Tax",
+      "description": "Hotels registered for hotel occupancy tax with room counts",
+      "has_room_count": true,
+      "coverage": "Statewide",
+      "records": 12474,
+      "notes": "Extracted from Q3 2025 quarterly tax filings"
+    }
+  ],
+  "implemented_sources": [
+    {
+      "name": "Texas Comptroller Hotel Occupancy Tax",
+      "has_room_count": true,
+      "ingestor": "services/ingestor/texas.py",
+      "workflow": "workflows/ingest_texas.py"
+    }
+  ]
+}

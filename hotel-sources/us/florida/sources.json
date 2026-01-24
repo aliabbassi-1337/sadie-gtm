@@ -1,0 +1,16 @@
+{
+  "state": "Florida",
+  "country": "US",
+  "last_updated": "2026-01-24",
+  "files": [],
+  "implemented_sources": [
+    {
+      "name": "Florida DBPR Lodging Licenses",
+      "url": "https://www2.myfloridalicense.com/hotels-restaurants/lodging-public-records/",
+      "has_room_count": false,
+      "ingestor": "services/ingestor/dbpr.py",
+      "workflow": "workflows/ingest_dbpr.py",
+      "record_count": "~193,000"
+    }
+  ]
+}
