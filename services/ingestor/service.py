@@ -4,7 +4,7 @@ Ingestor Service - Import hotel data from external sources.
 Provides a unified interface for ingesting hotel data from various sources:
 - Florida DBPR (lodging licenses)
 - Texas Comptroller (hotel occupancy tax)
-- Generic CSV sources (S3, HTTP, local)
+- Generic CSV sources (S3, HTTP, local) via CSVIngestorConfig
 """
 
 from abc import ABC, abstractmethod

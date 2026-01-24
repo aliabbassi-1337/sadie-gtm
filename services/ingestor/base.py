@@ -93,7 +93,7 @@ class BaseIngestor(ABC, Generic[T]):
         filters: Optional[dict] = None,
         upload_logs: bool = True,
         log_bucket: Optional[str] = None,
-        log_prefix: str = "ingest-logs/",
+        log_prefix: str = "logs/ingest/",
     ) -> Tuple[List[T], IngestStats]:
         """
         Full ingestion pipeline.
@@ -110,7 +110,7 @@ class BaseIngestor(ABC, Generic[T]):
             Tuple of (records, stats)
         """
         if upload_logs:
-            bucket = log_bucket or os.environ.get("INGEST_LOG_BUCKET")
+            bucket = log_bucket or os.environ.get("INGEST_LOG_BUCKET", "sadie-gtm")
             if bucket:
                 ingest_logger = IngestLogger(
                     source_name=self.source_name,
