@@ -184,7 +184,7 @@ async def batch_insert_hotels(
 async def batch_insert_room_counts(
     records: List[Tuple],
     external_id_type: Optional[str] = None,
-    confidence: float = 10,
+    confidence: float = 1.0,
 ) -> int:
     """
     Batch insert room counts.
