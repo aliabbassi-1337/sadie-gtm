@@ -266,9 +266,9 @@ class TestBatchInsertRoomCounts:
             mock_conn.executemany.assert_called_once()
             call_args = mock_conn.executemany.call_args
             batch_records = call_args[0][1]
-            # Format should be (room_count, external_id_type, external_id, source_name)
-            assert batch_records[0] == (100, "texas_hot", "123:001", "texas_hot")
-            assert batch_records[1] == (50, "texas_hot", "123:002", "texas_hot")
+            # Format should be (room_count, external_id_type, external_id, source_name, confidence)
+            assert batch_records[0] == (100, "texas_hot", "123:001", "texas_hot", 1.0)
+            assert batch_records[1] == (50, "texas_hot", "123:002", "texas_hot", 1.0)
 
     @pytest.mark.asyncio
     async def test_returns_zero_without_external_id_type(self):

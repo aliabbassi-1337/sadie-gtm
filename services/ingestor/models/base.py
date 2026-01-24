@@ -24,6 +24,7 @@ class BaseRecord(BaseModel):
 
     # Contact
     phone: Optional[str] = None
+    website: Optional[str] = None
 
     # Classification
     category: Optional[str] = None
