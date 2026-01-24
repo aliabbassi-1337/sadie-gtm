@@ -5,7 +5,18 @@
 Enrich government parcel/tax data (SF, Maryland) with hotel names and websites using Serper Maps API.
 
 **Input:** `s3://sadie-gtm/hotel-sources/us/california/san_francisco_hotels.csv`
-**Output:** `s3://sadie-gtm/hotel-sources/us/california/san_francisco_hotels_enriched.csv`
+
+## Data Sources
+
+### San Francisco Assessor Data
+- **Main Dataset:** https://data.sfgov.org/Housing-and-Buildings/Assessor-Historical-Secured-Property-Tax-Rolls/wv5m-vpq2
+- **Property Class Codes:** https://data.sfgov.org/Housing-and-Buildings/Reference-Assessor-Recorder-Property-Class-Codes/pa56-ek2h
+- **API Endpoint:** `https://data.sfgov.org/resource/wv5m-vpq2.csv`
+- **GeoJSON Endpoint:** `https://data.sfgov.org/resource/wv5m-vpq2.geojson`
+
+### Maryland CAMA/SDAT Data
+- **Download Page:** https://planning.maryland.gov/Pages/OurProducts/DownloadFiles.aspx
+- **Notes:** Parcel data with room counts but no hotel names. Needs geocoding before enrichment.
 
 ## Problem
 
@@ -50,62 +61,6 @@ Returns places near coordinates with name, address, website, phone, rating.
 
 ### Function: `enrich_hotel_from_coords(lat, lon, address)`
 
-```python
-async def enrich_hotel_from_coords(lat: float, lon: float, address: str) -> dict:
-    """
-    1. Serper Places search at lat/lon for "hotel"
-    2. Find closest match to our coordinates
-    3. Return enriched data
-    """
-
-    response = await httpx.post(
-        "https://google.serper.dev/places",
-        headers={
-            "X-API-KEY": os.environ["SERPER_API_KEY"],
-            "Content-Type": "application/json"
-        },
-        json={
-            "q": "hotel",
-            "ll": f"@{lat},{lon},17z"
-        }
-    )
-
-    data = response.json()
-    places = data.get("places", [])
-
-    if not places:
-        return {"matched": False}
-
-    # Get closest result
-    best = places[0]
-
-    return {
-        "matched": True,
-        "name": best.get("title"),
-        "website": best.get("website"),
-        "phone": best.get("phoneNumber"),
-        "rating": best.get("rating"),
-        "cid": best.get("cid")
-    }
-```
-
-### Batch Processing
-
-```python
-async def enrich_sf_hotels():
-    """Process all SF hotels with rate limiting."""
-
-    df = pd.read_csv("s3://sadie-gtm/hotel-sources/us/california/san_francisco_hotels.csv")
-
-    enriched = []
-    for _, row in df.iterrows():
-        result = await enrich_hotel_from_coords(row.lat, row.lon, row.address)
-        enriched.append({**row.to_dict(), **result})
-        await asyncio.sleep(0.1)  # Rate limit
-
-    pd.DataFrame(enriched).to_csv("san_francisco_hotels_enriched.csv", index=False)
-```
-
 ## Output Schema
 
 ```csv
@@ -129,25 +84,11 @@ Serper: $0.001 per request (1000x cheaper than Google Places)
 
 ```
 services/enrichment/
-├── serper_client.py     # Serper API client
-├── gov_data_enricher.py # Batch enrichment logic
-└── gov_data_enricher_test.py
+├── web_enricher_with_{idk "location" maybe?}.py 
 ```
 
 ## Environment
 
 ```
 SERPER_API_KEY=...
-```
-
-## Usage
-
-```python
-from services.enrichment.gov_data_enricher import enrich_sf_hotels
-
-# Run enrichment
-await enrich_sf_hotels()
-
-# Upload to S3
-aws s3 cp san_francisco_hotels_enriched.csv s3://sadie-gtm/hotel-sources/us/california/
 ```
