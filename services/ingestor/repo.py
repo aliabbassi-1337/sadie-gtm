@@ -184,6 +184,7 @@ async def batch_insert_hotels(
 async def batch_insert_room_counts(
     records: List[Tuple],
     external_id_type: Optional[str] = None,
+    confidence: float = 1.0,
 ) -> int:
     """
     Batch insert room counts.
@@ -191,6 +192,7 @@ async def batch_insert_room_counts(
     Args:
         records: List of tuples (room_count, external_id, source_name)
         external_id_type: Type of external ID for lookup
+        confidence: Confidence score (default 10 for license data)
 
     Returns:
         Number of records processed
@@ -199,7 +201,7 @@ async def batch_insert_room_counts(
         return 0
 
     async with get_conn() as conn:
-        # Format: (room_count, external_id_type, external_id, source_name)
-        batch_records = [(r[0], external_id_type, r[1], r[2]) for r in records]
+        # Format: (room_count, external_id_type, external_id, source_name, confidence)
+        batch_records = [(r[0], external_id_type, r[1], r[2], confidence) for r in records]
         await conn.executemany(BATCH_INSERT_ROOM_COUNTS, batch_records)
         return len(records)

@@ -37,8 +37,7 @@ from loguru import logger
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.ingestor import IngestorService
-from services.ingestor.dbpr import LICENSE_TYPES, RANK_CODES, DBPRIngestor
+from services.ingestor import Service, DBPRIngestor, LICENSE_TYPES, RANK_CODES
 from db.client import init_db
 
 
@@ -54,10 +53,16 @@ def list_ranks():
 
 async def show_stats():
     """Download and show statistics without saving."""
-    ingester = DBPRIngestor()
+    from services.ingestor.base import BaseIngestor
+    from unittest.mock import AsyncMock, patch
+
+    ingestor = DBPRIngestor()
 
     logger.info("Downloading DBPR lodging data for statistics...")
-    licenses, stats = await ingester.download_all_licenses()
+    # Mock batch_save to prevent database writes
+    with patch.object(ingestor, "_batch_save", new_callable=AsyncMock) as mock:
+        mock.return_value = 0
+        licenses, stats = await ingestor.ingest(upload_logs=False)
 
     # Aggregate stats
     by_type = {}
@@ -179,12 +184,16 @@ License Types: """ + ", ".join(list_types())
     if not args.all and not args.new_only:
         parser.error("Must specify --all or --new-only")
 
+    # Dry run just shows stats
+    if args.dry_run:
+        await show_stats()
+        return
+
     # Initialize database
-    if not args.dry_run:
-        await init_db()
+    await init_db()
 
     # Run ingestion
-    service = IngestorService()
+    service = Service()
 
     logger.info("Starting DBPR license ingestion...")
     if args.county:
@@ -196,7 +205,6 @@ License Types: """ + ", ".join(list_types())
         counties=args.county,
         license_types=args.type,
         new_only=args.new_only,
-        save_to_db=not args.dry_run,
     )
 
     # Output summary

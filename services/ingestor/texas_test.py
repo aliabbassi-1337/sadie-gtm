@@ -4,7 +4,8 @@ import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from services.ingestor.texas import TexasIngestor, TexasHotel
+from services.ingestor import TexasIngestor, TexasHotel
+from services.ingestor.ingestors import texas as texas_module
 
 
 # Sample rows from actual Texas HOT data
@@ -147,7 +148,7 @@ class TestDeduplication:
             csv_path.write_text("\n".join(MULTI_LOCATION_ROWS))
 
             hotels = ingestor.parse_csv(csv_path)
-            unique = ingestor.deduplicate_hotels(hotels)
+            unique = ingestor.deduplicate(hotels)
 
         assert len(unique) == 4
         location_numbers = {h.location_number for h in unique}
@@ -163,7 +164,7 @@ class TestDeduplication:
             csv_path.write_text("\n".join(DUPLICATE_QUARTER_ROWS))
 
             hotels = ingestor.parse_csv(csv_path)
-            unique = ingestor.deduplicate_hotels(hotels)
+            unique = ingestor.deduplicate(hotels)
 
         assert len(unique) == 1
         assert unique[0].reporting_quarter == "2025Q3"
@@ -182,7 +183,7 @@ class TestDeduplication:
             csv_path.write_text(f"{row1}\n{row2}")
 
             hotels = ingestor.parse_csv(csv_path)
-            unique = ingestor.deduplicate_hotels(hotels)
+            unique = ingestor.deduplicate(hotels)
 
         assert len(unique) == 2
 
@@ -191,30 +192,27 @@ class TestLoadQuarters:
     """Tests for loading quarterly data files."""
 
     @pytest.mark.no_db
-    def test_load_quarterly_data(self):
+    def test_load_quarterly_data(self, monkeypatch):
         """Load data from a quarter directory."""
         ingestor = TexasIngestor()
 
         with TemporaryDirectory() as tmpdir:
-            quarter_dir = Path(tmpdir) / "HOT 25 Q3"
+            cache_dir = Path(tmpdir)
+            quarter_dir = cache_dir / "HOT 25 Q3"
             quarter_dir.mkdir(parents=True)
             (quarter_dir / "hotels.CSV").write_text("\n".join(SAMPLE_ROWS))
 
-            import services.ingestor.texas as texas_module
-            original_cache = texas_module.CACHE_DIR
-            texas_module.CACHE_DIR = Path(tmpdir)
+            # Patch the CACHE_DIR in the ingestors module
+            monkeypatch.setattr(texas_module, "CACHE_DIR", cache_dir)
 
-            try:
-                hotels, stats = ingestor.load_quarterly_data("HOT 25 Q3")
-            finally:
-                texas_module.CACHE_DIR = original_cache
+            hotels, stats = ingestor.load_quarterly_data("HOT 25 Q3")
 
         assert len(hotels) == 4
         assert stats.files_processed == 1
         assert stats.records_parsed == 4
 
     @pytest.mark.no_db
-    def test_load_all_quarters_merges(self):
+    def test_load_all_quarters_merges(self, monkeypatch):
         """Load and merge data from multiple quarters."""
         ingestor = TexasIngestor()
 
@@ -229,14 +227,10 @@ class TestLoadQuarters:
             q3_dir.mkdir(parents=True)
             (q3_dir / "hotels.CSV").write_text(DUPLICATE_QUARTER_ROWS[1])
 
-            import services.ingestor.texas as texas_module
-            original_cache = texas_module.CACHE_DIR
-            texas_module.CACHE_DIR = cache_dir
+            # Patch the CACHE_DIR in the ingestors module
+            monkeypatch.setattr(texas_module, "CACHE_DIR", cache_dir)
 
-            try:
-                hotels, stats = ingestor.load_all_quarters()
-            finally:
-                texas_module.CACHE_DIR = original_cache
+            hotels, stats = ingestor.load_all_quarters()
 
         assert len(hotels) == 1
         assert hotels[0].reporting_quarter == "2025Q3"
@@ -263,6 +257,7 @@ class TestModel:
 
         assert hotel.taxpayer_number == "10105865405"
         assert hotel.room_count == 30
+        assert hotel.external_id == "10105865405:00002"
 
     @pytest.mark.no_db
     def test_optional_fields_default_none(self):
@@ -280,3 +275,4 @@ class TestModel:
         assert hotel.phone is None
         assert hotel.room_count is None
         assert hotel.county is None
+        assert hotel.external_id == "123:001"

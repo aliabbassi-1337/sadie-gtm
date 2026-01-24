@@ -1,19 +1,28 @@
 """
 Ingestor Service - Import hotel data from external sources.
 
-Handles ingestion from:
+Provides a unified interface for ingesting hotel data from various sources:
 - Florida DBPR (lodging licenses)
-- SEC EDGAR (hotel property filings) - TODO
-- Other public data sources
+- Texas Comptroller (hotel occupancy tax)
+- Generic CSV sources (S3, HTTP, local) via CSVIngestorConfig
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Tuple, Type
+
 from loguru import logger
 
-from services.ingestor.dbpr import DBPRIngestor, DBPRLicense, DBPRIngestStats, LICENSE_TYPES
-from services.ingestor.texas import TexasIngestor, TexasHotel, TexasIngestStats
-from services.ingestor import repo
+from services.ingestor.base import BaseIngestor
+from services.ingestor.models.base import BaseRecord, IngestStats
+from services.ingestor.models.dbpr import DBPRLicense, LICENSE_TYPES
+from services.ingestor.models.texas import TexasHotel
+from services.ingestor.config import CSVIngestorConfig, IngestorConfig
+from services.ingestor import registry
+
+# Import ingestors to register them
+from services.ingestor.ingestors.dbpr import DBPRIngestor
+from services.ingestor.ingestors.texas import TexasIngestor
+from services.ingestor.ingestors.generic_csv import GenericCSVIngestor
 
 # Hotel status constants
 HOTEL_STATUS_PENDING = 0
@@ -26,12 +35,31 @@ class IService(ABC):
     """Ingestor Service Interface - Import hotel data from external sources."""
 
     @abstractmethod
+    async def ingest(
+        self,
+        source: str,
+        filters: Optional[dict] = None,
+        **kwargs,
+    ) -> Tuple[List[BaseRecord], IngestStats]:
+        """
+        Generic ingestion method for any registered source.
+
+        Args:
+            source: Registered ingestor name (e.g., "dbpr", "texas")
+            filters: Filters to apply (counties, states, categories, etc.)
+            **kwargs: Additional arguments passed to ingestor constructor
+
+        Returns:
+            Tuple of (records, stats)
+        """
+        pass
+
+    @abstractmethod
     async def ingest_dbpr(
         self,
         counties: Optional[List[str]] = None,
         license_types: Optional[List[str]] = None,
         new_only: bool = False,
-        save_to_db: bool = True,
     ) -> Tuple[List[DBPRLicense], dict]:
         """
         Ingest Florida DBPR lodging licenses.
@@ -40,7 +68,6 @@ class IService(ABC):
             counties: Filter to specific counties (e.g., ["Palm Beach", "Miami-Dade"])
             license_types: Filter to specific types (e.g., ["Hotel", "Motel"])
             new_only: Only download new licenses (current fiscal year)
-            save_to_db: Whether to save to hotels table
 
         Returns:
             Tuple of (licenses, stats dict)
@@ -48,211 +75,143 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    def get_dbpr_license_types(self) -> Dict[str, str]:
-        """Get mapping of DBPR license type codes to names."""
-        pass
-
-    @abstractmethod
     async def ingest_texas(
         self,
         quarter: Optional[str] = None,
-        save_to_db: bool = True,
     ) -> Tuple[List[TexasHotel], dict]:
         """
         Ingest Texas hotel occupancy tax data.
 
         Args:
             quarter: Specific quarter directory (e.g., "HOT 25 Q3"). If None, loads all quarters.
-            save_to_db: Whether to save to hotels table
 
         Returns:
             Tuple of (hotels, stats dict)
         """
+        pass
+
+    @abstractmethod
+    def get_dbpr_license_types(self) -> dict:
+        """Get mapping of DBPR license type codes to names."""
+        pass
+
+    @abstractmethod
+    def list_sources(self) -> List[str]:
+        """List all registered ingestor sources."""
         pass
 
 
 class Service(IService):
     """Service for ingesting hotel data from external sources."""
 
+    async def ingest(
+        self,
+        source: str,
+        filters: Optional[dict] = None,
+        **kwargs,
+    ) -> Tuple[List[BaseRecord], IngestStats]:
+        """
+        Generic ingestion method for any registered source.
+
+        Usage:
+            service = Service()
+
+            # DBPR ingestion
+            records, stats = await service.ingest("dbpr", new_only=True)
+
+            # Texas ingestion
+            records, stats = await service.ingest("texas", quarter="HOT 25 Q3")
+
+            # With filters
+            records, stats = await service.ingest(
+                "dbpr",
+                filters={"counties": ["Palm Beach"], "license_types": ["Hotel"]}
+            )
+        """
+        # Get ingestor class
+        ingestor_cls = registry.get_ingestor(source)
+
+        # Create ingestor instance
+        ingestor = ingestor_cls(**kwargs)
+
+        # Run ingestion
+        records, stats = await ingestor.ingest(filters=filters)
+
+        return records, stats
+
     async def ingest_dbpr(
         self,
         counties: Optional[List[str]] = None,
         license_types: Optional[List[str]] = None,
         new_only: bool = False,
-        save_to_db: bool = True,
     ) -> Tuple[List[DBPRLicense], dict]:
         """
         Ingest Florida DBPR lodging licenses.
 
-        Args:
-            counties: Filter to specific counties (e.g., ["Palm Beach", "Miami-Dade"])
-            license_types: Filter to specific types (e.g., ["Hotel", "Motel"])
-            new_only: Only download new licenses (current fiscal year)
-            save_to_db: Whether to save to hotels table
-
-        Returns:
-            Tuple of (licenses, stats dict)
+        This method provides backward compatibility with the old API.
         """
-        ingester = DBPRIngestor()
-
-        if new_only:
-            licenses, stats = await ingester.download_new_licenses()
-        else:
-            licenses, stats = await ingester.download_all_licenses()
-
-        # Filter by county if specified
+        # Build filters
+        filters = {}
         if counties:
-            counties_lower = [c.lower() for c in counties]
-            licenses = [
-                lic for lic in licenses
-                if lic.county.lower() in counties_lower
-            ]
-            logger.info(f"Filtered to {len(licenses)} licenses in counties: {counties}")
-
-        # Filter by license type if specified
+            filters["counties"] = counties
         if license_types:
-            types_lower = [t.lower() for t in license_types]
-            licenses = [
-                lic for lic in licenses
-                if lic.license_type.lower() in types_lower or lic.rank.lower() in types_lower
-            ]
-            logger.info(f"Filtered to {len(licenses)} licenses of types: {license_types}")
+            filters["license_types"] = license_types
 
-        # Save to database
-        if save_to_db and licenses:
-            saved = await self._save_dbpr_licenses(licenses)
-            stats.records_saved = saved
-            logger.info(f"Saved {saved} licenses to database")
+        # Create and run ingestor
+        ingestor = DBPRIngestor(new_only=new_only)
+        records, stats = await ingestor.ingest(
+            filters=filters if filters else None,
+        )
 
-        return licenses, {
-            "files_downloaded": stats.files_downloaded,
-            "records_parsed": stats.records_parsed,
-            "records_saved": stats.records_saved,
-            "duplicates_skipped": stats.duplicates_skipped,
-            "errors": stats.errors,
-        }
-
-    async def _save_dbpr_licenses(self, licenses: List[DBPRLicense]) -> int:
-        """Save DBPR licenses to hotels table."""
-        saved = 0
-
-        for i, lic in enumerate(licenses):
-            if (i + 1) % 1000 == 0:
-                logger.info(f"  Saving... {i + 1}/{len(licenses)}")
-
-            try:
-                # Clean source category (e.g., "dbpr_hotel", "dbpr_motel")
-                source = f"dbpr_{lic.license_type.lower().replace(' ', '_').replace('-', '_')}"
-
-                # Insert with external_id (license number) for dedup
-                result = await repo.insert_hotel(
-                    name=lic.business_name or lic.licensee_name,
-                    source=source,
-                    external_id=lic.license_number,
-                    id_type="dbpr_license",
-                    status=HOTEL_STATUS_PENDING,
-                    address=lic.address,
-                    city=lic.city,
-                    state=lic.state,
-                    phone=lic.phone,
-                )
-                if result:
-                    saved += 1
-
-            except Exception as e:
-                # Likely duplicate - skip silently
-                logger.debug(f"Failed to save {lic.license_number}: {e}")
-                continue
-
-        return saved
-
-    def get_dbpr_license_types(self) -> Dict[str, str]:
-        """Get mapping of DBPR license type codes to names."""
-        return LICENSE_TYPES.copy()
+        return records, stats.to_dict()
 
     async def ingest_texas(
         self,
         quarter: Optional[str] = None,
-        save_to_db: bool = True,
     ) -> Tuple[List[TexasHotel], dict]:
         """
         Ingest Texas hotel occupancy tax data.
 
-        Args:
-            quarter: Specific quarter directory (e.g., "HOT 25 Q3"). If None, loads all quarters.
-            save_to_db: Whether to save to hotels table
-
-        Returns:
-            Tuple of (hotels, stats dict)
+        This method provides backward compatibility with the old API.
         """
-        ingestor = TexasIngestor()
+        ingestor = TexasIngestor(quarter=quarter)
+        records, stats = await ingestor.ingest()
 
-        # Load data - either single quarter or all quarters
-        if quarter:
-            hotels, stats = ingestor.load_quarterly_data(quarter)
-            unique_hotels = ingestor.deduplicate_hotels(hotels)
-        else:
-            unique_hotels, stats = ingestor.load_all_quarters()
+        return records, stats.to_dict()
 
-        logger.info(f"Loaded {len(unique_hotels)} unique Texas hotels")
+    async def ingest_from_config(
+        self,
+        config: CSVIngestorConfig,
+        filters: Optional[dict] = None,
+    ) -> Tuple[List[BaseRecord], IngestStats]:
+        """
+        Ingest data using a CSV configuration.
 
-        # Save to database
-        if save_to_db and unique_hotels:
-            saved = await self._save_texas_hotels(unique_hotels)
-            stats.records_saved = saved
-            logger.info(f"Saved {saved} hotels to database")
+        This enables zero-code ingestion from new data sources.
 
-        return unique_hotels, {
-            "files_processed": stats.files_processed,
-            "records_parsed": stats.records_parsed,
-            "records_saved": stats.records_saved,
-            "duplicates_skipped": stats.duplicates_skipped,
-            "errors": stats.errors,
-        }
+        Usage:
+            config = CSVIngestorConfig(
+                name="new_state",
+                external_id_type="new_state_license",
+                source_type="s3",
+                s3_bucket="my-bucket",
+                s3_prefix="data/",
+                columns=[...],
+                external_id_columns=["LICENSE_NO"],
+            )
+            records, stats = await service.ingest_from_config(config)
+        """
+        ingestor = GenericCSVIngestor(config)
+        return await ingestor.ingest(filters=filters)
 
-    async def _save_texas_hotels(self, hotels: List[TexasHotel]) -> int:
-        """Save Texas hotels to hotels table using batch inserts."""
-        logger.info(f"Starting batch insert of {len(hotels)} hotels...")
+    def get_dbpr_license_types(self) -> dict:
+        """Get mapping of DBPR license type codes to names."""
+        return LICENSE_TYPES.copy()
 
-        BATCH_SIZE = 500
-        saved = 0
+    def list_sources(self) -> List[str]:
+        """List all registered ingestor sources."""
+        return registry.list_ingestors()
 
-        for batch_start in range(0, len(hotels), BATCH_SIZE):
-            batch = hotels[batch_start:batch_start + BATCH_SIZE]
 
-            # Prepare batch data with external_id as last element
-            # (name, source, status, address, city, state, country, phone, category, external_id)
-            records = [
-                (
-                    hotel.name,
-                    "texas_hot",
-                    HOTEL_STATUS_PENDING,
-                    hotel.address,
-                    hotel.city,
-                    hotel.state,
-                    "USA",
-                    hotel.phone,
-                    "hotel",
-                    f"{hotel.taxpayer_number}:{hotel.location_number}",
-                )
-                for hotel in batch
-            ]
-
-            # Batch insert via repo layer
-            batch_saved = await repo.batch_insert_hotels(records, external_id_type="texas_hot")
-            saved += batch_saved
-
-            logger.info(f"  Batch {batch_start//BATCH_SIZE + 1}: {batch_start + len(batch)}/{len(hotels)} processed")
-
-        # Batch insert room counts using external_id lookup
-        logger.info("Inserting room counts...")
-        room_records = [
-            (hotel.room_count, f"{hotel.taxpayer_number}:{hotel.location_number}", "texas_hot")
-            for hotel in hotels if hotel.room_count
-        ]
-
-        if room_records:
-            await repo.batch_insert_room_counts(room_records, external_id_type="texas_hot")
-
-        logger.info(f"Batch insert complete: {saved} hotels")
-        return saved
+# Alias for backward compatibility
+IngestorService = Service

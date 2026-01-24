@@ -25,15 +25,14 @@ import argparse
 import asyncio
 import sys
 import os
-from typing import Optional, List
+from typing import List
 
 from loguru import logger
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.ingestor import Service
-from services.ingestor.texas import TexasHotel
+from services.ingestor import Service, TexasHotel
 from db.client import init_db, close_db
 
 
@@ -102,51 +101,61 @@ async def main():
     logger.remove()
     logger.add(sys.stderr, level="INFO", format="<level>{level: <8}</level> | {message}")
 
-    # Initialize service
-    service = Service()
-
-    # Determine save mode
-    save_to_db = not args.dry_run and not args.stats
-
-    if save_to_db:
-        await init_db()
-
     source = args.quarter if args.quarter else "all quarters"
     logger.info(f"Starting Texas hotel ingestion from {source}...")
 
-    # Run ingestion via service
-    hotels, stats = await service.ingest_texas(
-        quarter=args.quarter,
-        save_to_db=save_to_db,
-    )
+    # Dry-run or stats mode: parse without saving
+    if args.dry_run or args.stats:
+        from services.ingestor.ingestors.texas import TexasIngestor
+        from unittest.mock import AsyncMock, patch
 
-    if save_to_db:
-        await close_db()
+        ingestor = TexasIngestor(quarter=args.quarter)
+        with patch.object(ingestor, "_batch_save", new_callable=AsyncMock) as mock:
+            mock.return_value = 0
+            hotels, ingest_stats = await ingestor.ingest(upload_logs=False)
+        stats = ingest_stats.to_dict()
+
+        if args.stats:
+            print_stats(hotels, stats)
+        else:
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info("Dry Run Complete")
+            logger.info("=" * 60)
+            logger.info(f"Files processed: {stats.get('files_processed', 0)}")
+            logger.info(f"Records parsed: {stats.get('records_parsed', 0):,}")
+            logger.info(f"Would save: {len(hotels):,} records")
+        return
+
+    # Normal mode: save to database
+    await init_db()
+
+    service = Service()
+    hotels, stats = await service.ingest_texas(quarter=args.quarter)
+
+    await close_db()
 
     # Output summary
-    if args.stats:
-        print_stats(hotels, stats)
-    else:
-        logger.info("")
-        logger.info("=" * 60)
-        logger.info("Ingestion Complete")
-        logger.info("=" * 60)
-        logger.info(f"Files processed: {stats.get('files_processed', 0)}")
-        logger.info(f"Records parsed: {stats.get('records_parsed', 0):,}")
-        logger.info(f"Records saved: {stats.get('records_saved', 0):,}")
-        logger.info(f"Duplicates skipped: {stats.get('duplicates_skipped', 0):,}")
-        logger.info(f"Errors: {stats.get('errors', 0)}")
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("Ingestion Complete")
+    logger.info("=" * 60)
+    logger.info(f"Files processed: {stats.get('files_processed', 0)}")
+    logger.info(f"Records parsed: {stats.get('records_parsed', 0):,}")
+    logger.info(f"Records saved: {stats.get('records_saved', 0):,}")
+    logger.info(f"Duplicates skipped: {stats.get('duplicates_skipped', 0):,}")
+    logger.info(f"Errors: {stats.get('errors', 0)}")
 
-        if hotels and not args.dry_run:
-            logger.info("")
-            logger.info("Sample records (first 5):")
-            for hotel in hotels[:5]:
-                logger.info(f"  {hotel.name}")
-                logger.info(f"    {hotel.address}, {hotel.city}, {hotel.state}")
-                if hotel.phone:
-                    logger.info(f"    Phone: {hotel.phone}")
-                if hotel.room_count:
-                    logger.info(f"    Rooms: {hotel.room_count}")
+    if hotels:
+        logger.info("")
+        logger.info("Sample records (first 5):")
+        for hotel in hotels[:5]:
+            logger.info(f"  {hotel.name}")
+            logger.info(f"    {hotel.address}, {hotel.city}, {hotel.state}")
+            if hotel.phone:
+                logger.info(f"    Phone: {hotel.phone}")
+            if hotel.room_count:
+                logger.info(f"    Rooms: {hotel.room_count}")
 
 
 if __name__ == "__main__":
