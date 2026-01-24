@@ -28,12 +28,14 @@ jobs:
           for ip in $IPS; do
             echo "=== Deploying to $ip ==="
 
-            # Remove old keys and copy deploy key pair to server
-            ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip 'rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub'
-            echo "$DEPLOY_KEY" | ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip 'mkdir -p ~/.ssh && cat > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519'
-            echo "$DEPLOY_KEY_PUB" | ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip 'cat > ~/.ssh/id_ed25519.pub && chmod 644 ~/.ssh/id_ed25519.pub'
-
-            if ! ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip '
+            # Single SSH connection: setup keys and deploy
+            if ! ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip "
+              mkdir -p ~/.ssh
+              rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub
+              echo '$DEPLOY_KEY' > ~/.ssh/id_ed25519
+              echo '$DEPLOY_KEY_PUB' > ~/.ssh/id_ed25519.pub
+              chmod 600 ~/.ssh/id_ed25519
+              chmod 644 ~/.ssh/id_ed25519.pub
               ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
               cd ~/sadie-gtm
               git remote set-url origin git@github.com:aliabbassi-1337/sadie-gtm.git
@@ -41,7 +43,7 @@ jobs:
               git reset --hard origin/main
               git clean -fd
               sudo systemctl restart detection
-            '; then
+            "; then
               echo "FAILED: $ip"
               FAILED="$FAILED $ip"
             fi
