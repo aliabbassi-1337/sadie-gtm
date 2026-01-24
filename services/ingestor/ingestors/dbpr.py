@@ -126,6 +126,9 @@ class DBPRIngestor(BaseIngestor[DBPRLicense]):
         """Apply DBPR-specific filters."""
         result = records
 
+        # Filter out single-unit properties (not real hotels)
+        result = [r for r in result if r.num_units is None or r.num_units > 1]
+
         # Filter by county
         if "counties" in filters and filters["counties"]:
             counties_lower = [c.lower() for c in filters["counties"]]
