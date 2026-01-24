@@ -25,15 +25,14 @@ import argparse
 import asyncio
 import sys
 import os
-from typing import Optional, List
+from typing import List
 
 from loguru import logger
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.ingestor import Service
-from services.ingestor.texas import TexasHotel
+from services.ingestor import Service, TexasHotel
 from db.client import init_db, close_db
 
 

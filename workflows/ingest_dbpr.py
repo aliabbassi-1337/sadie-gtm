@@ -37,8 +37,7 @@ from loguru import logger
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.ingestor import IngestorService
-from services.ingestor.dbpr import LICENSE_TYPES, RANK_CODES, DBPRIngestor
+from services.ingestor import Service, DBPRIngestor, LICENSE_TYPES, RANK_CODES
 from db.client import init_db
 
 
@@ -54,10 +53,10 @@ def list_ranks():
 
 async def show_stats():
     """Download and show statistics without saving."""
-    ingester = DBPRIngestor()
+    ingestor = DBPRIngestor()
 
     logger.info("Downloading DBPR lodging data for statistics...")
-    licenses, stats = await ingester.download_all_licenses()
+    licenses, stats = await ingestor.ingest(save_to_db=False)
 
     # Aggregate stats
     by_type = {}
@@ -184,7 +183,7 @@ License Types: """ + ", ".join(list_types())
         await init_db()
 
     # Run ingestion
-    service = IngestorService()
+    service = Service()
 
     logger.info("Starting DBPR license ingestion...")
     if args.county:
