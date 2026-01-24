@@ -634,6 +634,44 @@ SET address = COALESCE(:address, address),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
+-- name: get_hotels_pending_coordinate_enrichment
+-- Get hotels with coordinates but no website (parcel data needing Places API lookup)
+SELECT
+    id,
+    name,
+    address,
+    city,
+    state,
+    category,
+    source,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude
+FROM sadie_gtm.hotels
+WHERE location IS NOT NULL
+  AND (website IS NULL OR website = '')
+  AND source IN ('sf_assessor', 'md_sdat_cama')
+ORDER BY id
+LIMIT :limit;
+
+-- name: get_pending_coordinate_enrichment_count^
+-- Count hotels needing coordinate-based enrichment
+SELECT COUNT(*) AS count
+FROM sadie_gtm.hotels
+WHERE location IS NOT NULL
+  AND (website IS NULL OR website = '')
+  AND source IN ('sf_assessor', 'md_sdat_cama');
+
+-- name: update_hotel_from_places!
+-- Update hotel with data from Places API (name, website, phone)
+UPDATE sadie_gtm.hotels
+SET name = COALESCE(:name, name),
+    website = COALESCE(:website, website),
+    phone_google = COALESCE(:phone, phone_google),
+    rating = COALESCE(:rating, rating),
+    address = COALESCE(:address, address),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
 -- ============================================================================
 -- INGESTOR QUERIES
 -- ============================================================================
