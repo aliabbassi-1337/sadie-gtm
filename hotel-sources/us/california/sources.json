@@ -1,0 +1,39 @@
+{
+  "state": "California",
+  "country": "US",
+  "last_updated": "2026-01-24",
+  "notes": "No statewide centralized source. Hotel tax (TOT) collected at local level. Data available for LA County and San Francisco.",
+  "files": [
+    {
+      "filename": "la_county_hotels.csv",
+      "source": "LA County Environmental Health Housing Inspections",
+      "description": "Hotels inspected by LA County Environmental Health 2023-2025",
+      "has_room_count": true,
+      "room_count_type": "range",
+      "coverage": "Los Angeles County",
+      "records": 1637,
+      "notes": "Room counts in ranges: 6-10, 11-20, 21-50, 51-100, 101+"
+    },
+    {
+      "filename": "san_francisco_hotels.csv",
+      "source": "SF Assessor Secured Property Tax Roll 2023",
+      "description": "Hotels and motels with lat/lon coordinates",
+      "has_room_count": true,
+      "has_geospatial": true,
+      "coverage": "San Francisco City/County",
+      "url": "https://data.sfgov.org/Housing-and-Buildings/Assessor-Historical-Secured-Property-Tax-Rolls/wv5m-vpq2",
+      "records": 606,
+      "notes": "Has parcel_number, address, lat, lon, rooms. Ready for enrichment via Google Places API."
+    },
+    {
+      "filename": "san_francisco_hotels.geojson",
+      "source": "SF Assessor Secured Property Tax Roll 2023",
+      "description": "GeoJSON with Point geometry for each hotel parcel",
+      "has_room_count": true,
+      "has_geospatial": true,
+      "coverage": "San Francisco City/County",
+      "records": 606,
+      "notes": "FeatureCollection with Point coordinates for mapping"
+    }
+  ]
+}

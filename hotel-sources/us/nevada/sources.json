@@ -1,0 +1,41 @@
+{
+  "state": "Nevada",
+  "country": "US",
+  "target_cities": ["Las Vegas", "Henderson", "Reno"],
+  "last_updated": "2026-01-24",
+  "files": [
+    {
+      "filename": "nevada_clark_county_hotel_inventory.pdf",
+      "source": "LVCVA",
+      "description": "All lodging properties in Clark County with room counts",
+      "has_room_count": true,
+      "url": "https://www.lvcva.com/research/reports/post/clark-county-hotel-and-meeting-space-inventory/"
+    },
+    {
+      "filename": "nevada_gaming_abstract_2024.pdf",
+      "source": "Nevada Gaming Control Board",
+      "description": "Annual gaming abstract with room department stats",
+      "has_room_count": "aggregate",
+      "url": "https://www.gaming.nv.gov/about-us/statistics-and-publications/"
+    },
+    {
+      "filename": "nevada_gaming_nonrestricted_count.xlsx",
+      "source": "Nevada Gaming Control Board",
+      "description": "Nonrestricted gaming location counts",
+      "has_room_count": false,
+      "url": "https://www.gaming.nv.gov/about-us/statistics-and-publications/"
+    }
+  ],
+  "pending_sources": [
+    {
+      "name": "Clark County Assessor Commercial Extraction",
+      "access": "subscription",
+      "contact": "702-455-3882"
+    },
+    {
+      "name": "Southern Nevada Health District Hotel Permits",
+      "access": "records_request",
+      "contact": "pa@snhd.org"
+    }
+  ]
+}

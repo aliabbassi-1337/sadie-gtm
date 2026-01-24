@@ -1,0 +1,15 @@
+{
+  "state": "Tennessee",
+  "country": "US",
+  "last_updated": "2026-01-24",
+  "files": [],
+  "pending_sources": [
+    {
+      "name": "TN ABC Hotel-Motel Liquor Licenses",
+      "url": "https://rlpsmobile.abc.tn.gov/LicenseSearch/licensesearchindex",
+      "has_room_count": true,
+      "notes": "Room count required for license tier (min 20 rooms)"
+    }
+  ],
+  "notes": "No downloadable government hotel data found yet"
+}
