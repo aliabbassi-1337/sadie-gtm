@@ -103,8 +103,23 @@ async def process_message(
         detector = BatchDetector(config)
         results = await detector.detect_batch(hotel_dicts)
 
-        # Save results
-        detected, errors = await service.save_detection_results(results)
+        # Save results with retry for transient DB errors
+        save_attempts = 0
+        max_save_attempts = 3
+        detected, errors = 0, 0
+        while save_attempts < max_save_attempts:
+            try:
+                detected, errors = await service.save_detection_results(results)
+                break
+            except Exception as save_error:
+                save_attempts += 1
+                error_str = str(save_error).lower()
+                is_transient = any(x in error_str for x in ['connection', 'closed', 'timeout', 'reset'])
+                if is_transient and save_attempts < max_save_attempts:
+                    logger.warning(f"DB save failed (attempt {save_attempts}), retrying: {save_error}")
+                    await asyncio.sleep(2 ** save_attempts)  # Exponential backoff
+                else:
+                    raise
 
         # Delete message from SQS (successful processing)
         delete_message(queue_url, receipt_handle)
@@ -114,10 +129,16 @@ async def process_message(
     except Exception as e:
         # Don't delete message - SQS will retry after visibility timeout
         logger.error(f"Error processing message (will retry): {e}")
-        # Send critical errors to Slack (DB errors, etc)
         error_str = str(e).lower()
-        if any(x in error_str for x in ['database', 'connection', 'asyncpg', 'postgres', 'timeout']):
+
+        # Categorize the error
+        is_browser_error = any(x in error_str for x in ['browser', 'target page', 'context', 'playwright'])
+        is_db_error = any(x in error_str for x in ['database', 'connection', 'asyncpg', 'postgres', 'closed'])
+
+        # Only alert for DB errors (browser errors are expected/transient)
+        if is_db_error and not is_browser_error:
             slack.send_error("Detection Consumer", f"DB/Connection error: {e}")
+
         raise  # Re-raise so worker_loop knows it failed
 
 
