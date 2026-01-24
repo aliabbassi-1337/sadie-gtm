@@ -34,7 +34,7 @@ from loguru import logger
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sources import get_source_config, list_sources
-from services.ingestor import GenericCSVIngestor
+from services.ingestor import Service
 from db.client import init_db, close_db
 
 
@@ -118,13 +118,12 @@ async def main():
     if args.state:
         filters["states"] = args.state
 
-    # Create ingestor
-    ingestor = GenericCSVIngestor(config)
-
     # Dry-run or stats mode: parse without saving
     if args.dry_run or args.stats:
         from unittest.mock import AsyncMock, patch
+        from services.ingestor import GenericCSVIngestor
 
+        ingestor = GenericCSVIngestor(config)
         logger.info(f"Starting ingestion from {config.name} (dry run)...")
         with patch.object(ingestor, "_batch_save", new_callable=AsyncMock) as mock:
             mock.return_value = 0
@@ -134,8 +133,9 @@ async def main():
             )
     else:
         await init_db()
+        service = Service()
         logger.info(f"Starting ingestion from {config.name}...")
-        records, stats = await ingestor.ingest(filters=filters if filters else None)
+        records, stats = await service.ingest_from_config(config, filters=filters if filters else None)
         await close_db()
 
     # Output summary
