@@ -248,6 +248,8 @@ class GenericCSVIngestor(BaseIngestor[BaseRecord]):
             zip_code=data.get("zip_code"),
             county=data.get("county") or self.config.default_county,
             country=data.get("country", self.config.default_country),
+            lat=data.get("lat"),
+            lon=data.get("lon"),
             phone=data.get("phone"),
             website=data.get("website"),
             category=data.get("category", self.config.default_category),

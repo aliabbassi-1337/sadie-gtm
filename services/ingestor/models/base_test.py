@@ -79,6 +79,8 @@ class TestBaseRecord:
             country="USA",
             phone="555-1234",
             category="hotel",
+            lat=29.7604,
+            lon=-95.3698,
         )
 
         result = record.to_db_tuple()
@@ -94,6 +96,8 @@ class TestBaseRecord:
             "555-1234",        # phone
             "hotel",           # category
             "test-123",        # external_id
+            29.7604,           # lat
+            -95.3698,          # lon
         )
 
     @pytest.mark.no_db
@@ -119,6 +123,8 @@ class TestBaseRecord:
             None,
             None,
             "test-123",
+            None,  # lat
+            None,  # lon
         )
 
 
