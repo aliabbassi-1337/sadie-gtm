@@ -1958,9 +1958,15 @@ class BatchDetector:
                 else:
                     results.append(result)
 
-            # Clean up
+            # Clean up (ignore errors if browser already crashed)
             for ctx in contexts:
-                await ctx.close()
-            await browser.close()
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
         return results
