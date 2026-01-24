@@ -23,7 +23,7 @@ def make_dbpr_row(
     county: str = "Miami-Dade",
     phone: str = "",
     status_code: str = "20",
-    units: str = "1",
+    units: str = "10",
 ) -> str:
     """Create a DBPR CSV row matching extract file format (35 columns)."""
     return f'"200","{license_type_code}","{business_name}","{rank_code}","","{business_name}","","","","{city}","{state}","33101","{phone}","99","{business_name}","","123 Main St","","","{city}","{state}","33101","99","{county}","","D1","","{license_number}","{status_code}","","01/01/2026","","{units}","",""'

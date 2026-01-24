@@ -156,8 +156,7 @@ class DBPRLicense(BaseRecord):
         # Get district
         district = row.get("District", "").strip()
 
-        # Build source name
-        source = f"dbpr_{license_type.lower().replace(' ', '_').replace('-', '_')}"
+        # Build category from license type
         category = license_type.lower().replace(" ", "_").replace("-", "_")
 
         return cls(
@@ -171,7 +170,7 @@ class DBPRLicense(BaseRecord):
             county=county or None,
             phone=phone or None,
             category=category,
-            source=source,
+            source="dbpr",
             room_count=num_units,
             raw=dict(row),
             license_number=license_num,
