@@ -86,6 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_hotels_website ON hotels(website);
 CREATE INDEX IF NOT EXISTS idx_hotels_status ON hotels(status);
 CREATE INDEX IF NOT EXISTS idx_hotels_google_place_id ON hotels(google_place_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hotels_name_website_unique ON hotels(name, COALESCE(website, ''));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hotels_name_city_unique ON hotels(lower(name), lower(COALESCE(city, '')));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hotels_google_place_id_unique ON hotels(google_place_id) WHERE google_place_id IS NOT NULL;
 
 -- ============================================================================

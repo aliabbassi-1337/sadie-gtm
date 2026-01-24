@@ -10,7 +10,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
         CASE WHEN $12::float8 IS NOT NULL AND $13::float8 IS NOT NULL
              THEN ST_SetSRID(ST_MakePoint($13::float8, $12::float8), 4326)::geography
              ELSE NULL END)
-ON CONFLICT (name, city) DO UPDATE SET
+ON CONFLICT (lower(name), lower(COALESCE(city, ''))) DO UPDATE SET
     address = COALESCE(EXCLUDED.address, sadie_gtm.hotels.address),
     phone_google = COALESCE(EXCLUDED.phone_google, sadie_gtm.hotels.phone_google),
     category = COALESCE(EXCLUDED.category, sadie_gtm.hotels.category),
