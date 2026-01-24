@@ -385,6 +385,71 @@ class WebsiteEnricher:
 
         return None, None, None, "none"
 
+    async def find_by_coordinates(
+        self,
+        lat: float,
+        lon: float,
+        category: str = "hotel",
+    ) -> Optional[Dict]:
+        """
+        Search for hotel at specific coordinates using Serper Places API.
+
+        Args:
+            lat: Latitude
+            lon: Longitude
+            category: Search query (hotel, motel, etc.)
+
+        Returns:
+            Dict with name, website, phone, rating, cid or None if not found
+        """
+        try:
+            resp = await self._request_with_retry(
+                "POST",
+                SERPER_PLACES_URL,
+                headers={
+                    "X-API-KEY": self.api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "q": category,
+                    "ll": f"@{lat},{lon},17z",
+                },
+            )
+
+            if not resp or resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            places = data.get("places", [])
+
+            if not places:
+                return None
+
+            # Get closest result (first one since we searched at exact coords)
+            best = places[0]
+
+            # Filter website
+            website = best.get("website")
+            if website:
+                domain = self._extract_domain(website)
+                if domain and domain in SKIP_DOMAINS:
+                    website = None
+                elif any(pattern in website.lower() for pattern in BAD_URL_PATTERNS):
+                    website = None
+
+            return {
+                "name": best.get("title"),
+                "website": website,
+                "phone": best.get("phoneNumber"),
+                "rating": best.get("rating"),
+                "cid": best.get("cid"),
+                "address": best.get("address"),
+            }
+
+        except Exception as e:
+            logger.debug(f"Error searching coordinates ({lat}, {lon}): {e}")
+            return None
+
     async def find_website(
         self,
         name: str,
