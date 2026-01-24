@@ -11,7 +11,7 @@ Usage:
 
     # Via service
     service = Service()
-    records, stats = await service.ingest("dbpr", save_to_db=True)
+    records, stats = await service.ingest("dbpr")
     records, stats = await service.ingest("texas", quarter="HOT 25 Q3")
 
     # Direct ingestor usage

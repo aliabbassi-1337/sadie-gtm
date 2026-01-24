@@ -16,24 +16,24 @@ class TestDBPRLicense:
     def test_create_with_required_fields(self):
         """Create license with required fields."""
         license = DBPRLicense(
-            external_id="H12345678",
-            license_number="H12345678",
+            external_id="HTL12345678",
+            license_number="HTL12345678",
             name="Test Hotel",
             license_type="Hotel",
             rank="HTLL",
             source="dbpr_hotel",
         )
 
-        assert license.license_number == "H12345678"
+        assert license.license_number == "HTL12345678"
         assert license.name == "Test Hotel"
         assert license.license_type == "Hotel"
         assert license.external_id_type == "dbpr_license"
 
     @pytest.mark.no_db
     def test_from_csv_row_basic(self):
-        """Parse a basic CSV row."""
+        """Parse a basic CSV row from DBPR extract files."""
         row = {
-            "License Number": "H12345678",
+            "License Number": "HTL12345678",
             "Business Name": "Grand Hotel",
             "Licensee Name": "Hotel Corp",
             "License Type Code": "2001",
@@ -45,12 +45,13 @@ class TestDBPRLicense:
             "Location County": "Miami-Dade",
             "Primary Phone Number": "3055551234",
             "Primary Status Code": "20",
+            "Number of Seats or Rental Units": "100",
         }
 
         license = DBPRLicense.from_csv_row(row)
 
         assert license is not None
-        assert license.license_number == "H12345678"
+        assert license.license_number == "HTL12345678"
         assert license.business_name == "Grand Hotel"
         assert license.name == "Grand Hotel"
         assert license.license_type == "Hotel"
@@ -62,13 +63,14 @@ class TestDBPRLicense:
         assert license.county == "Miami-Dade"
         assert license.phone == "3055551234"
         assert license.status == "Current/Active"
-        assert license.external_id == "H12345678"
+        assert license.external_id == "HTL12345678"
+        assert license.num_units == 100
 
     @pytest.mark.no_db
     def test_from_csv_row_uses_licensee_name_fallback(self):
         """Use licensee name when business name is empty."""
         row = {
-            "License Number": "H12345678",
+            "License Number": "HTL12345678",
             "Business Name": "",
             "Licensee Name": "John Smith",
             "License Type Code": "2001",
@@ -99,7 +101,7 @@ class TestDBPRLicense:
     def test_from_csv_row_returns_none_for_missing_name(self):
         """Return None when both names are missing."""
         row = {
-            "License Number": "H12345678",
+            "License Number": "HTL12345678",
             "Business Name": "",
             "Licensee Name": "",
             "License Type Code": "2001",
@@ -112,7 +114,7 @@ class TestDBPRLicense:
     def test_from_csv_row_handles_address_line_2(self):
         """Combine address lines when present."""
         row = {
-            "License Number": "H12345678",
+            "License Number": "HTL12345678",
             "Business Name": "Test Hotel",
             "License Type Code": "2001",
             "Rank Code": "HTLL",
@@ -123,13 +125,14 @@ class TestDBPRLicense:
 
         license = DBPRLicense.from_csv_row(row)
 
+        assert license is not None
         assert license.address == "123 Main St, Suite 100"
 
     @pytest.mark.no_db
     def test_from_csv_row_truncates_zip_code(self):
         """Truncate ZIP+4 to 5 digits."""
         row = {
-            "License Number": "H12345678",
+            "License Number": "HTL12345678",
             "Business Name": "Test Hotel",
             "License Type Code": "2001",
             "Rank Code": "HTLL",
@@ -139,13 +142,14 @@ class TestDBPRLicense:
 
         license = DBPRLicense.from_csv_row(row)
 
+        assert license is not None
         assert license.zip_code == "33101"
 
     @pytest.mark.no_db
     def test_from_csv_row_parses_unit_count(self):
-        """Parse number of units."""
+        """Parse number of units from column."""
         row = {
-            "License Number": "H12345678",
+            "License Number": "HTL12345678",
             "Business Name": "Test Hotel",
             "License Type Code": "2001",
             "Rank Code": "HTLL",
@@ -155,6 +159,7 @@ class TestDBPRLicense:
 
         license = DBPRLicense.from_csv_row(row)
 
+        assert license is not None
         assert license.num_units == 150
         assert license.room_count == 150
 
@@ -162,7 +167,7 @@ class TestDBPRLicense:
     def test_from_csv_row_handles_invalid_unit_count(self):
         """Handle non-numeric unit count."""
         row = {
-            "License Number": "H12345678",
+            "License Number": "HTL12345678",
             "Business Name": "Test Hotel",
             "License Type Code": "2001",
             "Rank Code": "HTLL",
@@ -172,6 +177,24 @@ class TestDBPRLicense:
 
         license = DBPRLicense.from_csv_row(row)
 
+        assert license is not None
+        assert license.num_units is None
+
+    @pytest.mark.no_db
+    def test_from_csv_row_handles_empty_unit_count(self):
+        """Handle empty unit count."""
+        row = {
+            "License Number": "HTL12345678",
+            "Business Name": "Test Hotel",
+            "License Type Code": "2001",
+            "Rank Code": "HTLL",
+            "Location City": "Miami",
+            "Number of Seats or Rental Units": "",
+        }
+
+        license = DBPRLicense.from_csv_row(row)
+
+        assert license is not None
         assert license.num_units is None
 
 

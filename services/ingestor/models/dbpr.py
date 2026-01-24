@@ -80,7 +80,15 @@ class DBPRLicense(BaseRecord):
 
     @classmethod
     def from_csv_row(cls, row: dict) -> Optional["DBPRLicense"]:
-        """Parse a DBPR CSV row into a DBPRLicense."""
+        """
+        Parse a DBPR CSV row into a DBPRLicense.
+
+        Supports DBPR extract files (hrlodge*.csv) which have 35 properly aligned columns:
+        - License Number: column 28
+        - Location County: column 24
+        - Primary Status Code: column 29
+        - Number of Seats or Rental Units: column 33
+        """
         # Get license number
         license_num = row.get("License Number", "").strip()
         if not license_num:
@@ -89,8 +97,6 @@ class DBPRLicense(BaseRecord):
         # Get names
         business_name = row.get("Business Name", "").strip()
         licensee_name = row.get("Licensee Name", "").strip()
-
-        # Use business name if available, otherwise licensee name
         name = business_name or licensee_name
         if not name:
             return None
@@ -103,7 +109,7 @@ class DBPRLicense(BaseRecord):
         rank_code = row.get("Rank Code", "").strip()
         rank = RANK_CODES.get(rank_code, rank_code)
 
-        # Get address - prefer location address over mailing
+        # Get address
         address = row.get("Location Street Address", "").strip()
         if not address:
             address = row.get("Mailing Street Address", "").strip()
@@ -121,32 +127,27 @@ class DBPRLicense(BaseRecord):
         zip_code = row.get("Location Zip Code", "").strip()
         if not zip_code:
             zip_code = row.get("Mailing Zip Code", "").strip()
-        # Clean zip code (remove +4)
         if zip_code and len(zip_code) > 5:
             zip_code = zip_code[:5]
 
+        # Get county name
         county = row.get("Location County", "").strip()
-        if not county:
-            county = row.get("County", "").strip()
 
         # Get phone
-        phone = row.get("Secondary Phone Number", "").strip()
-        if not phone:
-            phone = row.get("Primary Phone Number", "").strip()
+        phone = row.get("Primary Phone Number", "").strip()
 
         # Get status
         status_code = row.get("Primary Status Code", "20").strip()
         status = STATUS_CODES.get(status_code, "Unknown")
 
-        # Get dates
+        # Get expiry date
         expiration = row.get("License Expiry Date", "").strip()
-        inspection = row.get("Last Inspection Date", "").strip()
 
-        # Get units
+        # Get last inspection date
+        last_inspection = row.get("Last Inspection Date", "").strip()
+
+        # Get unit count
         units_str = row.get("Number of Seats or Rental Units", "").strip()
-        if not units_str:
-            units_str = row.get("Number of Rental Units", "").strip()
-
         try:
             num_units = int(units_str) if units_str else None
         except ValueError:
@@ -157,12 +158,9 @@ class DBPRLicense(BaseRecord):
 
         # Build source name
         source = f"dbpr_{license_type.lower().replace(' ', '_').replace('-', '_')}"
-
-        # Determine category from license type
         category = license_type.lower().replace(" ", "_").replace("-", "_")
 
         return cls(
-            # Base fields
             external_id=license_num,
             external_id_type="dbpr_license",
             name=name,
@@ -176,7 +174,6 @@ class DBPRLicense(BaseRecord):
             source=source,
             room_count=num_units,
             raw=dict(row),
-            # DBPR-specific fields
             license_number=license_num,
             business_name=business_name or None,
             licensee_name=licensee_name or None,
@@ -184,7 +181,7 @@ class DBPRLicense(BaseRecord):
             rank=rank,
             status=status,
             expiration_date=expiration or None,
-            last_inspection_date=inspection or None,
+            last_inspection_date=last_inspection or None,
             num_units=num_units,
             district=district or None,
         )

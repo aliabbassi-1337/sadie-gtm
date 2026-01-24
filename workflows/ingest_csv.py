@@ -118,22 +118,24 @@ async def main():
     if args.state:
         filters["states"] = args.state
 
-    # Determine save mode
-    save_to_db = not args.dry_run and not args.stats
-
-    if save_to_db:
-        await init_db()
-
-    # Create ingestor and run
+    # Create ingestor
     ingestor = GenericCSVIngestor(config)
 
-    logger.info(f"Starting ingestion from {config.name}...")
-    records, stats = await ingestor.ingest(
-        save_to_db=save_to_db,
-        filters=filters if filters else None,
-    )
+    # Dry-run or stats mode: parse without saving
+    if args.dry_run or args.stats:
+        from unittest.mock import AsyncMock, patch
 
-    if save_to_db:
+        logger.info(f"Starting ingestion from {config.name} (dry run)...")
+        with patch.object(ingestor, "_batch_save", new_callable=AsyncMock) as mock:
+            mock.return_value = 0
+            records, stats = await ingestor.ingest(
+                filters=filters if filters else None,
+                upload_logs=False,
+            )
+    else:
+        await init_db()
+        logger.info(f"Starting ingestion from {config.name}...")
+        records, stats = await ingestor.ingest(filters=filters if filters else None)
         await close_db()
 
     # Output summary

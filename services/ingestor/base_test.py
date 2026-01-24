@@ -161,7 +161,7 @@ class TestBaseIngestor:
         with patch.object(ingestor, "_batch_save", new_callable=AsyncMock) as mock_save:
             mock_save.return_value = 1
 
-            result_records, stats = await ingestor.ingest(save_to_db=True)
+            result_records, stats = await ingestor.ingest()
 
             assert ingestor._fetch_called
             assert ingestor._parse_called
@@ -170,18 +170,19 @@ class TestBaseIngestor:
 
     @pytest.mark.no_db
     @pytest.mark.asyncio
-    async def test_ingest_skips_save_when_disabled(self):
-        """Ingest skips save when save_to_db is False."""
+    async def test_ingest_saves_records(self):
+        """Ingest saves records to database."""
         records = [
             BaseRecord(external_id="1", external_id_type="t", name="A", source="s"),
         ]
         ingestor = ConcreteIngestor(records)
 
         with patch.object(ingestor, "_batch_save", new_callable=AsyncMock) as mock_save:
-            result_records, stats = await ingestor.ingest(save_to_db=False)
+            mock_save.return_value = 1
+            result_records, stats = await ingestor.ingest()
 
-            mock_save.assert_not_called()
-            assert stats.records_saved == 0
+            mock_save.assert_called_once()
+            assert stats.records_saved == 1
 
     @pytest.mark.no_db
     @pytest.mark.asyncio
@@ -193,10 +194,11 @@ class TestBaseIngestor:
         ]
         ingestor = ConcreteIngestor(records)
 
-        result_records, stats = await ingestor.ingest(
-            save_to_db=False,
-            filters={"counties": ["Miami-Dade"]},
-        )
+        with patch.object(ingestor, "_batch_save", new_callable=AsyncMock) as mock_save:
+            mock_save.return_value = 1
+            result_records, stats = await ingestor.ingest(
+                filters={"counties": ["Miami-Dade"]},
+            )
 
         assert len(result_records) == 1
         assert result_records[0].county == "Miami-Dade"
@@ -212,7 +214,9 @@ class TestBaseIngestor:
         ]
         ingestor = ConcreteIngestor(records)
 
-        result_records, stats = await ingestor.ingest(save_to_db=False)
+        with patch.object(ingestor, "_batch_save", new_callable=AsyncMock) as mock_save:
+            mock_save.return_value = 2
+            result_records, stats = await ingestor.ingest()
 
         assert stats.files_processed == 1
         assert stats.records_parsed == 3

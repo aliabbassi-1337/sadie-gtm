@@ -181,7 +181,6 @@ class TestIngestorConfig:
         assert config.states is None
         assert config.categories is None
         assert config.batch_size == 500
-        assert config.save_to_db is True
         assert config.options == {}
 
     @pytest.mark.no_db

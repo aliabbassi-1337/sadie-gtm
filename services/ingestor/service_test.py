@@ -48,7 +48,7 @@ class TestService:
             mock_ingestor_cls.return_value = mock_ingestor
             mock_get.return_value = mock_ingestor_cls
 
-            records, stats = await service.ingest("test_source", save_to_db=False)
+            records, stats = await service.ingest("test_source")
 
             mock_get.assert_called_once_with("test_source")
             mock_ingestor.ingest.assert_called_once()
@@ -68,7 +68,6 @@ class TestService:
 
             await service.ingest(
                 "test_source",
-                save_to_db=False,
                 new_only=True,
                 quarter="Q3",
             )
@@ -89,12 +88,9 @@ class TestService:
             mock_get.return_value = mock_ingestor_cls
 
             filters = {"counties": ["Miami-Dade"]}
-            await service.ingest("test_source", save_to_db=False, filters=filters)
+            await service.ingest("test_source", filters=filters)
 
-            mock_ingestor.ingest.assert_called_once_with(
-                save_to_db=False,
-                filters=filters,
-            )
+            mock_ingestor.ingest.assert_called_once_with(filters=filters)
 
     @pytest.mark.no_db
     @pytest.mark.asyncio
@@ -115,7 +111,6 @@ class TestService:
                 counties=["Miami-Dade"],
                 license_types=["Hotel"],
                 new_only=True,
-                save_to_db=False,
             )
 
             mock_ingestor_cls.assert_called_once_with(new_only=True)
@@ -136,7 +131,7 @@ class TestService:
             )
             mock_ingestor_cls.return_value = mock_ingestor
 
-            await service.ingest_texas(quarter="HOT 25 Q3", save_to_db=False)
+            await service.ingest_texas(quarter="HOT 25 Q3")
 
             mock_ingestor_cls.assert_called_once_with(quarter="HOT 25 Q3")
-            mock_ingestor.ingest.assert_called_once_with(save_to_db=False)
+            mock_ingestor.ingest.assert_called_once()

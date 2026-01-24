@@ -9,6 +9,26 @@ from services.ingestor.ingestors.dbpr import DBPRIngestor, get_license_types, ge
 from services.ingestor.models.dbpr import LICENSE_TYPES
 
 
+# DBPR extract file header (35 properly aligned columns)
+DBPR_HEADER = '"Board Code","License Type Code","Licensee Name","Rank Code","Modifier Code","Mailing Name","Mailing Street Address","Mailing Address Line 2","Mailing Address Line 3","Mailing City","Mailing State Code","Mailing Zip Code","Primary Phone Number","Mailing County Code","Business Name","Filler","Location Street Address","Location Address Line 2","Location Address Line 3","Location City","Location State Code","Location Zip Code","Location County Code","Location County","Secondary Phone Number","District","Region","License Number","Primary Status Code","Secondary Status Code","License Expiry Date","Last Inspection Date","Number of Seats or Rental Units","Base Risk Level","Secondary Risk Level"'
+
+
+def make_dbpr_row(
+    license_number: str,
+    business_name: str,
+    license_type_code: str = "2001",
+    rank_code: str = "HTLL",
+    city: str = "Miami",
+    state: str = "FL",
+    county: str = "Miami-Dade",
+    phone: str = "",
+    status_code: str = "20",
+    units: str = "1",
+) -> str:
+    """Create a DBPR CSV row matching extract file format (35 columns)."""
+    return f'"200","{license_type_code}","{business_name}","{rank_code}","","{business_name}","","","","{city}","{state}","33101","{phone}","99","{business_name}","","123 Main St","","","{city}","{state}","33101","99","{county}","","D1","","{license_number}","{status_code}","","01/01/2026","","{units}","",""'
+
+
 class TestDBPRIngestor:
     """Tests for DBPRIngestor."""
 
@@ -31,24 +51,29 @@ class TestDBPRIngestor:
     @pytest.mark.no_db
     def test_parse_csv_content(self):
         """Parse CSV content into licenses."""
-        csv_content = b'''License Number,Business Name,Licensee Name,License Type Code,Rank Code,Location Street Address,Location City,Location State Code,Location Zip Code,Location County,Primary Phone Number,Primary Status Code
-H12345678,Grand Hotel,Hotel Corp,2001,HTLL,123 Main St,Miami,FL,33101,Miami-Dade,3055551234,20'''
+        csv_content = (
+            DBPR_HEADER + "\n" +
+            make_dbpr_row("HTL12345678", "Grand Hotel", phone="3055551234")
+        ).encode("utf-8")
 
         ingestor = DBPRIngestor()
         licenses = ingestor.parse(csv_content)
 
         assert len(licenses) == 1
         license = licenses[0]
-        assert license.license_number == "H12345678"
+        assert license.license_number == "HTL12345678"
         assert license.name == "Grand Hotel"
         assert license.license_type == "Hotel"
         assert license.city == "Miami"
+        assert license.phone == "3055551234"
 
     @pytest.mark.no_db
     def test_parse_handles_encoding(self):
         """Parse handles different encodings."""
-        # Latin-1 content
-        csv_content = "License Number,Business Name,Licensee Name,License Type Code,Rank Code,Location City\nH123,Café Hotel,Owner,2001,HTLL,Miami".encode("latin-1")
+        csv_content = (
+            DBPR_HEADER + "\n" +
+            make_dbpr_row("HTL123", "Café Hotel")
+        ).encode("latin-1")
 
         ingestor = DBPRIngestor()
         licenses = ingestor.parse(csv_content)
@@ -59,25 +84,29 @@ H12345678,Grand Hotel,Hotel Corp,2001,HTLL,123 Main St,Miami,FL,33101,Miami-Dade
     @pytest.mark.no_db
     def test_parse_skips_invalid_rows(self):
         """Parse skips rows with missing required fields."""
-        csv_content = b'''License Number,Business Name,License Type Code,Rank Code,Location City
-,Missing License,2001,HTLL,Miami
-H12345678,,2001,HTLL,Miami
-H12345679,Valid Hotel,2001,HTLL,Miami'''
+        csv_content = (
+            DBPR_HEADER + "\n" +
+            make_dbpr_row("", "Missing License") + "\n" +  # Missing license num
+            make_dbpr_row("HTL001", "") + "\n" +  # Missing name
+            make_dbpr_row("HTL002", "Valid Hotel")  # Valid
+        ).encode("utf-8")
 
         ingestor = DBPRIngestor()
         licenses = ingestor.parse(csv_content)
 
         # Only valid row should be parsed
         assert len(licenses) == 1
-        assert licenses[0].license_number == "H12345679"
+        assert licenses[0].license_number == "HTL002"
 
     @pytest.mark.no_db
     def test_apply_filters_by_county(self):
         """Apply county filter."""
-        csv_content = b'''License Number,Business Name,License Type Code,Rank Code,Location City,Location County
-H001,Hotel 1,2001,HTLL,Miami,Miami-Dade
-H002,Hotel 2,2001,HTLL,Orlando,Orange
-H003,Hotel 3,2001,HTLL,Fort Lauderdale,Broward'''
+        csv_content = (
+            DBPR_HEADER + "\n" +
+            make_dbpr_row("HTL001", "Hotel 1", county="Miami-Dade") + "\n" +
+            make_dbpr_row("HTL002", "Hotel 2", county="Orange") + "\n" +
+            make_dbpr_row("HTL003", "Hotel 3", county="Broward")
+        ).encode("utf-8")
 
         ingestor = DBPRIngestor()
         licenses = ingestor.parse(csv_content)
@@ -95,10 +124,12 @@ H003,Hotel 3,2001,HTLL,Fort Lauderdale,Broward'''
     @pytest.mark.no_db
     def test_apply_filters_by_license_type(self):
         """Apply license type filter."""
-        csv_content = b'''License Number,Business Name,License Type Code,Rank Code,Location City
-H001,Hotel 1,2001,HTLL,Miami
-H002,Motel 2,2002,MOTL,Miami
-H003,B&B 3,2008,BNKB,Miami'''
+        csv_content = (
+            DBPR_HEADER + "\n" +
+            make_dbpr_row("HTL001", "Hotel 1", license_type_code="2001", rank_code="HTLL") + "\n" +
+            make_dbpr_row("MOT002", "Motel 2", license_type_code="2002", rank_code="MOTL") + "\n" +
+            make_dbpr_row("BNB003", "B&B 3", license_type_code="2008", rank_code="BNKB")
+        ).encode("utf-8")
 
         ingestor = DBPRIngestor()
         licenses = ingestor.parse(csv_content)

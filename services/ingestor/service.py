@@ -38,7 +38,6 @@ class IService(ABC):
     async def ingest(
         self,
         source: str,
-        save_to_db: bool = True,
         filters: Optional[dict] = None,
         **kwargs,
     ) -> Tuple[List[BaseRecord], IngestStats]:
@@ -47,7 +46,6 @@ class IService(ABC):
 
         Args:
             source: Registered ingestor name (e.g., "dbpr", "texas")
-            save_to_db: Whether to save to database
             filters: Filters to apply (counties, states, categories, etc.)
             **kwargs: Additional arguments passed to ingestor constructor
 
@@ -62,7 +60,6 @@ class IService(ABC):
         counties: Optional[List[str]] = None,
         license_types: Optional[List[str]] = None,
         new_only: bool = False,
-        save_to_db: bool = True,
     ) -> Tuple[List[DBPRLicense], dict]:
         """
         Ingest Florida DBPR lodging licenses.
@@ -71,7 +68,6 @@ class IService(ABC):
             counties: Filter to specific counties (e.g., ["Palm Beach", "Miami-Dade"])
             license_types: Filter to specific types (e.g., ["Hotel", "Motel"])
             new_only: Only download new licenses (current fiscal year)
-            save_to_db: Whether to save to hotels table
 
         Returns:
             Tuple of (licenses, stats dict)
@@ -82,14 +78,12 @@ class IService(ABC):
     async def ingest_texas(
         self,
         quarter: Optional[str] = None,
-        save_to_db: bool = True,
     ) -> Tuple[List[TexasHotel], dict]:
         """
         Ingest Texas hotel occupancy tax data.
 
         Args:
             quarter: Specific quarter directory (e.g., "HOT 25 Q3"). If None, loads all quarters.
-            save_to_db: Whether to save to hotels table
 
         Returns:
             Tuple of (hotels, stats dict)
@@ -113,7 +107,6 @@ class Service(IService):
     async def ingest(
         self,
         source: str,
-        save_to_db: bool = True,
         filters: Optional[dict] = None,
         **kwargs,
     ) -> Tuple[List[BaseRecord], IngestStats]:
@@ -142,10 +135,7 @@ class Service(IService):
         ingestor = ingestor_cls(**kwargs)
 
         # Run ingestion
-        records, stats = await ingestor.ingest(
-            save_to_db=save_to_db,
-            filters=filters,
-        )
+        records, stats = await ingestor.ingest(filters=filters)
 
         return records, stats
 
@@ -154,7 +144,6 @@ class Service(IService):
         counties: Optional[List[str]] = None,
         license_types: Optional[List[str]] = None,
         new_only: bool = False,
-        save_to_db: bool = True,
     ) -> Tuple[List[DBPRLicense], dict]:
         """
         Ingest Florida DBPR lodging licenses.
@@ -171,7 +160,6 @@ class Service(IService):
         # Create and run ingestor
         ingestor = DBPRIngestor(new_only=new_only)
         records, stats = await ingestor.ingest(
-            save_to_db=save_to_db,
             filters=filters if filters else None,
         )
 
@@ -180,7 +168,6 @@ class Service(IService):
     async def ingest_texas(
         self,
         quarter: Optional[str] = None,
-        save_to_db: bool = True,
     ) -> Tuple[List[TexasHotel], dict]:
         """
         Ingest Texas hotel occupancy tax data.
@@ -188,14 +175,13 @@ class Service(IService):
         This method provides backward compatibility with the old API.
         """
         ingestor = TexasIngestor(quarter=quarter)
-        records, stats = await ingestor.ingest(save_to_db=save_to_db)
+        records, stats = await ingestor.ingest()
 
         return records, stats.to_dict()
 
     async def ingest_from_config(
         self,
         config: CSVIngestorConfig,
-        save_to_db: bool = True,
         filters: Optional[dict] = None,
     ) -> Tuple[List[BaseRecord], IngestStats]:
         """
@@ -216,7 +202,7 @@ class Service(IService):
             records, stats = await service.ingest_from_config(config)
         """
         ingestor = GenericCSVIngestor(config)
-        return await ingestor.ingest(save_to_db=save_to_db, filters=filters)
+        return await ingestor.ingest(filters=filters)
 
     def get_dbpr_license_types(self) -> dict:
         """Get mapping of DBPR license type codes to names."""

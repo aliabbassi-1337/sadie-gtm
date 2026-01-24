@@ -88,7 +88,6 @@ class BaseIngestor(ABC, Generic[T]):
 
     async def ingest(
         self,
-        save_to_db: bool = True,
         batch_size: int = 500,
         filters: Optional[dict] = None,
         upload_logs: bool = True,
@@ -99,7 +98,6 @@ class BaseIngestor(ABC, Generic[T]):
         Full ingestion pipeline.
 
         Args:
-            save_to_db: Whether to persist records to database
             batch_size: Number of records per batch insert
             filters: Optional filters to apply (implementation-specific)
             upload_logs: Whether to capture and upload logs to S3
@@ -118,15 +116,14 @@ class BaseIngestor(ABC, Generic[T]):
                     s3_prefix=log_prefix,
                 )
                 with ingest_logger:
-                    return await self._run_ingest(save_to_db, batch_size, filters)
+                    return await self._run_ingest(batch_size, filters)
             else:
                 logger.warning("No log bucket configured, skipping log upload")
 
-        return await self._run_ingest(save_to_db, batch_size, filters)
+        return await self._run_ingest(batch_size, filters)
 
     async def _run_ingest(
         self,
-        save_to_db: bool,
         batch_size: int,
         filters: Optional[dict],
     ) -> Tuple[List[T], IngestStats]:
@@ -171,7 +168,7 @@ class BaseIngestor(ABC, Generic[T]):
             logger.info(f"After filtering: {len(unique_records)} records")
 
         # Save to database
-        if save_to_db and unique_records:
+        if unique_records:
             stats.records_saved = await self._batch_save(unique_records, batch_size)
             logger.info(f"Saved {stats.records_saved} records to database")
 

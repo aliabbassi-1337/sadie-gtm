@@ -110,7 +110,6 @@ class IngestorConfig(BaseModel):
 
     # Processing options
     batch_size: int = 500
-    save_to_db: bool = True
 
     # Source-specific options (passed to ingestor)
     options: dict = Field(default_factory=dict)
