@@ -244,6 +244,35 @@ class TestBatchInsertHotels:
             assert inserted_records[0][12] is None  # lon
 
 
+    @pytest.mark.asyncio
+    async def test_uses_external_id_conflict_resolution(self):
+        """Should use ON CONFLICT (external_id_type, external_id) for deduplication."""
+        from services.ingestor import repo
+        from db.queries.batch import BATCH_INSERT_HOTELS
+
+        mock_conn = AsyncMock()
+
+        with patch.object(repo, "get_conn") as mock_get_conn:
+            mock_get_conn.return_value.__aenter__.return_value = mock_conn
+            with patch.object(repo, "queries") as mock_queries:
+                mock_queries.get_hotels_by_external_ids = AsyncMock(return_value=[])
+
+                records = [
+                    ("Hotel A", "la_county", 0, "addr", "LA", "CA", "USA", "555", "hotel", "12345", None, 34.0, -118.0),
+                ]
+
+                await repo.batch_insert_hotels(records, external_id_type="la_county_eh")
+
+                mock_conn.executemany.assert_called_once()
+                call_args = mock_conn.executemany.call_args
+                sql = call_args[0][0]
+                
+                # Verify the SQL uses external_id for conflict resolution
+                assert "ON CONFLICT (external_id_type, external_id)" in sql
+                assert "WHERE external_id IS NOT NULL" in sql
+                assert "DO UPDATE SET" in sql
+
+
 class TestBatchInsertRoomCounts:
     """Tests for batch_insert_room_counts function."""
 

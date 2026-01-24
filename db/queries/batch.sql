@@ -4,18 +4,17 @@
 
 -- BATCH_INSERT_HOTELS
 -- Params: (name, source, status, address, city, state, country, phone, category, external_id, external_id_type, lat, lon)
--- Dedup on name+city. Uses DO NOTHING to handle any other unique constraint violations.
+-- Dedup on external_id. Updates existing records if external_id matches.
 INSERT INTO sadie_gtm.hotels (name, source, status, address, city, state, country, phone_google, category, external_id, external_id_type, location)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
         CASE WHEN $12::float8 IS NOT NULL AND $13::float8 IS NOT NULL
              THEN ST_SetSRID(ST_MakePoint($13::float8, $12::float8), 4326)::geography
              ELSE NULL END)
-ON CONFLICT (name, city) DO UPDATE SET
+ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL 
+DO UPDATE SET
     address = COALESCE(EXCLUDED.address, sadie_gtm.hotels.address),
     phone_google = COALESCE(EXCLUDED.phone_google, sadie_gtm.hotels.phone_google),
     category = COALESCE(EXCLUDED.category, sadie_gtm.hotels.category),
-    external_id = COALESCE(EXCLUDED.external_id, sadie_gtm.hotels.external_id),
-    external_id_type = COALESCE(EXCLUDED.external_id_type, sadie_gtm.hotels.external_id_type),
     location = COALESCE(EXCLUDED.location, sadie_gtm.hotels.location);
 
 -- BATCH_INSERT_ROOM_COUNTS
