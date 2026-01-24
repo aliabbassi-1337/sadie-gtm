@@ -143,6 +143,16 @@ class TexasIngestor(BaseIngestor[TexasHotel]):
 
         return list(seen.values())
 
+    def _apply_filters(self, records: List[TexasHotel], filters: dict) -> List[TexasHotel]:
+        """Apply Texas-specific filters."""
+        result = records
+
+        # Filter out single-unit properties (not real hotels)
+        result = [r for r in result if r.room_count is None or r.room_count > 1]
+
+        # Apply base filters (counties, states, categories)
+        return super()._apply_filters(result, filters)
+
     # =========================================================================
     # Backward compatibility methods for tests and legacy code
     # =========================================================================
