@@ -104,6 +104,13 @@ class TexasIngestor:
                         # Filter by state
                         if state_filter and hotel.state != state_filter:
                             continue
+                        # Skip government entities (not actual hotels)
+                        name_upper = hotel.name.upper()
+                        if name_upper.startswith("COUNTY OF") or name_upper.startswith("CITY OF"):
+                            continue
+                        # Skip single-room entries (likely not real hotels)
+                        if hotel.room_count and hotel.room_count <= 1:
+                            continue
                         hotels.append(hotel)
                 except Exception as e:
                     logger.debug(f"Failed to parse row: {e}")
