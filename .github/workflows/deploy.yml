@@ -18,26 +18,27 @@ jobs:
           chmod 600 ~/.ssh/key.pem
 
       - name: Deploy to EC2 instances
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           IPS="13.61.104.62 13.60.49.110 13.51.72.58 16.171.195.105 13.60.28.77 13.53.197.203 51.20.191.25"
           FAILED=""
 
-          # Deploy key for GitHub access
-          DEPLOY_KEY='${{ secrets.DEPLOY_SSH_KEY }}'
-
           for ip in $IPS; do
             echo "=== Deploying to $ip ==="
 
-            if ! ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip "
-              mkdir -p ~/.ssh
-              echo '$DEPLOY_KEY' > ~/.ssh/id_ed25519
-              chmod 600 ~/.ssh/id_ed25519
+            # Copy deploy key to server
+            echo "$DEPLOY_KEY" | ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip 'mkdir -p ~/.ssh && cat > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519'
+
+            if ! ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip '
               ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
               cd ~/sadie-gtm
               git remote set-url origin git@github.com:aliabbassi-1337/sadie-gtm.git
-              git pull origin main
+              git fetch origin main
+              git reset --hard origin/main
+              git clean -fd
               sudo systemctl restart detection
-            "; then
+            '; then
               echo "FAILED: $ip"
               FAILED="$FAILED $ip"
             fi
