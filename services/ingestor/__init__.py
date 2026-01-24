@@ -57,6 +57,9 @@ from services.ingestor.ingestors.generic_csv import GenericCSVIngestor
 # Sources
 from services.ingestor.sources import HTTPSource, S3Source, LocalSource
 
+# Logging
+from services.ingestor.logging import IngestLogger, capture_ingest_logs
+
 __all__ = [
     # Service
     "Service",
@@ -88,4 +91,7 @@ __all__ = [
     "HTTPSource",
     "S3Source",
     "LocalSource",
+    # Logging
+    "IngestLogger",
+    "capture_ingest_logs",
 ]

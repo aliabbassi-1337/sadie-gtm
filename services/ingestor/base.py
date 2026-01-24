@@ -2,12 +2,14 @@
 Base ingestor class - Abstract base for all data source ingestors.
 """
 
+import os
 from abc import ABC, abstractmethod
 from typing import Generic, TypeVar, List, Tuple, Optional, AsyncIterator
 from loguru import logger
 
 from services.ingestor.models.base import BaseRecord, IngestStats
 from services.ingestor import repo
+from services.ingestor.logging import IngestLogger
 
 T = TypeVar("T", bound=BaseRecord)
 
@@ -89,6 +91,9 @@ class BaseIngestor(ABC, Generic[T]):
         save_to_db: bool = True,
         batch_size: int = 500,
         filters: Optional[dict] = None,
+        upload_logs: bool = True,
+        log_bucket: Optional[str] = None,
+        log_prefix: str = "ingest-logs/",
     ) -> Tuple[List[T], IngestStats]:
         """
         Full ingestion pipeline.
@@ -97,10 +102,35 @@ class BaseIngestor(ABC, Generic[T]):
             save_to_db: Whether to persist records to database
             batch_size: Number of records per batch insert
             filters: Optional filters to apply (implementation-specific)
+            upload_logs: Whether to capture and upload logs to S3
+            log_bucket: S3 bucket for logs (defaults to INGEST_LOG_BUCKET env var)
+            log_prefix: S3 key prefix for logs
 
         Returns:
             Tuple of (records, stats)
         """
+        if upload_logs:
+            bucket = log_bucket or os.environ.get("INGEST_LOG_BUCKET")
+            if bucket:
+                ingest_logger = IngestLogger(
+                    source_name=self.source_name,
+                    s3_bucket=bucket,
+                    s3_prefix=log_prefix,
+                )
+                with ingest_logger:
+                    return await self._run_ingest(save_to_db, batch_size, filters)
+            else:
+                logger.warning("No log bucket configured, skipping log upload")
+
+        return await self._run_ingest(save_to_db, batch_size, filters)
+
+    async def _run_ingest(
+        self,
+        save_to_db: bool,
+        batch_size: int,
+        filters: Optional[dict],
+    ) -> Tuple[List[T], IngestStats]:
+        """Internal ingestion implementation."""
         stats = IngestStats()
         all_records: List[T] = []
 
