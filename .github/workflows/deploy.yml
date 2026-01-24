@@ -11,6 +11,9 @@ jobs:
     environment: Sadie GTM Ec2
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
@@ -25,14 +28,24 @@ jobs:
           for ip in $IPS; do
             echo "=== Deploying to $ip ==="
 
+            if ! rsync -avz --delete \
+              -e "ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no" \
+              --exclude '.git' \
+              --exclude '.env' \
+              --exclude '__pycache__' \
+              --exclude '*.pyc' \
+              --exclude '.venv' \
+              --exclude 'node_modules' \
+              ./ ubuntu@$ip:~/sadie-gtm/; then
+              echo "FAILED rsync: $ip"
+              FAILED="$FAILED $ip"
+              continue
+            fi
+
             if ! ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip '
-              cd ~/sadie-gtm
-              # Ensure git remote uses SSH (not HTTPS)
-              git remote set-url origin git@github.com:aliabbassi-1337/sadie-gtm.git
-              git pull origin main
               sudo systemctl restart detection
             '; then
-              echo "FAILED: $ip"
+              echo "FAILED restart: $ip"
               FAILED="$FAILED $ip"
             fi
 
@@ -45,4 +58,3 @@ jobs:
             echo "::error::Deployment failed for:$FAILED"
             exit 1
           fi
-
