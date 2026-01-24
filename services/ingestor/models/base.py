@@ -21,9 +21,12 @@ class BaseRecord(BaseModel):
     zip_code: Optional[str] = None
     county: Optional[str] = None
     country: str = "USA"
+    lat: Optional[float] = None
+    lon: Optional[float] = None
 
     # Contact
     phone: Optional[str] = None
+    website: Optional[str] = None
 
     # Classification
     category: Optional[str] = None
@@ -38,7 +41,7 @@ class BaseRecord(BaseModel):
     def to_db_tuple(self) -> tuple:
         """
         Convert to tuple for batch insert.
-        Format: (name, source, status, address, city, state, country, phone, category, external_id)
+        Format: (name, source, status, address, city, state, country, phone, category, external_id, lat, lon)
         """
         return (
             self.name,
@@ -51,6 +54,8 @@ class BaseRecord(BaseModel):
             self.phone,
             self.category,
             self.external_id,
+            self.lat,
+            self.lon,
         )
 
 

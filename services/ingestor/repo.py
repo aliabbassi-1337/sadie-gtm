@@ -139,9 +139,9 @@ async def batch_insert_hotels(
     Batch insert hotels using executemany.
 
     Args:
-        records: List of tuples (name, source, status, address, city, state, country, phone, category, external_id)
+        records: List of tuples (name, source, status, address, city, state, country, phone, category, external_id, lat, lon)
                  If external_id_type is provided, external_id is the 10th element
-                 Otherwise, tuples should have 9 elements (legacy format)
+                 lat/lon are optional at positions 10 and 11
         external_id_type: Type of external ID (e.g., "texas_hot", "dbpr_license")
 
     Returns:
@@ -164,16 +164,28 @@ async def batch_insert_hotels(
             if not records:
                 return 0
 
-            # Add external_id_type to each record
+            # Add external_id_type and ensure lat/lon are included
+            # Format: (name, source, status, address, city, state, country, phone, category, external_id, external_id_type, lat, lon)
             full_records = [
-                (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9] if len(r) > 9 else None, external_id_type)
+                (
+                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8],
+                    r[9] if len(r) > 9 else None,
+                    external_id_type,
+                    r[10] if len(r) > 10 else None,
+                    r[11] if len(r) > 11 else None,
+                )
                 for r in records
             ]
             await conn.executemany(BATCH_INSERT_HOTELS, full_records)
         else:
             # Legacy format without external_id
             legacy_records = [
-                (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], None, None)
+                (
+                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8],
+                    None, None,
+                    r[10] if len(r) > 10 else None,
+                    r[11] if len(r) > 11 else None,
+                )
                 for r in records
             ]
             await conn.executemany(BATCH_INSERT_HOTELS, legacy_records)

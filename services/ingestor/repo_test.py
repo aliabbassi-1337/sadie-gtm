@@ -236,10 +236,12 @@ class TestBatchInsertHotels:
             mock_conn.executemany.assert_called_once()
             call_args = mock_conn.executemany.call_args
             inserted_records = call_args[0][1]
-            # Should have None, None appended for external_id, external_id_type
-            assert len(inserted_records[0]) == 11
-            assert inserted_records[0][9] is None
-            assert inserted_records[0][10] is None
+            # Should have None, None appended for external_id, external_id_type, lat, lon
+            assert len(inserted_records[0]) == 13
+            assert inserted_records[0][9] is None  # external_id
+            assert inserted_records[0][10] is None  # external_id_type
+            assert inserted_records[0][11] is None  # lat
+            assert inserted_records[0][12] is None  # lon
 
 
 class TestBatchInsertRoomCounts:
@@ -266,9 +268,9 @@ class TestBatchInsertRoomCounts:
             mock_conn.executemany.assert_called_once()
             call_args = mock_conn.executemany.call_args
             batch_records = call_args[0][1]
-            # Format should be (room_count, external_id_type, external_id, source_name)
-            assert batch_records[0] == (100, "texas_hot", "123:001", "texas_hot")
-            assert batch_records[1] == (50, "texas_hot", "123:002", "texas_hot")
+            # Format should be (room_count, external_id_type, external_id, source_name, confidence)
+            assert batch_records[0] == (100, "texas_hot", "123:001", "texas_hot", 1.0)
+            assert batch_records[1] == (50, "texas_hot", "123:002", "texas_hot", 1.0)
 
     @pytest.mark.asyncio
     async def test_returns_zero_without_external_id_type(self):
