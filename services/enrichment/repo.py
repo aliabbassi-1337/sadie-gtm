@@ -276,6 +276,12 @@ async def update_hotel_website(hotel_id: int, website: str) -> None:
         await queries.update_hotel_website(conn, hotel_id=hotel_id, website=website)
 
 
+async def update_hotel_location_point_if_null(hotel_id: int, lat: float, lng: float) -> None:
+    """Update hotel location from lat/lng coordinates ONLY if location is currently NULL."""
+    async with get_conn() as conn:
+        await queries.update_hotel_location_point_if_null(conn, hotel_id=hotel_id, lat=lat, lng=lng)
+
+
 async def update_website_enrichment_status(
     hotel_id: int,
     status: int,
