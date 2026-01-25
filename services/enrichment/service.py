@@ -400,24 +400,22 @@ class Service(IService):
 
             async with semaphore:
                 # Use Serper Places to find location
-                result = await enricher.find_website_places(
+                # Returns tuple: (website, lat, lng, confidence)
+                website, lat, lng, confidence = await enricher.find_website_places(
                     name=hotel["name"],
                     city=hotel["city"],
-                    state=hotel.get("state"),
+                    state=hotel.get("state") or "TX",
                     address=hotel.get("address"),
                 )
                 api_calls += 1
 
-                if result.lat and result.lng:
+                if lat and lng:
                     found += 1
                     # Only update location, not website
                     await repo.update_hotel_location_point_if_null(
-                        hotel["id"], result.lat, result.lng
+                        hotel["id"], lat, lng
                     )
-                    log(f"  {hotel['name']}: found location ({result.lat}, {result.lng})")
-                elif result.error:
-                    errors += 1
-                    log(f"  {hotel['name']}: error - {result.error}")
+                    log(f"  {hotel['name']}: found location ({lat}, {lng})")
                 else:
                     not_found += 1
                     log(f"  {hotel['name']}: location not found")
