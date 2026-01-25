@@ -147,7 +147,7 @@ WHERE h.status = 0
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
-  AND h.category = ANY(:categories)
+  AND h.category ILIKE ANY(ARRAY(SELECT '%' || unnest(:categories) || '%'))
 LIMIT :limit;
 
 -- name: update_hotel_status!
