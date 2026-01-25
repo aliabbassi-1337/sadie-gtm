@@ -14,6 +14,9 @@ Usage:
 
     # Filter to specific state
     uv run python -m workflows.enrich_websites --state FL --limit 1000
+
+    # Location-only mode: find locations for hotels that have websites but no coordinates
+    uv run python -m workflows.enrich_websites --location-only --source texas_hot --limit 500
 """
 
 import argparse
@@ -58,6 +61,11 @@ async def main():
         default=0.1,
         help="Delay between API calls in seconds (default: 0.1)",
     )
+    parser.add_argument(
+        "--location-only",
+        action="store_true",
+        help="Only enrich locations for hotels that have websites but no coordinates",
+    )
 
     args = parser.parse_args()
 
@@ -77,29 +85,56 @@ async def main():
     # Run enrichment
     service = EnrichmentService()
 
-    logger.info(f"Starting website enrichment (limit: {args.limit})...")
-    if args.source:
-        logger.info(f"  Filtering to source: {args.source}")
-    if args.state:
-        logger.info(f"  Filtering to state: {args.state}")
+    if args.location_only:
+        # Location-only mode: find locations for hotels with websites but no coordinates
+        logger.info(f"Starting location-only enrichment (limit: {args.limit})...")
+        if args.source:
+            logger.info(f"  Filtering to source: {args.source}")
+        if args.state:
+            logger.info(f"  Filtering to state: {args.state}")
 
-    stats = await service.enrich_websites(
-        limit=args.limit,
-        source_filter=args.source,
-        state_filter=args.state,
-    )
+        stats = await service.enrich_locations_only(
+            limit=args.limit,
+            source_filter=args.source,
+            state_filter=args.state,
+        )
 
-    # Summary
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("Website Enrichment Complete")
-    logger.info("=" * 60)
-    logger.info(f"Hotels processed: {stats['total']}")
-    logger.info(f"Websites found: {stats['found']}")
-    logger.info(f"Not found: {stats['not_found']}")
-    logger.info(f"Errors: {stats['errors']}")
-    logger.info(f"API calls: {stats['api_calls']}")
-    logger.info(f"Estimated cost: ${stats['api_calls'] * 0.001:.2f}")
+        # Summary
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("Location Enrichment Complete")
+        logger.info("=" * 60)
+        logger.info(f"Hotels processed: {stats['total']}")
+        logger.info(f"Locations found: {stats['found']}")
+        logger.info(f"Not found: {stats['not_found']}")
+        logger.info(f"Errors: {stats['errors']}")
+        logger.info(f"API calls: {stats['api_calls']}")
+        logger.info(f"Estimated cost: ${stats['api_calls'] * 0.001:.2f}")
+    else:
+        # Standard website enrichment mode
+        logger.info(f"Starting website enrichment (limit: {args.limit})...")
+        if args.source:
+            logger.info(f"  Filtering to source: {args.source}")
+        if args.state:
+            logger.info(f"  Filtering to state: {args.state}")
+
+        stats = await service.enrich_websites(
+            limit=args.limit,
+            source_filter=args.source,
+            state_filter=args.state,
+        )
+
+        # Summary
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("Website Enrichment Complete")
+        logger.info("=" * 60)
+        logger.info(f"Hotels processed: {stats['total']}")
+        logger.info(f"Websites found: {stats['found']}")
+        logger.info(f"Not found: {stats['not_found']}")
+        logger.info(f"Errors: {stats['errors']}")
+        logger.info(f"API calls: {stats['api_calls']}")
+        logger.info(f"Estimated cost: ${stats['api_calls'] * 0.001:.2f}")
 
 
 if __name__ == "__main__":

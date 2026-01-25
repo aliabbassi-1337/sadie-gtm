@@ -136,10 +136,11 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def save_detection_results(self, results: List[DetectionResult]) -> Tuple[int, int]:
+    async def save_detection_results(self, results: List[DetectionResult]) -> Tuple[int, int, int]:
         """
         Save detection results to database.
-        Returns (detected_count, error_count) tuple.
+        Returns (detected_count, error_count, retriable_count) tuple.
+        Retriable errors (timeout, browser) don't create HBE records - SQS will retry.
         """
         pass
 
@@ -484,23 +485,38 @@ class Service(IService):
                 )
                 return
 
-            # Handle non-retriable errors (timeout, precheck_failed, etc.)
-            # Create a hotel_booking_engines record with status=-1 to prevent infinite retry
+            # Check if error is retriable (timeout, browser crash, etc.)
+            # For retriable errors, DON'T create HBE record - let SQS retry
+            retriable_errors = ("timeout", "precheck_failed: timeout", "browser", "context")
+            is_retriable = result.error and any(e in result.error.lower() for e in retriable_errors)
+            
             if result.error and result.error not in ("location_mismatch",):
-                await repo.insert_hotel_booking_engine(
-                    hotel_id=result.hotel_id,
-                    booking_engine_id=None,
-                    detection_method=f"error:{result.error}",
-                    status=-1,  # Failed, non-retriable
-                )
-                # Save contact info if we got any
-                if result.phone_website or result.email:
-                    await repo.update_hotel_contact_info(
+                if is_retriable:
+                    # Skip HBE creation - hotel will be picked up on SQS retry
+                    # Just save contact info if we got any
+                    if result.phone_website or result.email:
+                        await repo.update_hotel_contact_info(
+                            hotel_id=result.hotel_id,
+                            phone_website=result.phone_website or None,
+                            email=result.email or None,
+                        )
+                    return "retriable"  # Signal that this was a retriable error
+                else:
+                    # Non-retriable error - create HBE record to prevent infinite retry
+                    await repo.insert_hotel_booking_engine(
                         hotel_id=result.hotel_id,
-                        phone_website=result.phone_website or None,
-                        email=result.email or None,
+                        booking_engine_id=None,
+                        detection_method=f"error:{result.error}",
+                        status=-1,  # Failed, non-retriable
                     )
-                return
+                    # Save contact info if we got any
+                    if result.phone_website or result.email:
+                        await repo.update_hotel_contact_info(
+                            hotel_id=result.hotel_id,
+                            phone_website=result.phone_website or None,
+                            email=result.email or None,
+                        )
+                    return
 
             if result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "unknown_booking_api"):
                 # Found a booking engine
@@ -564,20 +580,24 @@ class Service(IService):
         engines = await repo.get_all_booking_engines()
         return {engine.name: engine.domains for engine in engines if engine.domains}
 
-    async def save_detection_results(self, results: List[DetectionResult]) -> Tuple[int, int]:
+    async def save_detection_results(self, results: List[DetectionResult]) -> Tuple[int, int, int]:
         """Save detection results to database.
 
-        Returns (detected_count, error_count) tuple.
+        Returns (detected_count, error_count, retriable_count) tuple.
         Note: Location mismatches are not counted as errors or detections.
+        Retriable errors (timeout, browser) don't create HBE records and should trigger SQS retry.
         """
         detected = 0
         errors = 0
+        retriable = 0
 
         for result in results:
             try:
-                await self._save_detection_result(result)
+                save_result = await self._save_detection_result(result)
 
-                if result.error == "location_mismatch":
+                if save_result == "retriable":
+                    retriable += 1
+                elif result.error == "location_mismatch":
                     # Don't count as detected or error
                     pass
                 elif result.booking_engine and result.booking_engine not in ("", "unknown", "unknown_third_party", "unknown_booking_api"):
@@ -588,7 +608,7 @@ class Service(IService):
                 logger.error(f"Error saving result for hotel {result.hotel_id}: {e}")
                 errors += 1
 
-        return (detected, errors)
+        return (detected, errors, retriable)
 
     async def get_hotels_by_ids(self, hotel_ids: List[int]) -> List[Hotel]:
         """Get hotels by list of IDs."""
