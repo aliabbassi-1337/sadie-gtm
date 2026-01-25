@@ -66,6 +66,30 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def enrich_by_coordinates(
+        self,
+        limit: int = 100,
+        concurrency: int = 10,
+    ) -> dict:
+        """
+        Enrich parcel data hotels using Serper Places API.
+        
+        For hotels with coordinates but no real names (SF, Maryland parcel data),
+        search Places API at those coordinates to find the actual hotel.
+        Updates name, website, phone, rating.
+        
+        Returns dict with enriched/not_found/errors counts.
+        """
+        pass
+
+    @abstractmethod
+    async def get_pending_coordinate_enrichment_count(self) -> int:
+        """
+        Count hotels waiting for coordinate-based enrichment.
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self) -> None:
@@ -342,3 +366,96 @@ class Service(IService):
             "errors": errors,
             "api_calls": api_calls,
         }
+
+    async def enrich_by_coordinates(
+        self,
+        limit: int = 100,
+        concurrency: int = 10,
+    ) -> dict:
+        """
+        Enrich parcel data hotels using Serper Places API.
+        
+        For hotels with coordinates but no real names (SF, Maryland parcel data),
+        search Places API at those coordinates to find the actual hotel.
+        
+        Returns dict with enriched/not_found/errors/api_calls counts.
+        """
+        if not SERPER_API_KEY:
+            log("Error: SERPER_API_KEY not found in environment")
+            return {"total": 0, "enriched": 0, "not_found": 0, "errors": 0, "api_calls": 0}
+
+        # Get hotels pending enrichment
+        hotels = await repo.get_hotels_pending_coordinate_enrichment(limit=limit)
+
+        if not hotels:
+            log("No hotels pending coordinate enrichment")
+            return {"total": 0, "enriched": 0, "not_found": 0, "errors": 0, "api_calls": 0}
+
+        log(f"Processing {len(hotels)} hotels for coordinate enrichment (concurrency={concurrency})")
+
+        enricher = WebsiteEnricher(api_key=SERPER_API_KEY, validate_urls=False)
+        semaphore = asyncio.Semaphore(concurrency)
+
+        enriched = 0
+        not_found = 0
+        errors = 0
+        api_calls = 0
+        completed = 0
+
+        async def process_hotel(hotel: dict) -> None:
+            nonlocal enriched, not_found, errors, api_calls, completed
+
+            async with semaphore:
+                hotel_id = hotel["id"]
+                lat = hotel["latitude"]
+                lon = hotel["longitude"]
+                category = hotel.get("category", "hotel")
+                original_name = hotel["name"]
+
+                try:
+                    result = await enricher.find_by_coordinates(lat, lon, category)
+                    api_calls += 1
+
+                    if result and result.get("name"):
+                        new_name = result["name"]
+                        website = result.get("website")
+                        phone = result.get("phone")
+                        rating = result.get("rating")
+                        address = result.get("address")
+
+                        await repo.update_hotel_from_places(
+                            hotel_id=hotel_id,
+                            name=new_name,
+                            website=website,
+                            phone=phone,
+                            rating=rating,
+                            address=address,
+                        )
+                        enriched += 1
+                        log(f"  {original_name[:40]:<40} -> {new_name}{' [website]' if website else ''}")
+                    else:
+                        not_found += 1
+                except Exception as e:
+                    errors += 1
+                    log(f"  Error processing {original_name}: {e}")
+
+                completed += 1
+                if completed % 50 == 0:
+                    log(f"  Progress: {completed}/{len(hotels)} ({enriched} enriched)")
+
+        # Run all hotel enrichments concurrently
+        await asyncio.gather(*[process_hotel(h) for h in hotels])
+
+        log(f"Coordinate enrichment complete: {enriched} enriched, {not_found} not found, {errors} errors")
+
+        return {
+            "total": len(hotels),
+            "enriched": enriched,
+            "not_found": not_found,
+            "errors": errors,
+            "api_calls": api_calls,
+        }
+
+    async def get_pending_coordinate_enrichment_count(self) -> int:
+        """Count hotels waiting for coordinate-based enrichment."""
+        return await repo.get_pending_coordinate_enrichment_count()

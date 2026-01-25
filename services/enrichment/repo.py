@@ -315,3 +315,49 @@ async def get_website_enrichment_stats(source_prefix: Optional[str] = None) -> D
             "enriched_failed": 0,
             "in_progress": 0,
         }
+
+
+# ============================================================================
+# COORDINATE ENRICHMENT FUNCTIONS
+# ============================================================================
+
+
+async def get_hotels_pending_coordinate_enrichment(limit: int = 100) -> List[Dict[str, Any]]:
+    """Get hotels with coordinates but no website (parcel data needing Places API lookup).
+
+    Criteria:
+    - has location (coordinates)
+    - no website
+    - source is parcel data (sf_assessor, md_sdat_cama)
+    """
+    async with get_conn() as conn:
+        results = await queries.get_hotels_pending_coordinate_enrichment(conn, limit=limit)
+        return [dict(row) for row in results]
+
+
+async def get_pending_coordinate_enrichment_count() -> int:
+    """Count hotels needing coordinate-based enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_pending_coordinate_enrichment_count(conn)
+        return result["count"] if result else 0
+
+
+async def update_hotel_from_places(
+    hotel_id: int,
+    name: Optional[str] = None,
+    website: Optional[str] = None,
+    phone: Optional[str] = None,
+    rating: Optional[float] = None,
+    address: Optional[str] = None,
+) -> None:
+    """Update hotel with data from Places API."""
+    async with get_conn() as conn:
+        await queries.update_hotel_from_places(
+            conn,
+            hotel_id=hotel_id,
+            name=name,
+            website=website,
+            phone=phone,
+            rating=rating,
+            address=address,
+        )
