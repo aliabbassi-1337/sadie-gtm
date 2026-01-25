@@ -70,23 +70,35 @@ class IService(ABC):
     async def enrich_by_coordinates(
         self,
         limit: int = 100,
+        source_filter: str = None,
         concurrency: int = 10,
     ) -> dict:
         """
         Enrich parcel data hotels using Serper Places API.
-        
+
         For hotels with coordinates but no real names (SF, Maryland parcel data),
         search Places API at those coordinates to find the actual hotel.
         Updates name, website, phone, rating.
-        
+
+        Args:
+            limit: Max hotels to process
+            source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+            concurrency: Max concurrent API requests
+
         Returns dict with enriched/not_found/errors counts.
         """
         pass
 
     @abstractmethod
-    async def get_pending_coordinate_enrichment_count(self) -> int:
+    async def get_pending_coordinate_enrichment_count(
+        self,
+        source_filter: str = None,
+    ) -> int:
         """
         Count hotels waiting for coordinate-based enrichment.
+
+        Args:
+            source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
         """
         pass
 
@@ -464,6 +476,7 @@ class Service(IService):
     async def enrich_by_coordinates(
         self,
         limit: int = 100,
+        source_filter: str = None,
         concurrency: int = 10,
     ) -> dict:
         """
@@ -472,6 +485,11 @@ class Service(IService):
         For hotels with coordinates but no real names (SF, Maryland parcel data),
         search Places API at those coordinates to find the actual hotel.
 
+        Args:
+            limit: Max hotels to process
+            source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+            concurrency: Max concurrent API requests
+
         Returns dict with enriched/not_found/errors/api_calls counts.
         """
         if not SERPER_API_KEY:
@@ -479,7 +497,10 @@ class Service(IService):
             return {"total": 0, "enriched": 0, "not_found": 0, "errors": 0, "api_calls": 0}
 
         # Get hotels pending enrichment
-        hotels = await repo.get_hotels_pending_coordinate_enrichment(limit=limit)
+        hotels = await repo.get_hotels_pending_coordinate_enrichment(
+            limit=limit,
+            source_filter=source_filter,
+        )
 
         if not hotels:
             log("No hotels pending coordinate enrichment")
@@ -550,6 +571,13 @@ class Service(IService):
             "api_calls": api_calls,
         }
 
-    async def get_pending_coordinate_enrichment_count(self) -> int:
-        """Count hotels waiting for coordinate-based enrichment."""
-        return await repo.get_pending_coordinate_enrichment_count()
+    async def get_pending_coordinate_enrichment_count(
+        self,
+        source_filter: str = None,
+    ) -> int:
+        """Count hotels waiting for coordinate-based enrichment.
+
+        Args:
+            source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+        """
+        return await repo.get_pending_coordinate_enrichment_count(source_filter=source_filter)

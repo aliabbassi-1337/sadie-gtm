@@ -26,6 +26,7 @@ async def run():
         description="Enrich hotels using coordinates (Serper Places API)",
     )
     parser.add_argument("-l", "--limit", type=int, default=100)
+    parser.add_argument("--source", type=str, help="Source filter (LIKE pattern, e.g., 'sf_%')")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--no-notify", action="store_true")
     parser.add_argument("--concurrency", type=int, default=10)
@@ -41,13 +42,18 @@ async def run():
         service = EnrichmentService()
 
         if args.status:
-            pending = await service.get_pending_coordinate_enrichment_count()
+            pending = await service.get_pending_coordinate_enrichment_count(
+                source_filter=args.source,
+            )
             logger.info(f"Hotels pending coordinate enrichment: {pending}")
             return
 
         logger.info(f"Running coordinate enrichment (limit={args.limit})")
+        if args.source:
+            logger.info(f"  Source filter: {args.source}")
         stats = await service.enrich_by_coordinates(
             limit=args.limit,
+            source_filter=args.source,
             concurrency=args.concurrency,
         )
 

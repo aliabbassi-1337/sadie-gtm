@@ -636,6 +636,7 @@ WHERE id = :hotel_id;
 
 -- name: get_hotels_pending_coordinate_enrichment
 -- Get hotels with coordinates but no website (parcel data needing Places API lookup)
+-- source_filter: optional LIKE pattern (e.g., 'sf_%' or '%sdat%')
 SELECT
     id,
     name,
@@ -649,17 +650,18 @@ SELECT
 FROM sadie_gtm.hotels
 WHERE location IS NOT NULL
   AND (website IS NULL OR website = '')
-  AND source IN ('sf_assessor', 'md_sdat_cama')
+  AND (:source_filter::text IS NULL OR source LIKE :source_filter)
 ORDER BY id
 LIMIT :limit;
 
 -- name: get_pending_coordinate_enrichment_count^
 -- Count hotels needing coordinate-based enrichment
+-- source_filter: optional LIKE pattern (e.g., 'sf_%' or '%sdat%')
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels
 WHERE location IS NOT NULL
   AND (website IS NULL OR website = '')
-  AND source IN ('sf_assessor', 'md_sdat_cama');
+  AND (:source_filter::text IS NULL OR source LIKE :source_filter);
 
 -- name: update_hotel_from_places!
 -- Update hotel with data from Places API (name, website, phone)
