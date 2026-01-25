@@ -321,3 +321,51 @@ async def get_website_enrichment_stats(source_prefix: Optional[str] = None) -> D
             "enriched_failed": 0,
             "in_progress": 0,
         }
+
+
+# ============================================================================
+# LOCATION-ONLY ENRICHMENT FUNCTIONS (for hotels with website but no location)
+# ============================================================================
+
+
+async def get_hotels_pending_location_from_places(
+    limit: int = 100,
+    source_filter: Optional[str] = None,
+    state_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Get hotels that have website but no location (need Serper Places lookup).
+
+    Criteria:
+    - has website
+    - has name and city
+    - no location
+
+    Args:
+        limit: Max hotels to return
+        source_filter: Filter by source (e.g., 'texas_hot')
+        state_filter: Filter by state (e.g., 'TX')
+
+    Returns list of hotels needing location enrichment.
+    """
+    async with get_conn() as conn:
+        results = await queries.get_hotels_pending_location_from_places(
+            conn,
+            limit=limit,
+            source_filter=f"%{source_filter}%" if source_filter else None,
+            state_filter=state_filter,
+        )
+        return [dict(row) for row in results]
+
+
+async def get_pending_location_from_places_count(
+    source_filter: Optional[str] = None,
+    state_filter: Optional[str] = None,
+) -> int:
+    """Count hotels that have website but no location."""
+    async with get_conn() as conn:
+        result = await queries.get_pending_location_from_places_count(
+            conn,
+            source_filter=f"%{source_filter}%" if source_filter else None,
+            state_filter=state_filter,
+        )
+        return result["count"] if result else 0
