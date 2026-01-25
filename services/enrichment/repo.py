@@ -378,40 +378,40 @@ async def get_pending_location_from_places_count(
 
 async def get_hotels_pending_coordinate_enrichment(
     limit: int = 100,
-    source_filter: Optional[str] = None,
+    sources: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Get hotels with coordinates but no website (parcel data needing Places API lookup).
 
     Criteria:
     - has location (coordinates)
     - no website
-    - optionally filter by source (LIKE pattern)
+    - optionally filter by source names
 
     Args:
         limit: Max hotels to return
-        source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+        sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
     """
     async with get_conn() as conn:
         results = await queries.get_hotels_pending_coordinate_enrichment(
             conn,
             limit=limit,
-            source_filter=source_filter,
+            sources=sources,
         )
         return [dict(row) for row in results]
 
 
 async def get_pending_coordinate_enrichment_count(
-    source_filter: Optional[str] = None,
+    sources: Optional[List[str]] = None,
 ) -> int:
     """Count hotels needing coordinate-based enrichment.
 
     Args:
-        source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+        sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
     """
     async with get_conn() as conn:
         result = await queries.get_pending_coordinate_enrichment_count(
             conn,
-            source_filter=source_filter,
+            sources=sources,
         )
         return result["count"] if result else 0
 

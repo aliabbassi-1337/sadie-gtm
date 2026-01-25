@@ -8,6 +8,7 @@ use Serper Places API to find the actual hotel at those coordinates.
 Usage:
     uv run python -m workflows.enrich_by_location --limit 100
     uv run python -m workflows.enrich_by_location --status
+    uv run python -m workflows.enrich_by_location --source sf_assessor --source md_sdat_cama
 """
 
 import argparse
@@ -26,7 +27,12 @@ async def run():
         description="Enrich hotels using coordinates (Serper Places API)",
     )
     parser.add_argument("-l", "--limit", type=int, default=100)
-    parser.add_argument("--source", type=str, help="Source filter (LIKE pattern, e.g., 'sf_%')")
+    parser.add_argument(
+        "--source",
+        action="append",
+        dest="sources",
+        help="Source name(s) to filter (can specify multiple times)",
+    )
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--no-notify", action="store_true")
     parser.add_argument("--concurrency", type=int, default=10)
@@ -43,17 +49,17 @@ async def run():
 
         if args.status:
             pending = await service.get_pending_coordinate_enrichment_count(
-                source_filter=args.source,
+                sources=args.sources,
             )
             logger.info(f"Hotels pending coordinate enrichment: {pending}")
             return
 
         logger.info(f"Running coordinate enrichment (limit={args.limit})")
-        if args.source:
-            logger.info(f"  Source filter: {args.source}")
+        if args.sources:
+            logger.info(f"  Sources: {', '.join(args.sources)}")
         stats = await service.enrich_by_coordinates(
             limit=args.limit,
-            source_filter=args.source,
+            sources=args.sources,
             concurrency=args.concurrency,
         )
 

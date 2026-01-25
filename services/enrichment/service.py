@@ -70,7 +70,7 @@ class IService(ABC):
     async def enrich_by_coordinates(
         self,
         limit: int = 100,
-        source_filter: str = None,
+        sources: list = None,
         concurrency: int = 10,
     ) -> dict:
         """
@@ -82,7 +82,7 @@ class IService(ABC):
 
         Args:
             limit: Max hotels to process
-            source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+            sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
             concurrency: Max concurrent API requests
 
         Returns dict with enriched/not_found/errors counts.
@@ -92,13 +92,13 @@ class IService(ABC):
     @abstractmethod
     async def get_pending_coordinate_enrichment_count(
         self,
-        source_filter: str = None,
+        sources: list = None,
     ) -> int:
         """
         Count hotels waiting for coordinate-based enrichment.
 
         Args:
-            source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+            sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
         """
         pass
 
@@ -476,7 +476,7 @@ class Service(IService):
     async def enrich_by_coordinates(
         self,
         limit: int = 100,
-        source_filter: str = None,
+        sources: list = None,
         concurrency: int = 10,
     ) -> dict:
         """
@@ -487,7 +487,7 @@ class Service(IService):
 
         Args:
             limit: Max hotels to process
-            source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+            sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
             concurrency: Max concurrent API requests
 
         Returns dict with enriched/not_found/errors/api_calls counts.
@@ -499,7 +499,7 @@ class Service(IService):
         # Get hotels pending enrichment
         hotels = await repo.get_hotels_pending_coordinate_enrichment(
             limit=limit,
-            source_filter=source_filter,
+            sources=sources,
         )
 
         if not hotels:
@@ -573,11 +573,11 @@ class Service(IService):
 
     async def get_pending_coordinate_enrichment_count(
         self,
-        source_filter: str = None,
+        sources: list = None,
     ) -> int:
         """Count hotels waiting for coordinate-based enrichment.
 
         Args:
-            source_filter: Optional LIKE pattern for source (e.g., 'sf_%', '%sdat%')
+            sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
         """
-        return await repo.get_pending_coordinate_enrichment_count(source_filter=source_filter)
+        return await repo.get_pending_coordinate_enrichment_count(sources=sources)
