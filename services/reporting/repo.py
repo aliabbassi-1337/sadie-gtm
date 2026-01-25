@@ -137,3 +137,29 @@ async def get_launched_count() -> int:
     async with get_conn() as conn:
         result = await queries.get_launched_count(conn)
         return result["count"] if result else 0
+
+
+# ============================================================================
+# PIPELINE STATUS FUNCTIONS
+# ============================================================================
+
+
+async def get_pipeline_summary() -> list:
+    """Get count of hotels at each pipeline stage."""
+    async with get_conn() as conn:
+        results = await queries.get_pipeline_summary(conn)
+        return [(r['status'], r['count']) for r in results]
+
+
+async def get_pipeline_by_source() -> list:
+    """Get pipeline breakdown by source."""
+    async with get_conn() as conn:
+        results = await queries.get_pipeline_by_source(conn)
+        return [dict(r) for r in results]
+
+
+async def get_pipeline_by_source_name(source: str) -> list:
+    """Get pipeline breakdown for a specific source."""
+    async with get_conn() as conn:
+        results = await queries.get_pipeline_by_source_name(conn, source=source)
+        return [(r['status'], r['count']) for r in results]

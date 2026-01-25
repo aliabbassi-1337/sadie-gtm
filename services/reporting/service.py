@@ -95,6 +95,26 @@ class IService(ABC):
         """Count hotels that have been launched."""
         pass
 
+    # =========================================================================
+    # PIPELINE STATUS METHODS
+    # =========================================================================
+
+    @abstractmethod
+    async def get_pipeline_summary(self) -> list:
+        """Get count of hotels at each pipeline stage."""
+        pass
+
+    @abstractmethod
+    async def get_pipeline_by_source(self) -> list:
+        """Get pipeline breakdown by source."""
+        pass
+
+    @abstractmethod
+    async def get_pipeline_by_source_name(self, source: str) -> list:
+        """Get pipeline breakdown for a specific source."""
+        pass
+
+
 class Service(IService):
     """Implementation of the reporting service."""
 
@@ -515,3 +535,18 @@ class Service(IService):
         """Count hotels that have been launched."""
         return await repo.get_launched_count()
 
+    # =========================================================================
+    # PIPELINE STATUS METHODS
+    # =========================================================================
+
+    async def get_pipeline_summary(self) -> list:
+        """Get count of hotels at each pipeline stage."""
+        return await repo.get_pipeline_summary()
+
+    async def get_pipeline_by_source(self) -> list:
+        """Get pipeline breakdown by source."""
+        return await repo.get_pipeline_by_source()
+
+    async def get_pipeline_by_source_name(self, source: str) -> list:
+        """Get pipeline breakdown for a specific source."""
+        return await repo.get_pipeline_by_source_name(source)

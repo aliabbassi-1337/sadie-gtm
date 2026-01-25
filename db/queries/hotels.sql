@@ -965,3 +965,38 @@ WHERE id = :hotel_id
 UPDATE sadie_gtm.hotels
 SET status = :terminal_status, updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
+
+-- name: get_pipeline_summary
+-- Get count of hotels at each pipeline stage
+SELECT 
+    status,
+    COUNT(*) AS count
+FROM sadie_gtm.hotels
+GROUP BY status
+ORDER BY status DESC;
+
+-- name: get_pipeline_by_source
+-- Get pipeline breakdown by source
+SELECT 
+    source,
+    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS ingested,
+    SUM(CASE WHEN status = 10 THEN 1 ELSE 0 END) AS has_website,
+    SUM(CASE WHEN status = 20 THEN 1 ELSE 0 END) AS has_location,
+    SUM(CASE WHEN status = 30 THEN 1 ELSE 0 END) AS detected,
+    SUM(CASE WHEN status = 40 THEN 1 ELSE 0 END) AS enriched,
+    SUM(CASE WHEN status = 100 THEN 1 ELSE 0 END) AS launched,
+    SUM(CASE WHEN status < 0 THEN 1 ELSE 0 END) AS rejected,
+    COUNT(*) AS total
+FROM sadie_gtm.hotels
+GROUP BY source
+ORDER BY total DESC;
+
+-- name: get_pipeline_by_source_name
+-- Get pipeline breakdown for a specific source
+SELECT 
+    status,
+    COUNT(*) AS count
+FROM sadie_gtm.hotels
+WHERE source = :source
+GROUP BY status
+ORDER BY status DESC;
