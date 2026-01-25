@@ -844,3 +844,124 @@ AND ST_Within(
     location::geometry,
     ST_MakeEnvelope(:lng_min, :lat_min, :lng_max, :lat_max, 4326)
 );
+
+-- ============================================================================
+-- PIPELINE STATE MACHINE QUERIES
+-- ============================================================================
+
+-- name: get_pipeline_summary
+-- Get pipeline progress summary (counts by stage)
+SELECT 
+    CASE 
+        WHEN status = 0 THEN 'ingested'
+        WHEN status = 10 THEN 'has_website'
+        WHEN status = 20 THEN 'has_location'
+        WHEN status = 30 THEN 'detected'
+        WHEN status = 40 THEN 'enriched'
+        WHEN status = 100 THEN 'launched'
+        WHEN status = -1 THEN 'no_booking_engine'
+        WHEN status = -2 THEN 'location_mismatch'
+        WHEN status = -3 THEN 'detection_timeout'
+        WHEN status = -11 THEN 'enrichment_failed'
+        WHEN status = -12 THEN 'unenrichable'
+        WHEN status = -21 THEN 'duplicate'
+        WHEN status = -22 THEN 'non_hotel'
+        WHEN status = -23 THEN 'invalid_data'
+        ELSE 'unknown_' || status::text
+    END AS stage,
+    status,
+    COUNT(*) AS count
+FROM sadie_gtm.hotels
+GROUP BY status
+ORDER BY status DESC;
+
+-- name: get_pipeline_summary_by_source
+-- Get pipeline progress summary grouped by source
+SELECT 
+    source,
+    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS ingested,
+    SUM(CASE WHEN status = 10 THEN 1 ELSE 0 END) AS has_website,
+    SUM(CASE WHEN status = 20 THEN 1 ELSE 0 END) AS has_location,
+    SUM(CASE WHEN status = 30 THEN 1 ELSE 0 END) AS detected,
+    SUM(CASE WHEN status = 40 THEN 1 ELSE 0 END) AS enriched,
+    SUM(CASE WHEN status = 100 THEN 1 ELSE 0 END) AS launched,
+    SUM(CASE WHEN status < 0 THEN 1 ELSE 0 END) AS rejected,
+    COUNT(*) AS total
+FROM sadie_gtm.hotels
+GROUP BY source
+ORDER BY total DESC;
+
+-- name: get_hotels_at_stage
+-- Get hotels at a specific pipeline stage
+SELECT
+    id, name, website, city, state, source,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude
+FROM sadie_gtm.hotels
+WHERE status = :stage
+ORDER BY id
+LIMIT :limit;
+
+-- name: get_hotels_needing_action
+-- Get hotels that need action (between stages, not terminal)
+SELECT
+    id, name, website, city, state, source, status,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude,
+    CASE 
+        WHEN status = 0 AND website IS NOT NULL THEN 'detect'
+        WHEN status = 0 THEN 'enrich_website'
+        WHEN status = 10 AND location IS NOT NULL THEN 'detect'
+        WHEN status = 10 THEN 'enrich_location'
+        WHEN status = 20 THEN 'detect'
+        WHEN status = 30 THEN 'enrich_room_count'
+        WHEN status = 40 THEN 'launch'
+        ELSE 'unknown'
+    END AS next_action
+FROM sadie_gtm.hotels
+WHERE status >= 0 AND status < 100
+ORDER BY status, id
+LIMIT :limit;
+
+-- name: advance_to_has_website!
+-- Advance hotels to HAS_WEBSITE stage after enrichment
+UPDATE sadie_gtm.hotels
+SET status = 10, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 10
+  AND website IS NOT NULL AND website != '';
+
+-- name: advance_to_has_location!
+-- Advance hotels to HAS_LOCATION stage after location enrichment
+UPDATE sadie_gtm.hotels
+SET status = 20, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 20
+  AND location IS NOT NULL;
+
+-- name: advance_to_detected!
+-- Advance hotels to DETECTED stage after booking engine detection
+UPDATE sadie_gtm.hotels
+SET status = 30, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 30;
+
+-- name: advance_to_enriched!
+-- Advance hotels to ENRICHED stage after all enrichments
+UPDATE sadie_gtm.hotels
+SET status = 40, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 40;
+
+-- name: advance_to_launched!
+-- Advance hotels to LAUNCHED stage
+UPDATE sadie_gtm.hotels
+SET status = 100, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 100;
+
+-- name: set_terminal_status!
+-- Set a terminal (rejected) status
+UPDATE sadie_gtm.hotels
+SET status = :terminal_status, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import json
 
 from services.leadgen import repo
-from services.leadgen.constants import HotelStatus
+from services.leadgen.constants import HotelStatus, PipelineStage
 from services.leadgen.detector import BatchDetector, DetectionConfig, DetectionResult
 from services.leadgen.geocoding import CityLocation, geocode_city, fetch_city_boundary
 from services.leadgen.reverse_lookup import (
@@ -481,15 +481,13 @@ class Service(IService):
                     status=1,  # Success
                 )
 
-                # Save phone/email but don't change status - hotel stays at PENDING (0)
-                # Detection completion is tracked by hotel_booking_engines record
-                # Launcher will set status=1 when all enrichments are complete
-                if result.phone_website or result.email:
-                    await repo.update_hotel_contact_info(
-                        hotel_id=result.hotel_id,
-                        phone_website=result.phone_website or None,
-                        email=result.email or None,
-                    )
+                # Advance to DETECTED stage (30)
+                await repo.update_hotel_status(
+                    hotel_id=result.hotel_id,
+                    status=PipelineStage.DETECTED,
+                    phone_website=result.phone_website or None,
+                    email=result.email or None,
+                )
             else:
                 # No booking engine found
                 await repo.update_hotel_status(

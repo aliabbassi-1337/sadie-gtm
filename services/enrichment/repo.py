@@ -271,15 +271,28 @@ async def get_pending_website_enrichment_count() -> int:
 
 
 async def update_hotel_website(hotel_id: int, website: str) -> None:
-    """Update hotel with enriched website."""
+    """Update hotel with enriched website and advance pipeline stage."""
     async with get_conn() as conn:
         await queries.update_hotel_website(conn, hotel_id=hotel_id, website=website)
+        # Advance to HAS_WEBSITE stage (10)
+        await conn.execute("""
+            UPDATE sadie_gtm.hotels 
+            SET status = 10, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND status < 10
+        """, hotel_id)
 
 
 async def update_hotel_location_point_if_null(hotel_id: int, lat: float, lng: float) -> None:
     """Update hotel location from lat/lng coordinates ONLY if location is currently NULL."""
     async with get_conn() as conn:
         await queries.update_hotel_location_point_if_null(conn, hotel_id=hotel_id, lat=lat, lng=lng)
+        # Advance to HAS_LOCATION stage (20) if they also have website
+        await conn.execute("""
+            UPDATE sadie_gtm.hotels 
+            SET status = 20, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND status < 20 
+              AND website IS NOT NULL AND website != ''
+        """, hotel_id)
 
 
 async def update_website_enrichment_status(
