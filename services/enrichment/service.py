@@ -303,6 +303,9 @@ class Service(IService):
                     found += 1
                     api_calls += 1
                     await repo.update_hotel_website(hotel["id"], result.website)
+                    # Save location if returned from Serper Places (only if hotel doesn't have one)
+                    if result.lat and result.lng:
+                        await repo.update_hotel_location_point_if_null(hotel["id"], result.lat, result.lng)
                     await repo.update_website_enrichment_status(
                         hotel["id"], status=1, source="serper"
                     )

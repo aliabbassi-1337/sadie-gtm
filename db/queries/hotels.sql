@@ -692,6 +692,15 @@ SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
+-- name: update_hotel_location_point_if_null!
+-- Update hotel location from lat/lng ONLY if location is currently NULL
+-- Prevents overwriting existing location data
+UPDATE sadie_gtm.hotels
+SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND location IS NULL;
+
 -- ============================================================================
 -- RETRY QUERIES
 -- ============================================================================
