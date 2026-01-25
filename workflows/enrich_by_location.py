@@ -21,7 +21,7 @@ from services.enrichment.service import Service as EnrichmentService
 from infra import slack
 
 
-async def main():
+async def run():
     parser = argparse.ArgumentParser(
         description="Enrich hotels using coordinates (Serper Places API)",
     )
@@ -29,28 +29,28 @@ async def main():
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--no-notify", action="store_true")
     parser.add_argument("--concurrency", type=int, default=10)
-    
+
     args = parser.parse_args()
-    
+
     logger.remove()
     logger.add(sys.stderr, level="INFO", format="<level>{level: <8}</level> | {message}")
-    
+
     await init_db()
-    
+
     try:
         service = EnrichmentService()
-        
+
         if args.status:
             pending = await service.get_pending_coordinate_enrichment_count()
             logger.info(f"Hotels pending coordinate enrichment: {pending}")
             return
-        
+
         logger.info(f"Running coordinate enrichment (limit={args.limit})")
         stats = await service.enrich_by_coordinates(
             limit=args.limit,
             concurrency=args.concurrency,
         )
-        
+
         if not args.no_notify and stats["enriched"] > 0:
             slack.send_message(
                 f"*Coordinate Enrichment Complete*\n"
@@ -58,7 +58,7 @@ async def main():
                 f"• Not found: {stats['not_found']}\n"
                 f"• API calls: {stats['api_calls']}"
             )
-            
+
     except Exception as e:
         logger.error(f"Coordinate enrichment failed: {e}")
         if not args.no_notify:
@@ -69,4 +69,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run())
