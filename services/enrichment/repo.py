@@ -276,6 +276,12 @@ async def update_hotel_website(hotel_id: int, website: str) -> None:
         await queries.update_hotel_website(conn, hotel_id=hotel_id, website=website)
 
 
+async def update_hotel_location_point_if_null(hotel_id: int, lat: float, lng: float) -> None:
+    """Update hotel location from lat/lng coordinates ONLY if location is currently NULL."""
+    async with get_conn() as conn:
+        await queries.update_hotel_location_point_if_null(conn, hotel_id=hotel_id, lat=lat, lng=lng)
+
+
 async def update_website_enrichment_status(
     hotel_id: int,
     status: int,
@@ -318,7 +324,55 @@ async def get_website_enrichment_stats(source_prefix: Optional[str] = None) -> D
 
 
 # ============================================================================
-# COORDINATE ENRICHMENT FUNCTIONS
+# LOCATION-ONLY ENRICHMENT FUNCTIONS (for hotels with website but no location)
+# ============================================================================
+
+
+async def get_hotels_pending_location_from_places(
+    limit: int = 100,
+    source_filter: Optional[str] = None,
+    state_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Get hotels that have website but no location (need Serper Places lookup).
+
+    Criteria:
+    - has website
+    - has name and city
+    - no location
+
+    Args:
+        limit: Max hotels to return
+        source_filter: Filter by source (e.g., 'texas_hot')
+        state_filter: Filter by state (e.g., 'TX')
+
+    Returns list of hotels needing location enrichment.
+    """
+    async with get_conn() as conn:
+        results = await queries.get_hotels_pending_location_from_places(
+            conn,
+            limit=limit,
+            source_filter=f"%{source_filter}%" if source_filter else None,
+            state_filter=state_filter,
+        )
+        return [dict(row) for row in results]
+
+
+async def get_pending_location_from_places_count(
+    source_filter: Optional[str] = None,
+    state_filter: Optional[str] = None,
+) -> int:
+    """Count hotels that have website but no location."""
+    async with get_conn() as conn:
+        result = await queries.get_pending_location_from_places_count(
+            conn,
+            source_filter=f"%{source_filter}%" if source_filter else None,
+            state_filter=state_filter,
+        )
+        return result["count"] if result else 0
+
+
+# ============================================================================
+# COORDINATE ENRICHMENT FUNCTIONS (for parcel data with coords but no name/website)
 # ============================================================================
 
 
