@@ -369,3 +369,69 @@ async def get_pending_location_from_places_count(
             state_filter=state_filter,
         )
         return result["count"] if result else 0
+
+
+# ============================================================================
+# COORDINATE ENRICHMENT FUNCTIONS (for parcel data with coords but no name/website)
+# ============================================================================
+
+
+async def get_hotels_pending_coordinate_enrichment(
+    limit: int = 100,
+    sources: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Get hotels with coordinates but no website (parcel data needing Places API lookup).
+
+    Criteria:
+    - has location (coordinates)
+    - no website
+    - optionally filter by source names
+
+    Args:
+        limit: Max hotels to return
+        sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
+    """
+    async with get_conn() as conn:
+        results = await queries.get_hotels_pending_coordinate_enrichment(
+            conn,
+            limit=limit,
+            sources=sources,
+        )
+        return [dict(row) for row in results]
+
+
+async def get_pending_coordinate_enrichment_count(
+    sources: Optional[List[str]] = None,
+) -> int:
+    """Count hotels needing coordinate-based enrichment.
+
+    Args:
+        sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
+    """
+    async with get_conn() as conn:
+        result = await queries.get_pending_coordinate_enrichment_count(
+            conn,
+            sources=sources,
+        )
+        return result["count"] if result else 0
+
+
+async def update_hotel_from_places(
+    hotel_id: int,
+    name: Optional[str] = None,
+    website: Optional[str] = None,
+    phone: Optional[str] = None,
+    rating: Optional[float] = None,
+    address: Optional[str] = None,
+) -> None:
+    """Update hotel with data from Places API."""
+    async with get_conn() as conn:
+        await queries.update_hotel_from_places(
+            conn,
+            hotel_id=hotel_id,
+            name=name,
+            website=website,
+            phone=phone,
+            rating=rating,
+            address=address,
+        )
