@@ -36,7 +36,7 @@ from loguru import logger
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.leadgen.booking_engines import GuestbookScraper, GuestbookProperty
+from services.leadgen.service import Service
 
 
 # State bounding boxes for targeted scraping
@@ -178,13 +178,13 @@ Examples:
     if args.max_pages:
         logger.info(f"Max pages: {args.max_pages}")
 
-    # Fetch hotels
-    async with GuestbookScraper() as scraper:
-        properties = await scraper.fetch_all(
-            bbox=bbox,
-            max_pages=args.max_pages,
-            cloudbeds_only=cloudbeds_only,
-        )
+    # Use service for enumeration
+    service = Service()
+    properties = await service.enumerate_guestbook(
+        bbox=bbox,
+        max_pages=args.max_pages,
+        cloudbeds_only=cloudbeds_only,
+    )
 
     logger.info("")
     logger.info("=" * 60)
@@ -195,115 +195,68 @@ Examples:
     # Count by status
     by_status = {}
     for p in properties:
-        by_status[p.bei_status] = by_status.get(p.bei_status, 0) + 1
+        status = p.get("bei_status", "unknown")
+        by_status[status] = by_status.get(status, 0) + 1
     
     logger.info("By integration status:")
     for status, count in sorted(by_status.items(), key=lambda x: -x[1]):
         logger.info(f"  {status}: {count}")
 
     # Count with websites
-    with_website = sum(1 for p in properties if p.website)
+    with_website = sum(1 for p in properties if p.get("website"))
     logger.info(f"Properties with website: {with_website}")
 
     # Output to JSON
     if args.output:
-        output_data = [p.model_dump() for p in properties]
         with open(args.output, "w") as f:
-            json.dump(output_data, f, indent=2)
+            json.dump(properties, f, indent=2)
         logger.info(f"Saved {len(properties)} properties to {args.output}")
 
-    # Save to database
+    # Save to database using service
     if args.save_db:
-        from db.client import init_db, get_conn
-        from services.leadgen import repo
+        from db.client import init_db
         
         await init_db()
         
-        logger.info("Saving to database...")
         source = f"guestbook_{region_name.lower().replace(' ', '_')}"
         
-        inserted = 0
-        skipped = 0
-        errors = 0
-        
-        for prop in properties:
-            if not prop.website:
-                skipped += 1
-                continue
-            
-            try:
-                # Create hotel record
-                hotel_data = {
-                    "name": prop.name,
-                    "website": prop.website,
-                    "lat": prop.lat,
-                    "lng": prop.lng,
-                    "source": source,
-                    "external_id": f"guestbook_{prop.id}",
+        # Prepare leads with external_id
+        leads = []
+        for p in properties:
+            if p.get("website"):
+                leads.append({
+                    "name": p["name"],
+                    "website": p["website"],
+                    "lat": p.get("lat"),
+                    "lng": p.get("lng"),
+                    "external_id": f"guestbook_{p['id']}",
                     "external_id_type": "guestbook",
-                }
-                
-                # Check if hotel already exists
-                async with get_conn() as conn:
-                    existing = await conn.fetchrow(
-                        "SELECT id FROM hotels WHERE external_id = $1 AND external_id_type = $2",
-                        hotel_data["external_id"],
-                        hotel_data["external_id_type"],
-                    )
-                    
-                    if existing:
-                        skipped += 1
-                        continue
-                    
-                    # Insert hotel
-                    hotel_id = await conn.fetchval(
-                        """
-                        INSERT INTO hotels (name, website, lat, lng, source, external_id, external_id_type)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        RETURNING id
-                        """,
-                        hotel_data["name"],
-                        hotel_data["website"],
-                        hotel_data["lat"],
-                        hotel_data["lng"],
-                        hotel_data["source"],
-                        hotel_data["external_id"],
-                        hotel_data["external_id_type"],
-                    )
-                    
-                    # Link to Cloudbeds engine if automated
-                    if prop.bei_status == "automated":
-                        await conn.execute(
-                            """
-                            INSERT INTO hotel_booking_engines (hotel_id, booking_engine_id, detected_at)
-                            SELECT $1, id, NOW()
-                            FROM booking_engines
-                            WHERE name ILIKE 'cloudbeds'
-                            ON CONFLICT (hotel_id, booking_engine_id) DO NOTHING
-                            """,
-                            hotel_id,
-                        )
-                    
-                    inserted += 1
-                    
-            except Exception as e:
-                logger.error(f"Error saving {prop.name}: {e}")
-                errors += 1
-
+                })
+        
+        logger.info(f"Saving {len(leads)} leads to database...")
+        stats = await service.save_booking_engine_leads(
+            leads=leads,
+            source=source,
+            booking_engine="Cloudbeds",
+        )
+        
         logger.info(f"Database results:")
-        logger.info(f"  Inserted: {inserted}")
-        logger.info(f"  Skipped (exists or no website): {skipped}")
-        logger.info(f"  Errors: {errors}")
+        logger.info(f"  Inserted: {stats['inserted']}")
+        logger.info(f"  Engines linked: {stats['engines_linked']}")
+        logger.info(f"  Skipped (exists): {stats['skipped_exists']}")
+        logger.info(f"  Skipped (no website): {stats['skipped_no_website']}")
+        logger.info(f"  Errors: {stats['errors']}")
 
     # Show sample results
     if properties and not args.output:
         logger.info("")
         logger.info("Sample properties (first 10):")
         for p in properties[:10]:
-            status_icon = "✓" if p.bei_status == "automated" else "○"
-            score = f" ({p.trust_you_score}★)" if p.trust_you_score else ""
-            website = f" → {p.website[:50]}..." if p.website and len(p.website) > 50 else f" → {p.website}" if p.website else ""
-            logger.info(f"  {status_icon} {p.name}{score}{website}")
+            status_icon = "✓" if p.get("bei_status") == "automated" else "○"
+            score = f" ({p.get('trust_you_score')}★)" if p.get("trust_you_score") else ""
+            website = p.get("website", "")
+            website_str = f" → {website[:50]}..." if website and len(website) > 50 else f" → {website}" if website else ""
+            logger.info(f"  {status_icon} {p['name']}{score}{website_str}")
 
 
 if __name__ == "__main__":
