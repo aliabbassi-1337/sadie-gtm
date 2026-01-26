@@ -53,6 +53,23 @@ class IService(ABC):
         pass
 
     @abstractmethod
+    async def export_all_states(
+        self,
+        country: str = "USA",
+        source_pattern: str = None,
+    ) -> dict:
+        """Export all states that have hotels.
+
+        Args:
+            country: Country code
+            source_pattern: Filter by source pattern
+
+        Returns:
+            Dict with 'states' count and 'total_leads' count
+        """
+        pass
+
+    @abstractmethod
     def send_slack_notification(
         self,
         location: str,
@@ -294,6 +311,52 @@ class Service(IService):
             return s3_uri, len(leads)
         finally:
             os.unlink(tmp_path)
+
+    async def export_all_states(
+        self,
+        country: str = "USA",
+        source_pattern: str = None,
+    ) -> dict:
+        """Export all states that have hotels.
+
+        Args:
+            country: Country code
+            source_pattern: Filter by source pattern
+
+        Returns:
+            Dict with 'states' count and 'total_leads' count
+        """
+        states = await repo.get_distinct_states()
+
+        logger.info(f"Found {len(states)} states with hotels")
+
+        total_leads = 0
+        exports = []
+
+        for state in states:
+            if not state:
+                continue
+            try:
+                logger.info(f"Exporting {state}...")
+                s3_uri, lead_count = await self.export_state(state, country, source_pattern=source_pattern)
+                if lead_count > 0:
+                    exports.append((state, s3_uri, lead_count))
+                    total_leads += lead_count
+                    logger.info(f"  {state}: {lead_count} leads -> {s3_uri}")
+                else:
+                    logger.info(f"  {state}: no leads")
+            except Exception as e:
+                logger.error(f"  {state}: failed - {e}")
+
+        # Summary
+        logger.info("\n" + "=" * 50)
+        logger.info("EXPORT SUMMARY")
+        logger.info("=" * 50)
+        for state, s3_uri, count in exports:
+            logger.info(f"  {state}: {count} leads")
+        logger.info(f"Total: {total_leads} leads across {len(exports)} states")
+
+        return {"states": len(exports), "total_leads": total_leads}
 
     def _create_crawl_workbook(self, leads: List[HotelLead], engine_name: str) -> Workbook:
         """Create Excel workbook for crawl data (simpler format, no stats)."""

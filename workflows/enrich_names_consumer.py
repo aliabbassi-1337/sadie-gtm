@@ -122,7 +122,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5):
                     QUEUE_URL,
                     max_messages=10,
                     wait_time_seconds=20,
-                    visibility_timeout=60,
+                    visibility_timeout=3600,  # 1 hour - prevents reprocessing
                 )
                 
                 if not messages:

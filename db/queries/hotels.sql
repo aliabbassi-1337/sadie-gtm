@@ -1067,3 +1067,11 @@ DO UPDATE SET
     updated_at = CURRENT_TIMESTAMP
 RETURNING id, 
     (xmax = 0) AS inserted;  -- True if inserted, False if updated
+
+
+-- name: get_distinct_states
+-- Get all distinct states that have hotels
+SELECT DISTINCT state
+FROM sadie_gtm.hotels
+WHERE state IS NOT NULL AND state != ''
+ORDER BY state;
