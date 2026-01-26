@@ -102,16 +102,19 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
         cls,
         bucket: str,
         prefix: str = "",
-        pattern: str = "*_deduped.txt",
         cache_dir: Optional[str] = None,
     ) -> List["CrawlIngestor"]:
         """
         Create ingestors for all crawl files in an S3 bucket.
         
+        Priority for each engine:
+        1. {engine}_deduped.txt (if exists)
+        2. {engine}.txt (base file)
+        3. Skip {engine}_commoncrawl.txt (raw, not deduped)
+        
         Args:
             bucket: S3 bucket name
             prefix: S3 key prefix (e.g., "crawl-data/")
-            pattern: Glob pattern for files (default: "*_deduped.txt" for deduped files)
             cache_dir: Local directory to cache downloaded files
         
         Returns:
@@ -119,33 +122,43 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
         """
         source = S3Source(bucket=bucket, prefix=prefix, cache_dir=cache_dir)
         
-        # Also match simple engine names like "cloudbeds.txt"
-        patterns = [pattern, "*.txt"]
-        all_keys = set()
+        # List all txt files
+        all_keys = await source.list_files("*.txt")
         
-        for p in patterns:
-            keys = await source.list_files(p)
-            all_keys.update(keys)
+        # Build a map of engine -> best file (prefer deduped)
+        engine_files: dict[str, str] = {}
         
-        ingestors = []
         for key in all_keys:
             filename = key.split("/")[-1].lower()
             
-            # Skip commoncrawl (raw) files - use deduped only
+            # Skip commoncrawl (raw) files
             if "_commoncrawl" in filename:
                 continue
             
             # Detect engine from filename
             for engine in KNOWN_ENGINES:
-                if engine in filename:
-                    # Download the file
-                    content = await source.fetch_file(key)
-                    slugs = content.decode("utf-8").strip().split("\n")
-                    slugs = [s.strip().lower() for s in slugs if s.strip()]
+                if filename.startswith(engine):
+                    # Prefer _deduped version
+                    is_deduped = "_deduped" in filename
+                    current = engine_files.get(engine)
                     
-                    logger.info(f"Loaded {len(slugs)} slugs for {engine} from s3://{bucket}/{key}")
-                    ingestors.append(cls(engine=engine, slugs=slugs))
+                    if current is None:
+                        engine_files[engine] = key
+                    elif is_deduped and "_deduped" not in current:
+                        # Replace with deduped version
+                        engine_files[engine] = key
                     break
+        
+        # Create ingestors for each engine
+        ingestors = []
+        for engine, key in engine_files.items():
+            content = await source.fetch_file(key)
+            slugs = content.decode("utf-8").strip().split("\n")
+            slugs = list(set(s.strip().lower() for s in slugs if s.strip()))
+            
+            filename = key.split("/")[-1]
+            logger.info(f"Loaded {len(slugs)} unique slugs for {engine} from {filename}")
+            ingestors.append(cls(engine=engine, slugs=slugs))
         
         return ingestors
     
