@@ -21,6 +21,7 @@ INSERT INTO sadie_gtm.hotel_booking_engines (
     hotel_id,
     booking_engine_id,
     booking_url,
+    engine_property_id,
     detection_method,
     status,
     detected_at,
@@ -29,6 +30,7 @@ INSERT INTO sadie_gtm.hotel_booking_engines (
     :hotel_id,
     :booking_engine_id,
     :booking_url,
+    :engine_property_id,
     :detection_method,
     :status,
     CURRENT_TIMESTAMP,
@@ -37,6 +39,15 @@ INSERT INTO sadie_gtm.hotel_booking_engines (
 ON CONFLICT (hotel_id) DO UPDATE SET
     booking_engine_id = COALESCE(EXCLUDED.booking_engine_id, hotel_booking_engines.booking_engine_id),
     booking_url = COALESCE(EXCLUDED.booking_url, hotel_booking_engines.booking_url),
+    engine_property_id = COALESCE(EXCLUDED.engine_property_id, hotel_booking_engines.engine_property_id),
     detection_method = COALESCE(EXCLUDED.detection_method, hotel_booking_engines.detection_method),
     status = EXCLUDED.status,
     updated_at = CURRENT_TIMESTAMP;
+
+-- name: get_hotel_by_engine_property_id^
+-- Look up hotel by booking engine property ID (slug/UUID/numeric ID)
+SELECT h.id, h.name, h.website
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE hbe.booking_engine_id = :booking_engine_id
+  AND hbe.engine_property_id = :engine_property_id;

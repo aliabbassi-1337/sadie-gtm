@@ -6,32 +6,27 @@ Reads text files containing slugs/URLs (one per line) from Common Crawl
 or similar sources and ingests them into the hotels table.
 
 Usage:
-    # Ingest all files from S3 (recommended)
-    uv run python -m workflows.ingest_crawl --s3
-    
-    # Ingest from S3 with custom path
-    uv run python -m workflows.ingest_crawl --s3 --s3-prefix "crawl-data/"
-
-    # Ingest Cloudbeds slugs from local file
+    # Ingest Cloudbeds slugs
     uv run python -m workflows.ingest_crawl \
         --file "/path/to/cloudbeds_commoncrawl_full.txt" \
         --engine cloudbeds
 
-    # Ingest all booking engine files from a local directory
+    # Ingest all booking engine files from a directory
     uv run python -m workflows.ingest_crawl \
         --dir "/path/to/crawled booking engine urls" \
         --all
         
     # Dry run to see what would be imported
-    uv run python -m workflows.ingest_crawl --s3 --dry-run
+    uv run python -m workflows.ingest_crawl \
+        --file "/path/to/mews_commoncrawl_full.txt" \
+        --engine mews \
+        --dry-run
 """
 
 import argparse
 import asyncio
 import logging
-import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,10 +43,8 @@ ENGINE_FILE_PATTERNS = {
     "siteminder": "siteminder",
 }
 
-# Default S3 bucket and prefix for crawl data
-DEFAULT_S3_BUCKET = "sadie-gtm"
-DEFAULT_S3_PREFIX = "crawl-data/"
 
+from typing import Optional
 
 def detect_engine_from_filename(filename: str) -> Optional[str]:
     """Detect booking engine from filename."""
@@ -62,49 +55,6 @@ def detect_engine_from_filename(filename: str) -> Optional[str]:
     return None
 
 
-async def fetch_s3_files(bucket: str, prefix: str) -> List[Tuple[str, str, bytes]]:
-    """
-    Fetch crawl files from S3.
-    
-    Returns list of (filename, engine, content) tuples.
-    """
-    try:
-        import aioboto3
-    except ImportError:
-        raise ImportError("S3 support requires aioboto3. Install with: pip install aioboto3")
-    
-    session = aioboto3.Session()
-    files = []
-    
-    async with session.client("s3") as s3:
-        # List files in prefix
-        paginator = s3.get_paginator("list_objects_v2")
-        
-        async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                filename = key.split("/")[-1]
-                
-                # Only process .txt files
-                if not filename.endswith(".txt"):
-                    continue
-                
-                # Detect engine from filename
-                engine = detect_engine_from_filename(filename)
-                if not engine:
-                    logger.warning(f"Skipping unrecognized file: {filename}")
-                    continue
-                
-                # Fetch file content
-                logger.info(f"Fetching s3://{bucket}/{key}...")
-                response = await s3.get_object(Bucket=bucket, Key=key)
-                content = await response["Body"].read()
-                
-                files.append((filename, engine, content))
-    
-    return files
-
-
 async def main():
     parser = argparse.ArgumentParser(
         description="Ingest crawled booking engine URLs into database"
@@ -113,33 +63,14 @@ async def main():
     # Input options
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument(
-        "--s3",
-        action="store_true",
-        help="Fetch files from S3 bucket (recommended)"
-    )
-    input_group.add_argument(
         "--file", "-f",
         type=str,
-        help="Path to local text file with slugs/URLs (one per line)"
+        help="Path to text file with slugs/URLs (one per line)"
     )
     input_group.add_argument(
         "--dir", "-d",
         type=str,
-        help="Local directory containing crawl files (use with --all)"
-    )
-    
-    # S3 options
-    parser.add_argument(
-        "--s3-bucket",
-        type=str,
-        default=DEFAULT_S3_BUCKET,
-        help=f"S3 bucket name (default: {DEFAULT_S3_BUCKET})"
-    )
-    parser.add_argument(
-        "--s3-prefix",
-        type=str,
-        default=DEFAULT_S3_PREFIX,
-        help=f"S3 key prefix (default: {DEFAULT_S3_PREFIX})"
+        help="Directory containing crawl files (use with --all)"
     )
     
     # Engine selection
@@ -147,12 +78,12 @@ async def main():
         "--engine", "-e",
         type=str,
         choices=["cloudbeds", "mews", "rms", "siteminder"],
-        help="Booking engine name (required with --file, auto-detected otherwise)"
+        help="Booking engine name (required with --file, auto-detected with --dir)"
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Process all recognized files in directory (required with --dir)"
+        help="Process all recognized files in directory"
     )
     
     # Options
@@ -170,7 +101,39 @@ async def main():
     parser.add_argument(
         "--limit",
         type=int,
-        help="Limit number of slugs to process per file (for testing)"
+        help="Limit number of slugs to process (for testing)"
+    )
+    parser.add_argument(
+        "--no-scrape",
+        action="store_true",
+        help="Skip scraping hotel names (import slugs only - NOT recommended)"
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=50,
+        help="Number of concurrent requests (default: 50)"
+    )
+    parser.add_argument(
+        "--no-common-crawl",
+        action="store_true",
+        help="Use Wayback instead of Common Crawl (slower but works for all engines)"
+    )
+    parser.add_argument(
+        "--no-fuzzy",
+        action="store_true",
+        help="Disable fuzzy name matching (exact match only)"
+    )
+    parser.add_argument(
+        "--fuzzy-threshold",
+        type=float,
+        default=0.7,
+        help="Fuzzy match similarity threshold 0.0-1.0 (default: 0.7)"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        help="Path to checkpoint file for resume capability"
     )
     
     args = parser.parse_args()
@@ -182,27 +145,15 @@ async def main():
     if args.dir and not args.all:
         parser.error("--all is required when using --dir")
     
-    # Collect files to process: list of (filename, engine, content_or_path)
-    # For S3: content is bytes; for local: content is file path
+    # Collect files to process
     files_to_process = []
-    is_s3 = args.s3
     
-    if args.s3:
-        logger.info(f"Fetching files from s3://{args.s3_bucket}/{args.s3_prefix}...")
-        try:
-            s3_files = await fetch_s3_files(args.s3_bucket, args.s3_prefix)
-            for filename, engine, content in s3_files:
-                files_to_process.append((filename, engine, content))
-        except Exception as e:
-            logger.error(f"Failed to fetch S3 files: {e}")
-            return
-    
-    elif args.file:
+    if args.file:
         file_path = Path(args.file)
         if not file_path.exists():
             logger.error(f"File not found: {file_path}")
             return
-        files_to_process.append((file_path.name, args.engine, str(file_path)))
+        files_to_process.append((file_path, args.engine))
     
     elif args.dir:
         dir_path = Path(args.dir)
@@ -213,7 +164,7 @@ async def main():
         for file_path in dir_path.glob("*.txt"):
             engine = detect_engine_from_filename(file_path.name)
             if engine:
-                files_to_process.append((file_path.name, engine, str(file_path)))
+                files_to_process.append((file_path, engine))
             else:
                 logger.warning(f"Skipping unrecognized file: {file_path.name}")
     
@@ -225,15 +176,11 @@ async def main():
     
     # Dry run - just show stats
     if args.dry_run:
-        for filename, engine, content in files_to_process:
-            if is_s3:
-                text = content.decode("utf-8")
-            else:
-                text = Path(content).read_text()
-            lines = text.strip().split("\n")
+        for file_path, engine in files_to_process:
+            lines = file_path.read_text().strip().split("\n")
             slugs = [l.strip() for l in lines if l.strip()]
             unique_slugs = len(set(slugs))
-            logger.info(f"  {filename}: {len(slugs)} lines, {unique_slugs} unique ({engine})")
+            logger.info(f"  {file_path.name}: {len(slugs)} lines, {unique_slugs} unique ({engine})")
         logger.info("Dry run complete - no changes made")
         return
     
@@ -250,56 +197,64 @@ async def main():
         "files": 0,
         "total": 0,
         "inserted": 0,
-        "updated_existing": 0,
+        "updated": 0,
+        "fuzzy_matched": 0,
+        "websites_found": 0,
         "engines_linked": 0,
+        "skipped_no_name": 0,
         "skipped_duplicate": 0,
         "errors": 0,
     }
     
-    for filename, engine, content in files_to_process:
-        logger.info(f"\nProcessing {filename} ({engine})...")
-        
-        # Get file content as text
-        if is_s3:
-            text = content.decode("utf-8")
-        else:
-            text = Path(content).read_text()
-        
-        lines = text.strip().split("\n")
+    for file_path, engine in files_to_process:
+        logger.info(f"\nProcessing {file_path.name} ({engine})...")
         
         # Apply limit if specified
         if args.limit:
-            lines = lines[:args.limit]
-        
-        # Write to temp file for service (service expects file path)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write("\n".join(lines))
-            temp_path = f.name
+            # Read file, limit lines, write to temp file
+            lines = file_path.read_text().strip().split("\n")[:args.limit]
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                f.write("\n".join(lines))
+                temp_path = f.name
+            file_to_process = temp_path
+        else:
+            file_to_process = str(file_path)
         
         try:
             stats = await service.ingest_crawled_urls(
-                file_path=temp_path,
+                file_path=file_to_process,
                 booking_engine=engine,
                 source_tag=args.source,
+                scrape_names=not args.no_scrape,
+                concurrency=args.concurrency,
+                use_common_crawl=not args.no_common_crawl,
+                fuzzy_match=not args.no_fuzzy,
+                fuzzy_threshold=args.fuzzy_threshold,
+                checkpoint_file=args.checkpoint,
             )
             
             total_stats["files"] += 1
-            for key in ["total", "inserted", "updated_existing", "engines_linked", "skipped_duplicate", "errors"]:
+            for key in ["total", "inserted", "updated", "fuzzy_matched", "websites_found", "engines_linked", "skipped_no_name", "skipped_duplicate", "errors"]:
                 total_stats[key] += stats.get(key, 0)
             
-            logger.info(f"  Inserted: {stats['inserted']}")
-            logger.info(f"  Updated existing: {stats.get('updated_existing', 0)}")
-            logger.info(f"  Linked: {stats['engines_linked']}")
-            logger.info(f"  Duplicates: {stats['skipped_duplicate']}")
+            logger.info(f"  New hotels: {stats['inserted']}")
+            logger.info(f"  Updated (source appended): {stats['updated']}")
+            logger.info(f"  Fuzzy matched: {stats.get('fuzzy_matched', 0)}")
+            logger.info(f"  Websites found: {stats.get('websites_found', 0)}")
+            logger.info(f"  Engines linked: {stats['engines_linked']}")
+            logger.info(f"  Skipped (no name): {stats['skipped_no_name']}")
+            logger.info(f"  Skipped (duplicate): {stats['skipped_duplicate']}")
             logger.info(f"  Errors: {stats['errors']}")
             
         except Exception as e:
-            logger.error(f"Failed to process {filename}: {e}")
+            logger.error(f"Failed to process {file_path.name}: {e}")
             total_stats["errors"] += 1
         
         finally:
-            import os
-            os.unlink(temp_path)
+            if args.limit:
+                import os
+                os.unlink(temp_path)
     
     # Summary
     logger.info("\n" + "=" * 50)
@@ -307,10 +262,13 @@ async def main():
     logger.info("=" * 50)
     logger.info(f"Files processed: {total_stats['files']}")
     logger.info(f"Total slugs: {total_stats['total']}")
-    logger.info(f"Inserted (new): {total_stats['inserted']}")
-    logger.info(f"Updated existing: {total_stats['updated_existing']}")
-    logger.info(f"Engines linked: {total_stats['engines_linked']}")
-    logger.info(f"Duplicates skipped: {total_stats['skipped_duplicate']}")
+    logger.info(f"New hotels inserted: {total_stats['inserted']}")
+    logger.info(f"Existing hotels updated: {total_stats['updated']}")
+    logger.info(f"Fuzzy matched: {total_stats['fuzzy_matched']}")
+    logger.info(f"Websites extracted: {total_stats['websites_found']}")
+    logger.info(f"Booking engines linked: {total_stats['engines_linked']}")
+    logger.info(f"Skipped (no name): {total_stats['skipped_no_name']}")
+    logger.info(f"Skipped (duplicate): {total_stats['skipped_duplicate']}")
     logger.info(f"Errors: {total_stats['errors']}")
 
 
