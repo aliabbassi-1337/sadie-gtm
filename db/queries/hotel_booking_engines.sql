@@ -51,3 +51,27 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 WHERE hbe.booking_engine_id = :booking_engine_id
   AND hbe.engine_property_id = :engine_property_id;
+
+-- name: get_hotels_needing_names
+-- Get hotels with booking URLs but missing/placeholder names
+-- Used by name enrichment workers to scrape hotel names from booking pages
+SELECT 
+    h.id,
+    h.name,
+    hbe.booking_url,
+    hbe.engine_property_id as slug,
+    be.name as engine_name
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
+  AND hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
+ORDER BY h.id
+LIMIT :limit;
+
+-- name: update_hotel_name!
+-- Update hotel name after scraping from booking page
+UPDATE sadie_gtm.hotels
+SET name = :name, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
