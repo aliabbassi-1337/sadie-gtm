@@ -2073,7 +2073,7 @@ class Service(IService):
         # Process incrementally in batches - fetch, extract, save immediately
         from .booking_engines import CommonCrawlEnumerator, CrawlIngester
         
-        batch_size = 100  # Save to DB every 100 hotels
+        batch_size = 50  # Save to DB every 50 hotels for faster feedback
         
         if booking_engine.lower() == "cloudbeds" and use_common_crawl:
             logger.info("Using Common Crawl S3 archives (incremental save)...")
@@ -2083,8 +2083,9 @@ class Service(IService):
                 for batch_start in range(0, len(slugs_to_process), batch_size):
                     batch_slugs = slugs_to_process[batch_start:batch_start + batch_size]
                     
-                    # Step 1: Look up in CDX
-                    cdx_records = await enumerator.lookup_slugs_in_cdx(batch_slugs, concurrency=concurrency)
+                    # Step 1: Look up in CDX (cap at 10 to avoid rate limiting)
+                    cdx_concurrency = min(concurrency, 10)
+                    cdx_records = await enumerator.lookup_slugs_in_cdx(batch_slugs, concurrency=cdx_concurrency)
                     
                     # Step 2: Fetch HTML and extract
                     hotels = []
@@ -2117,8 +2118,11 @@ class Service(IService):
                             for slug in batch_slugs:
                                 f.write(f"{slug}\n")
                     
-                    logger.info(f"  Batch {batch_start + len(batch_slugs)}/{len(slugs_to_process)}: "
-                               f"+{batch_stats['inserted']} new, +{batch_stats['updated']} updated")
+                    pct = ((batch_start + len(batch_slugs)) / len(slugs_to_process)) * 100
+                    total_saved = stats.get('inserted', 0) + stats.get('updated', 0)
+                    logger.info(f"  [{pct:.1f}%] Batch {batch_start + len(batch_slugs)}/{len(slugs_to_process)}: "
+                               f"+{batch_stats['inserted']} new, +{batch_stats['updated']} updated "
+                               f"(total saved: {total_saved})")
         else:
             # Wayback fallback - also incremental
             hotels = await self._scrape_hotels_wayback(
