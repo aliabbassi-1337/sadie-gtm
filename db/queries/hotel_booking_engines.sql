@@ -83,3 +83,79 @@ WHERE id = :hotel_id;
 SELECT booking_url 
 FROM sadie_gtm.hotel_booking_engines 
 WHERE booking_url = ANY(:booking_urls);
+
+-- name: get_hotels_needing_addresses
+-- Get hotels with booking URLs but missing location data
+-- Used by address enrichment workers to scrape location from booking pages
+SELECT 
+    h.id,
+    h.name,
+    h.city,
+    h.state,
+    h.country,
+    hbe.booking_url,
+    hbe.engine_property_id as slug,
+    be.name as engine_name
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE (h.city IS NULL OR h.city = '' OR h.state IS NULL OR h.state = '')
+  AND hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
+ORDER BY h.id
+LIMIT :limit;
+
+-- name: get_hotels_needing_enrichment
+-- Get hotels needing either name or address enrichment
+-- type param: 'names' = missing names, 'addresses' = missing location, 'both' = either
+SELECT 
+    h.id,
+    h.name,
+    h.city,
+    h.state,
+    h.country,
+    hbe.booking_url,
+    hbe.engine_property_id as slug,
+    be.name as engine_name,
+    CASE WHEN (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%') THEN true ELSE false END as needs_name,
+    CASE WHEN (h.city IS NULL OR h.city = '' OR h.state IS NULL OR h.state = '') THEN true ELSE false END as needs_address
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
+  AND (
+    (:enrich_type = 'names' AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%'))
+    OR (:enrich_type = 'addresses' AND (h.city IS NULL OR h.city = '' OR h.state IS NULL OR h.state = ''))
+    OR (:enrich_type = 'both' AND (
+      (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
+      OR (h.city IS NULL OR h.city = '' OR h.state IS NULL OR h.state = '')
+    ))
+  )
+ORDER BY h.id
+LIMIT :limit;
+
+-- name: update_hotel_location!
+-- Update hotel location after scraping from booking page
+-- Only updates fields that are provided (non-null)
+UPDATE sadie_gtm.hotels
+SET 
+    address = COALESCE(:address, address),
+    city = COALESCE(:city, city),
+    state = COALESCE(:state, state),
+    country = COALESCE(:country, country),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: update_hotel_name_and_location!
+-- Update both name and location in one call
+-- Only updates fields that are provided (non-null)
+UPDATE sadie_gtm.hotels
+SET 
+    name = CASE WHEN :name IS NOT NULL AND :name != '' THEN :name ELSE name END,
+    address = COALESCE(:address, address),
+    city = COALESCE(:city, city),
+    state = COALESCE(:state, state),
+    country = COALESCE(:country, country),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;

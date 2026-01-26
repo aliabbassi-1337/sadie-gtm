@@ -1,6 +1,6 @@
-"""Enqueue hotels for name enrichment via SQS.
+"""Enqueue hotels for enrichment via SQS.
 
-Finds hotels with booking URLs but missing names, queues them for workers
+Finds hotels needing name and/or address enrichment, queues them for workers
 to scrape from booking pages.
 
 Usage:
@@ -14,23 +14,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncio
-import json
 import os
 from typing import Optional
 from loguru import logger
 
-from db.client import init_db, close_db, get_conn, queries
+from db.client import init_db, close_db
+from services.enrichment.service import Service as EnrichmentService
 from infra.sqs import send_messages_batch, get_queue_attributes
 
-# Queue URL from environment
 QUEUE_URL = os.getenv("SQS_NAME_ENRICHMENT_QUEUE_URL", "")
-
-
-async def get_hotels_needing_names(limit: int = 1000):
-    """Get hotels with booking URLs but no names."""
-    async with get_conn() as conn:
-        results = await queries.get_hotels_needing_names(conn, limit=limit)
-        return [dict(row) for row in results]
 
 
 async def run(
@@ -38,30 +30,39 @@ async def run(
     engine: Optional[str] = None,
     dry_run: bool = False,
 ):
-    """Enqueue hotels for name enrichment."""
+    """Enqueue hotels for enrichment."""
     if not QUEUE_URL:
         logger.error("SQS_NAME_ENRICHMENT_QUEUE_URL not set")
         return 0
     
     await init_db()
     try:
-        # Get hotels needing names
-        hotels = await get_hotels_needing_names(limit)
+        service = EnrichmentService()
         
-        # Filter by engine if specified
-        if engine:
-            hotels = [h for h in hotels if h["engine_name"].lower() == engine.lower()]
+        # Get hotels needing any enrichment
+        hotels = await service.get_hotels_needing_booking_page_enrichment(
+            limit=limit,
+            engine=engine,
+        )
         
         if not hotels:
-            logger.info("No hotels found needing name enrichment")
+            logger.info("No hotels found needing enrichment")
             return 0
         
-        logger.info(f"Found {len(hotels)} hotels needing names")
+        # Count what needs enrichment
+        needs_name = sum(1 for h in hotels if h.needs_name)
+        needs_address = sum(1 for h in hotels if h.needs_address)
+        needs_both = sum(1 for h in hotels if h.needs_name and h.needs_address)
+        
+        logger.info(f"Found {len(hotels)} hotels needing enrichment")
+        logger.info(f"  Needs name: {needs_name}")
+        logger.info(f"  Needs address: {needs_address}")
+        logger.info(f"  Needs both: {needs_both}")
         
         # Group by engine for logging
         by_engine = {}
         for h in hotels:
-            eng = h["engine_name"]
+            eng = h.engine_name or "unknown"
             by_engine[eng] = by_engine.get(eng, 0) + 1
         for eng, count in sorted(by_engine.items()):
             logger.info(f"  {eng}: {count}")
@@ -70,21 +71,21 @@ async def run(
             logger.info("Dry run - not sending to SQS")
             return len(hotels)
         
-        # Create messages (1 hotel per message for simple processing)
-        messages = []
-        for h in hotels:
-            messages.append({
-                "hotel_id": h["id"],
-                "booking_url": h["booking_url"],
-                "slug": h["slug"],
-                "engine": h["engine_name"],
-            })
+        # Create messages
+        messages = [
+            {
+                "hotel_id": h.id,
+                "booking_url": h.booking_url,
+                "slug": h.slug,
+                "engine": h.engine_name,
+            }
+            for h in hotels
+        ]
         
-        # Send to SQS in batches
+        # Send to SQS
         sent = send_messages_batch(QUEUE_URL, messages)
         logger.info(f"Sent {sent} messages to SQS")
         
-        # Show queue stats
         attrs = get_queue_attributes(QUEUE_URL)
         logger.info(f"Queue stats: {attrs.get('ApproximateNumberOfMessages', 0)} messages pending")
         
@@ -98,40 +99,27 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Enqueue hotels for name enrichment via SQS",
+        description="Enqueue hotels for enrichment via SQS",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Enqueue up to 1000 hotels
     uv run python -m workflows.enrich_names_enqueue --limit 1000
-
-    # Enqueue only Cloudbeds hotels
-    uv run python -m workflows.enrich_names_enqueue --limit 5000 --engine cloudbeds
-
-    # Dry run (don't send to SQS)
+    uv run python -m workflows.enrich_names_enqueue --engine cloudbeds --limit 5000
     uv run python -m workflows.enrich_names_enqueue --limit 1000 --dry-run
+
+The consumer automatically detects what each hotel needs:
+- Missing name (null/empty/Unknown) -> extracts from booking page
+- Missing address (null city/state) -> extracts from booking page
+- Already has data -> preserves existing values
 
 Environment:
     SQS_NAME_ENRICHMENT_QUEUE_URL - Required. The SQS queue URL.
         """
     )
     
-    parser.add_argument(
-        "--limit", "-l",
-        type=int,
-        default=1000,
-        help="Max hotels to enqueue (default: 1000)"
-    )
-    parser.add_argument(
-        "--engine", "-e",
-        type=str,
-        help="Filter by booking engine (e.g., cloudbeds, mews)"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Don't send to SQS, just show what would be sent"
-    )
+    parser.add_argument("--limit", "-l", type=int, default=1000)
+    parser.add_argument("--engine", "-e", type=str, help="Filter by booking engine")
+    parser.add_argument("--dry-run", action="store_true")
     
     args = parser.parse_args()
     asyncio.run(run(args.limit, args.engine, args.dry_run))

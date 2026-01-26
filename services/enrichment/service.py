@@ -1,10 +1,14 @@
 from abc import ABC, abstractmethod
 from decimal import Decimal
 import asyncio
+import json
 import os
+import re
+from typing import Optional, Dict, Any, List
 
 import httpx
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from services.enrichment import repo
 from services.enrichment.room_count_enricher import (
@@ -20,6 +24,190 @@ from services.enrichment.website_enricher import WebsiteEnricher
 load_dotenv()
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+
+
+# ============================================================================
+# BOOKING PAGE ENRICHMENT (name + address extraction)
+# ============================================================================
+
+
+class ExtractedBookingData(BaseModel):
+    """Data extracted from a booking page."""
+    name: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+
+
+class BookingPageEnrichmentResult(BaseModel):
+    """Result of enriching a hotel from its booking page."""
+    success: bool
+    name_updated: bool = False
+    address_updated: bool = False
+    skipped: bool = False
+
+
+class HotelEnrichmentCandidate(BaseModel):
+    """Hotel needing enrichment from booking page."""
+    id: int
+    name: Optional[str] = None
+    booking_url: str
+    slug: Optional[str] = None
+    engine_name: Optional[str] = None
+    needs_name: bool = False
+    needs_address: bool = False
+
+
+class BookingPageEnricher:
+    """Extracts hotel name and address from booking engine pages."""
+    
+    @staticmethod
+    def extract_json_ld(html: str) -> Optional[Dict[str, Any]]:
+        """Extract JSON-LD structured data from HTML."""
+        try:
+            pattern = r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
+            matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+            
+            for match in matches:
+                try:
+                    data = json.loads(match.strip())
+                    if isinstance(data, list):
+                        for item in data:
+                            if item.get("@type") in ["Hotel", "LodgingBusiness", "LocalBusiness", "Organization"]:
+                                return item
+                    elif data.get("@type") in ["Hotel", "LodgingBusiness", "LocalBusiness", "Organization"]:
+                        return data
+                    elif "@graph" in data:
+                        for item in data["@graph"]:
+                            if item.get("@type") in ["Hotel", "LodgingBusiness", "LocalBusiness", "Organization"]:
+                                return item
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def parse_address_from_json_ld(json_ld: Dict[str, Any]) -> ExtractedBookingData:
+        """Parse address from JSON-LD structured data."""
+        name = None
+        address = None
+        city = None
+        state = None
+        country = None
+        
+        if "name" in json_ld:
+            name = json_ld["name"].strip()
+        
+        addr_data = json_ld.get("address", {})
+        if isinstance(addr_data, str):
+            address = addr_data
+        elif isinstance(addr_data, dict):
+            address = addr_data.get("streetAddress")
+            city = addr_data.get("addressLocality")
+            state = addr_data.get("addressRegion")
+            country = addr_data.get("addressCountry")
+            
+            if isinstance(country, dict):
+                country = country.get("name") or country.get("@id")
+        
+        return ExtractedBookingData(
+            name=name, address=address, city=city, state=state, country=country
+        )
+
+    @staticmethod
+    def extract_from_meta_tags(html: str) -> ExtractedBookingData:
+        """Extract data from meta tags."""
+        name = None
+        city = None
+        state = None
+        country = None
+        
+        # og:title for name
+        match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if not match:
+            match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']', html, re.IGNORECASE)
+        if match:
+            raw = match.group(1).strip()
+            parts = re.split(r'\s*[-|–]\s*', raw)
+            parsed_name = parts[0].strip()
+            if parsed_name.lower() not in ['book now', 'reservation', 'booking', 'home', 'unknown']:
+                name = parsed_name
+        
+        # Fallback to <title>
+        if not name:
+            match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
+            if match:
+                raw = match.group(1).strip()
+                parts = re.split(r'\s*[-|–]\s*', raw)
+                parsed_name = parts[0].strip()
+                if parsed_name.lower() not in ['book now', 'reservation', 'booking', 'home', 'unknown']:
+                    name = parsed_name
+        
+        # og:locality / og:region for city/state
+        city_match = re.search(r'<meta[^>]+property=["\'](?:og:locality|business:contact_data:locality)["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if city_match:
+            city = city_match.group(1).strip()
+        
+        state_match = re.search(r'<meta[^>]+property=["\'](?:og:region|business:contact_data:region)["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if state_match:
+            state = state_match.group(1).strip()
+        
+        country_match = re.search(r'<meta[^>]+property=["\'](?:og:country-name|business:contact_data:country_name)["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if country_match:
+            country = country_match.group(1).strip()
+        
+        return ExtractedBookingData(name=name, city=city, state=state, country=country)
+
+    async def extract_from_url(
+        self,
+        client: httpx.AsyncClient,
+        booking_url: str,
+    ) -> Optional[ExtractedBookingData]:
+        """Scrape hotel name and address from booking page."""
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            
+            resp = await client.get(booking_url, headers=headers, follow_redirects=True, timeout=30.0)
+            
+            if resp.status_code != 200:
+                return None
+            
+            html = resp.text
+            
+            # Try JSON-LD first (most structured)
+            json_ld = self.extract_json_ld(html)
+            if json_ld:
+                data = self.parse_address_from_json_ld(json_ld)
+                if data.name or data.city:
+                    return data
+            
+            # Fall back to meta tags
+            data = self.extract_from_meta_tags(html)
+            if data.name or data.city:
+                return data
+            
+            return None
+            
+        except Exception:
+            return None
+
+    @staticmethod
+    def needs_name_enrichment(hotel) -> bool:
+        """Check if hotel needs name enrichment."""
+        name = hotel.name if hasattr(hotel, 'name') else hotel.get("name", "")
+        return not name or (isinstance(name, str) and name.startswith("Unknown"))
+
+    @staticmethod
+    def needs_address_enrichment(hotel) -> bool:
+        """Check if hotel needs address enrichment."""
+        city = hotel.city if hasattr(hotel, 'city') else hotel.get("city", "")
+        state = hotel.state if hasattr(hotel, 'state') else hotel.get("state", "")
+        return not city or not state
 
 
 class IService(ABC):
@@ -581,3 +769,147 @@ class Service(IService):
             sources: Optional list of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
         """
         return await repo.get_pending_coordinate_enrichment_count(sources=sources)
+
+    # ========================================================================
+    # BOOKING PAGE ENRICHMENT (name + address from booking URLs)
+    # ========================================================================
+
+    async def get_hotels_needing_booking_page_enrichment(
+        self,
+        limit: int = 1000,
+        engine: Optional[str] = None,
+    ) -> List[HotelEnrichmentCandidate]:
+        """Get hotels needing name or address enrichment from booking pages.
+        
+        Args:
+            limit: Max hotels to return
+            engine: Optional filter by booking engine name
+            
+        Returns list of HotelEnrichmentCandidate models.
+        """
+        hotels = await repo.get_hotels_needing_booking_page_enrichment(limit=limit)
+        
+        if engine:
+            hotels = [h for h in hotels if (h.engine_name or "").lower() == engine.lower()]
+        
+        return hotels
+
+    async def enrich_hotel_from_booking_page(
+        self,
+        client: httpx.AsyncClient,
+        hotel_id: int,
+        booking_url: str,
+        delay: float = 0.5,
+    ) -> BookingPageEnrichmentResult:
+        """Enrich a single hotel from its booking page.
+        
+        Auto-detects what needs enrichment (name, address, or both).
+        Only updates missing fields, preserves existing data.
+        
+        Args:
+            client: httpx AsyncClient for making requests
+            hotel_id: Hotel ID to enrich
+            booking_url: Booking page URL to scrape
+            delay: Delay before request (rate limiting)
+            
+        Returns BookingPageEnrichmentResult.
+        """
+        # Get current hotel state
+        hotel = await repo.get_hotel_by_id(hotel_id)
+        if not hotel:
+            return BookingPageEnrichmentResult(success=False, skipped=True)
+        
+        enricher = BookingPageEnricher()
+        needs_name = enricher.needs_name_enrichment(hotel)
+        needs_address = enricher.needs_address_enrichment(hotel)
+        
+        if not needs_name and not needs_address:
+            return BookingPageEnrichmentResult(success=True, skipped=True)
+        
+        # Rate limiting
+        await asyncio.sleep(delay)
+        
+        # Extract data from booking page
+        data = await enricher.extract_from_url(client, booking_url)
+        
+        if not data:
+            return BookingPageEnrichmentResult(success=True)
+        
+        # Update database
+        name_to_update = data.name if needs_name and data.name else None
+        has_location = data.city or data.state
+        
+        try:
+            if needs_address and has_location:
+                await repo.update_hotel_name_and_location(
+                    hotel_id=hotel_id,
+                    name=name_to_update,
+                    address=data.address,
+                    city=data.city,
+                    state=data.state,
+                    country=data.country,
+                )
+                return BookingPageEnrichmentResult(
+                    success=True, 
+                    name_updated=bool(name_to_update), 
+                    address_updated=True
+                )
+            elif needs_name and data.name:
+                await repo.update_hotel_name(hotel_id=hotel_id, name=data.name)
+                return BookingPageEnrichmentResult(success=True, name_updated=True)
+            else:
+                return BookingPageEnrichmentResult(success=True)
+        except Exception as e:
+            log(f"Failed to update hotel {hotel_id}: {e}")
+            return BookingPageEnrichmentResult(success=False)
+
+    async def enrich_from_booking_pages_batch(
+        self,
+        hotels: List[HotelEnrichmentCandidate],
+        delay: float = 0.5,
+        concurrency: int = 10,
+    ) -> dict:
+        """Enrich multiple hotels from their booking pages.
+        
+        Args:
+            hotels: List of HotelEnrichmentCandidate models
+            delay: Delay between requests (rate limiting)
+            concurrency: Max concurrent requests
+            
+        Returns stats dict.
+        """
+        if not hotels:
+            return {"total": 0, "names_updated": 0, "addresses_updated": 0, "skipped": 0, "errors": 0}
+        
+        semaphore = asyncio.Semaphore(concurrency)
+        stats = {"total": len(hotels), "names_updated": 0, "addresses_updated": 0, "skipped": 0, "errors": 0}
+        completed = 0
+        
+        async def process(client: httpx.AsyncClient, hotel: HotelEnrichmentCandidate):
+            nonlocal completed
+            async with semaphore:
+                result = await self.enrich_hotel_from_booking_page(
+                    client=client,
+                    hotel_id=hotel.id,
+                    booking_url=hotel.booking_url,
+                    delay=delay,
+                )
+                
+                if result.skipped:
+                    stats["skipped"] += 1
+                elif result.success:
+                    if result.name_updated:
+                        stats["names_updated"] += 1
+                    if result.address_updated:
+                        stats["addresses_updated"] += 1
+                else:
+                    stats["errors"] += 1
+                
+                completed += 1
+                if completed % 100 == 0:
+                    log(f"  Progress: {completed}/{len(hotels)} ({stats['names_updated']} names, {stats['addresses_updated']} addresses)")
+        
+        async with httpx.AsyncClient() as client:
+            await asyncio.gather(*[process(client, h) for h in hotels])
+        
+        return stats

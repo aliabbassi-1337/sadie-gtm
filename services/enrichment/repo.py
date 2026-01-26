@@ -437,3 +437,59 @@ async def update_hotel_from_places(
             rating=rating,
             address=address,
         )
+
+
+# ============================================================================
+# BOOKING PAGE ENRICHMENT FUNCTIONS (name + address from booking URLs)
+# ============================================================================
+
+
+async def get_hotels_needing_booking_page_enrichment(limit: int = 1000) -> List["HotelEnrichmentCandidate"]:
+    """Get hotels with booking URLs needing name or address enrichment.
+    
+    Criteria:
+    - has booking URL
+    - missing name (null/empty/Unknown) OR missing city/state
+    """
+    # Import here to avoid circular import
+    from services.enrichment.service import HotelEnrichmentCandidate
+    
+    async with get_conn() as conn:
+        results = await queries.get_hotels_needing_enrichment(
+            conn, enrich_type="both", limit=limit
+        )
+        return [HotelEnrichmentCandidate.model_validate(dict(row)) for row in results]
+
+
+async def get_hotel_by_id(hotel_id: int) -> Optional[Hotel]:
+    """Get hotel by ID for checking current enrichment state."""
+    async with get_conn() as conn:
+        result = await queries.get_hotel_by_id(conn, hotel_id=hotel_id)
+        return Hotel.model_validate(dict(result)) if result else None
+
+
+async def update_hotel_name(hotel_id: int, name: str) -> None:
+    """Update hotel name."""
+    async with get_conn() as conn:
+        await queries.update_hotel_name(conn, hotel_id=hotel_id, name=name)
+
+
+async def update_hotel_name_and_location(
+    hotel_id: int,
+    name: Optional[str] = None,
+    address: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> None:
+    """Update hotel name and/or location. Uses COALESCE to preserve existing values."""
+    async with get_conn() as conn:
+        await queries.update_hotel_name_and_location(
+            conn,
+            hotel_id=hotel_id,
+            name=name,
+            address=address,
+            city=city,
+            state=state,
+            country=country,
+        )
