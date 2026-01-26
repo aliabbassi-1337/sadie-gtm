@@ -166,8 +166,14 @@ class IService(ABC):
     ) -> int:
         """
         Enqueue hotels for detection via SQS.
-        Queries hotels with status=0 and no hotel_booking_engines record.
-        Detection tracked by hotel_booking_engines presence, not status.
+        
+        Queries hotels with:
+        - status < DETECTED (30): INGESTED, HAS_WEBSITE, or HAS_LOCATION
+        - no hotel_booking_engines record yet
+        
+        Hotels from reverse lookup (Guestbook, Common Crawl) are excluded
+        because they already have hotel_booking_engines records.
+        
         Optionally filter by categories (e.g., ['hotel', 'motel']).
         Returns count of hotels enqueued.
         """
@@ -700,9 +706,9 @@ class Service(IService):
     ) -> int:
         """Enqueue hotels for detection via SQS.
 
-        Queries hotels with status=0 and no hotel_booking_engines record.
-        Sends to SQS in batches. Does NOT update status - detection is tracked
-        by presence of hotel_booking_engines record.
+        Queries hotels with status < DETECTED (30) and no hotel_booking_engines record.
+        Hotels from reverse lookup (Guestbook, Common Crawl) are excluded.
+        Sends to SQS in batches. Detection is tracked by hotel_booking_engines record.
         Optionally filter by categories (e.g., ['hotel', 'motel']).
 
         Returns count of hotels enqueued.

@@ -74,9 +74,9 @@ async def get_hotels_pending_detection(
     """Get hotels that need booking engine detection.
 
     Criteria:
-    - status = 0 (scraped)
+    - status < DETECTED (30): INGESTED, HAS_WEBSITE, or HAS_LOCATION
     - website is not null
-    - not a big chain (Marriott, Hilton, IHG, Hyatt, Wyndham, etc.)
+    - no hotel_booking_engines record yet (excludes reverse lookup leads)
     - optionally filtered by categories (e.g., ['hotel', 'motel'])
     """
     async with get_conn() as conn:
