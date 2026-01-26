@@ -2071,10 +2071,58 @@ class Service(IService):
             logger.info("All slugs already processed!")
             return stats
         
-        # Process incrementally in batches - fetch, extract, save immediately
-        from .booking_engines import CommonCrawlEnumerator, CrawlIngester
+        # URL patterns for booking pages
+        url_patterns = {
+            "cloudbeds": "https://hotels.cloudbeds.com/reservation/{slug}",
+            "mews": "https://app.mews.com/distributor/{slug}",
+            "rms": "https://bookings.rmscloud.com/{slug}",
+            "siteminder": "https://{slug}.book-onlinenow.net/",
+        }
         
         batch_size = 50  # Save to DB every 50 hotels for faster feedback
+        
+        # If scrape_names=False, just insert all slugs with placeholder names
+        # Skip Common Crawl/Wayback entirely - SQS enrichment will get real names
+        if not scrape_names:
+            logger.info(f"Inserting {len(slugs_to_process)} slugs with placeholder names (no scraping)...")
+            url_pattern = url_patterns.get(booking_engine.lower(), "")
+            
+            for batch_start in range(0, len(slugs_to_process), batch_size):
+                batch_slugs = slugs_to_process[batch_start:batch_start + batch_size]
+                
+                hotels = []
+                for slug in batch_slugs:
+                    booking_url = url_pattern.replace("{slug}", slug) if url_pattern else None
+                    hotels.append({
+                        "name": None,  # Will use placeholder in _save_hotels_batch
+                        "slug": slug,
+                        "booking_url": booking_url,
+                    })
+                
+                batch_stats = await self._save_hotels_batch(
+                    hotels, engine_id, booking_engine, source_tag,
+                    fuzzy_match, fuzzy_threshold
+                )
+                
+                for key in batch_stats:
+                    stats[key] = stats.get(key, 0) + batch_stats[key]
+                
+                if checkpoint_file:
+                    with open(checkpoint_file, 'a') as f:
+                        for slug in batch_slugs:
+                            f.write(f"{slug}\n")
+                
+                pct = ((batch_start + len(batch_slugs)) / len(slugs_to_process)) * 100
+                total_saved = stats.get('inserted', 0) + stats.get('updated', 0)
+                logger.info(f"  [{pct:.1f}%] {batch_start + len(batch_slugs)}/{len(slugs_to_process)}: "
+                           f"+{batch_stats['inserted']} new, +{batch_stats['updated']} updated "
+                           f"(total: {total_saved})")
+            
+            logger.info(f"Ingest complete: {stats}")
+            return stats
+        
+        # Process incrementally in batches - fetch, extract, save immediately
+        from .booking_engines import CommonCrawlEnumerator, CrawlIngester
         
         if booking_engine.lower() == "cloudbeds" and use_common_crawl:
             logger.info("Using Common Crawl S3 archives (incremental save)...")
