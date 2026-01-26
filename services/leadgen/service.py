@@ -334,6 +334,32 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def ingest_crawled_urls(
+        self,
+        file_path: str,
+        booking_engine: str,
+        source_tag: str = "commoncrawl",
+        scrape_names: bool = False,
+        concurrency: int = 10,
+    ) -> Dict:
+        """
+        Ingest crawled booking engine URLs/slugs from a file.
+        
+        Reads a text file with one slug/URL per line and ingests into database.
+        Optionally scrapes hotel names from booking pages.
+        
+        Args:
+            file_path: Path to text file with slugs/URLs
+            booking_engine: Engine name (cloudbeds, mews, rms, siteminder)
+            source_tag: Source identifier for tracking
+            scrape_names: If True, scrape hotel names from booking pages
+            concurrency: Number of concurrent scrape requests
+            
+        Returns dict with counts: total, inserted, engines_linked, errors
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self, detection_config: DetectionConfig = None, api_key: Optional[str] = None) -> None:
@@ -1937,6 +1963,119 @@ class Service(IService):
             except Exception as e:
                 logger.error(f"Error ingesting {hotel.get('name', 'unknown')}: {e}")
                 stats["errors"] += 1
+        
+        logger.info(f"Ingest complete: {stats}")
+        return stats
+
+    async def ingest_crawled_urls(
+        self,
+        file_path: str,
+        booking_engine: str,
+        source_tag: str = "commoncrawl",
+        scrape_names: bool = False,
+        concurrency: int = 10,
+    ) -> Dict:
+        """
+        Ingest crawled booking engine URLs/slugs from a file.
+        
+        Reads a text file with one slug/URL per line and ingests into database.
+        Optionally scrapes hotel names from booking pages.
+        """
+        from pathlib import Path
+        from .constants import BOOKING_ENGINE_URL_PATTERNS, BOOKING_ENGINE_TIERS
+        
+        stats = {
+            "total": 0,
+            "inserted": 0,
+            "engines_linked": 0,
+            "skipped_duplicate": 0,
+            "errors": 0,
+        }
+        
+        # Read slugs/URLs from file
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        lines = file_path.read_text().strip().split("\n")
+        slugs = [line.strip() for line in lines if line.strip()]
+        stats["total"] = len(slugs)
+        
+        logger.info(f"Loaded {len(slugs)} slugs from {file_path.name}")
+        
+        # Get or create booking engine
+        engine_name = booking_engine.title()  # Cloudbeds, Mews, Rms, Siteminder
+        if booking_engine.lower() == "rms":
+            engine_name = "RMS Cloud"
+        elif booking_engine.lower() == "siteminder":
+            engine_name = "SiteMinder"
+        
+        engine = await repo.get_booking_engine_by_name(engine_name)
+        engine_id = engine.id if engine else None
+        
+        if not engine_id:
+            tier = BOOKING_ENGINE_TIERS.get(booking_engine.lower(), 2)
+            engine_id = await repo.insert_booking_engine(name=engine_name, tier=tier)
+            logger.info(f"Created {engine_name} booking engine with id {engine_id}")
+        
+        # Get URL pattern
+        url_pattern = BOOKING_ENGINE_URL_PATTERNS.get(booking_engine.lower())
+        
+        # Process slugs
+        for i, slug in enumerate(slugs):
+            if (i + 1) % 500 == 0:
+                logger.info(f"  Processed {i + 1}/{len(slugs)}...")
+            
+            try:
+                # Build booking URL
+                if url_pattern:
+                    booking_url = url_pattern.replace("{slug}", slug)
+                else:
+                    # RMS: slug is already a full URL path
+                    booking_url = f"https://{slug}" if not slug.startswith("http") else slug
+                
+                # Create external ID for deduplication
+                external_id = f"{booking_engine.lower()}_{slug}"
+                external_id_type = f"{booking_engine.lower()}_crawl"
+                
+                # For now, use slug as placeholder name (can scrape later)
+                # Clean up the slug to make a readable name
+                if scrape_names:
+                    # TODO: Implement async scraping with httpx
+                    name = slug  # Placeholder
+                else:
+                    name = slug
+                
+                # Insert hotel
+                hotel_id = await repo.insert_hotel(
+                    name=name,
+                    source=source_tag,
+                    status=0,
+                    external_id=external_id,
+                    external_id_type=external_id_type,
+                )
+                
+                if hotel_id:
+                    stats["inserted"] += 1
+                    
+                    # Link to booking engine
+                    await repo.insert_hotel_booking_engine(
+                        hotel_id=hotel_id,
+                        booking_engine_id=engine_id,
+                        booking_url=booking_url,
+                        detection_method="crawl_import",
+                        status=1,
+                    )
+                    stats["engines_linked"] += 1
+                else:
+                    stats["skipped_duplicate"] += 1
+                    
+            except Exception as e:
+                if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+                    stats["skipped_duplicate"] += 1
+                else:
+                    logger.error(f"Error ingesting {slug}: {e}")
+                    stats["errors"] += 1
         
         logger.info(f"Ingest complete: {stats}")
         return stats
