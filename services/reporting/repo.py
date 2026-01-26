@@ -24,6 +24,18 @@ async def get_leads_for_state(state: str, source_pattern: str = None) -> List[Ho
         return [HotelLead.model_validate(dict(row)) for row in results]
 
 
+async def get_leads_by_booking_engine(booking_engine: str, source_pattern: str) -> List[HotelLead]:
+    """Get hotel leads by booking engine and source pattern.
+    
+    For crawl data exports - doesn't require launched status.
+    """
+    async with get_conn() as conn:
+        results = await queries.get_leads_by_booking_engine(
+            conn, booking_engine=booking_engine, source_pattern=source_pattern
+        )
+        return [HotelLead.model_validate(dict(row)) for row in results]
+
+
 async def get_city_stats(city: str, state: str) -> CityStats:
     """Get analytics stats for a city."""
     async with get_conn() as conn:

@@ -298,6 +298,40 @@ WHERE h.state = :state
   AND h.status = 1
   AND h.source LIKE :source_pattern;
 
+-- name: get_leads_by_booking_engine
+-- Get hotel leads by booking engine name and source pattern
+-- For crawl data exports (doesn't require launched status)
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.category,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hbe.booking_url,
+    hbe.engine_property_id,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE be.name = :booking_engine
+  AND h.source LIKE :source_pattern
+ORDER BY h.city, h.name;
+
 -- name: get_city_stats^
 -- Get stats for a city (for analytics tab)
 SELECT
