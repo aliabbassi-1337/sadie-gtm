@@ -2155,15 +2155,15 @@ class Service(IService):
                         if source_tag not in current_source:
                             new_source = f"{current_source}::{source_tag}" if current_source else source_tag
                             await conn.execute(
-                                "UPDATE sadie_gtm.hotels SET source = $1, website = COALESCE(website, $2), updated_at = NOW() WHERE id = $3",
-                                new_source, booking_url, hotel_id
+                                "UPDATE sadie_gtm.hotels SET source = $1, updated_at = NOW() WHERE id = $2",
+                                new_source, hotel_id
                             )
                         stats["updated"] += 1
                     else:
-                        # Insert new hotel with booking URL as website
+                        # Insert new hotel - website stays NULL (booking URL is NOT the hotel website)
+                        # The actual website will be filled in during detection/enrichment
                         hotel_id = await repo.insert_hotel(
                             name=name,
-                            website=booking_url,
                             city=city,
                             country=country,
                             source=source_tag,
