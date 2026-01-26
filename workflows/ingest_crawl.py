@@ -103,6 +103,17 @@ async def main():
         type=int,
         help="Limit number of slugs to process (for testing)"
     )
+    parser.add_argument(
+        "--no-scrape",
+        action="store_true",
+        help="Skip scraping hotel names (import slugs only - NOT recommended)"
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=20,
+        help="Number of concurrent HTTP requests for scraping (default: 20)"
+    )
     
     args = parser.parse_args()
     
@@ -165,7 +176,9 @@ async def main():
         "files": 0,
         "total": 0,
         "inserted": 0,
+        "updated": 0,
         "engines_linked": 0,
+        "skipped_no_name": 0,
         "skipped_duplicate": 0,
         "errors": 0,
     }
@@ -190,15 +203,19 @@ async def main():
                 file_path=file_to_process,
                 booking_engine=engine,
                 source_tag=args.source,
+                scrape_names=not args.no_scrape,
+                concurrency=args.concurrency,
             )
             
             total_stats["files"] += 1
-            for key in ["total", "inserted", "engines_linked", "skipped_duplicate", "errors"]:
+            for key in ["total", "inserted", "updated", "engines_linked", "skipped_no_name", "skipped_duplicate", "errors"]:
                 total_stats[key] += stats.get(key, 0)
             
-            logger.info(f"  Inserted: {stats['inserted']}")
-            logger.info(f"  Linked: {stats['engines_linked']}")
-            logger.info(f"  Duplicates: {stats['skipped_duplicate']}")
+            logger.info(f"  New hotels: {stats['inserted']}")
+            logger.info(f"  Updated (source appended): {stats['updated']}")
+            logger.info(f"  Engines linked: {stats['engines_linked']}")
+            logger.info(f"  Skipped (no name found): {stats['skipped_no_name']}")
+            logger.info(f"  Skipped (duplicate): {stats['skipped_duplicate']}")
             logger.info(f"  Errors: {stats['errors']}")
             
         except Exception as e:
@@ -216,9 +233,11 @@ async def main():
     logger.info("=" * 50)
     logger.info(f"Files processed: {total_stats['files']}")
     logger.info(f"Total slugs: {total_stats['total']}")
-    logger.info(f"Inserted: {total_stats['inserted']}")
-    logger.info(f"Engines linked: {total_stats['engines_linked']}")
-    logger.info(f"Duplicates skipped: {total_stats['skipped_duplicate']}")
+    logger.info(f"New hotels inserted: {total_stats['inserted']}")
+    logger.info(f"Existing hotels updated: {total_stats['updated']}")
+    logger.info(f"Booking engines linked: {total_stats['engines_linked']}")
+    logger.info(f"Skipped (no name): {total_stats['skipped_no_name']}")
+    logger.info(f"Skipped (duplicate): {total_stats['skipped_duplicate']}")
     logger.info(f"Errors: {total_stats['errors']}")
 
 
