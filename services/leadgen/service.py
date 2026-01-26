@@ -269,23 +269,27 @@ class IService(ABC):
         self,
         max_indices: Optional[int] = None,
         year: Optional[int] = None,
-        concurrency: int = 5,
+        concurrency: int = 10,
         fetch_details: bool = True,
+        use_archives: bool = True,
     ) -> List[Dict]:
         """
         Enumerate Cloudbeds hotels from Common Crawl CDX API.
         
         Common Crawl indexes billions of web pages. We query their CDX API
-        to find all indexed Cloudbeds reservation URLs, then optionally
-        fetch hotel details from each booking page.
+        to find all indexed Cloudbeds reservation URLs, then fetch hotel
+        details from archived HTML (fast, no rate limits) or by scraping
+        Cloudbeds directly (slow, rate limited).
         
         Args:
             max_indices: Limit number of CC indices to query (default: all ~350)
             year: Only query indices from specific year
             concurrency: Concurrent requests
-            fetch_details: If True, fetch hotel name/details from booking pages
+            fetch_details: If True, fetch hotel name/details
+            use_archives: If True (default), fetch from CC archives (fast).
+                         If False, scrape Cloudbeds (slow, rate limited).
             
-        Returns list of hotel dicts with slug, name, booking_url.
+        Returns list of hotel dicts with slug, name, city, booking_url.
         """
         pass
 
@@ -1720,14 +1724,36 @@ class Service(IService):
         self,
         max_indices: Optional[int] = None,
         year: Optional[int] = None,
-        concurrency: int = 5,
+        concurrency: int = 10,
         fetch_details: bool = True,
+        use_archives: bool = True,
     ) -> List[Dict]:
         """
         Enumerate Cloudbeds hotels from Common Crawl CDX API.
+        
+        Args:
+            use_archives: If True (default), fetch hotel details from CC's archived
+                         HTML on S3 - NO rate limits, faster. If False, scrape
+                         Cloudbeds directly (slower, rate limited).
         """
-        # Step 1: Get slugs from Common Crawl
         async with CommonCrawlEnumerator() as enumerator:
+            if fetch_details and use_archives:
+                # Option B: Fetch from Common Crawl archives (recommended)
+                # No rate limits, can parallelize freely
+                hotels = await enumerator.enumerate_with_details(
+                    max_indices=max_indices,
+                    year=year,
+                    concurrency=concurrency,
+                )
+                
+                # Add external_id for DB dedup
+                for h in hotels:
+                    h["external_id"] = f"cloudbeds_{h['slug']}"
+                    h["external_id_type"] = "commoncrawl"
+                
+                return hotels
+            
+            # Get slugs only
             slugs = await enumerator.enumerate_all(
                 max_indices=max_indices,
                 year=year,
@@ -1746,8 +1772,9 @@ class Service(IService):
                 for slug in slugs
             ]
         
-        # Step 2: Fetch hotel details from each booking page
-        logger.info(f"Fetching hotel details for {len(slugs)} slugs...")
+        # Option A: Fetch hotel details by scraping Cloudbeds directly
+        # (slower, rate limited - only use if archives don't work)
+        logger.info(f"Fetching hotel details from Cloudbeds for {len(slugs)} slugs...")
         
         async with CloudbedsPropertyExtractor() as extractor:
             properties = await extractor.batch_fetch(slugs, concurrency=concurrency)

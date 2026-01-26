@@ -82,7 +82,13 @@ Examples:
     parser.add_argument(
         "--slugs-only",
         action="store_true",
-        help="Only get slugs, don't fetch hotel details from Cloudbeds",
+        help="Only get slugs, don't fetch hotel details",
+    )
+    parser.add_argument(
+        "--scrape-cloudbeds",
+        action="store_true",
+        help="Fetch details by scraping Cloudbeds (slower, rate limited). "
+             "Default is to use Common Crawl archives (faster, no limits).",
     )
     parser.add_argument(
         "--output",
@@ -109,6 +115,11 @@ Examples:
     if args.year:
         logger.info(f"Year filter: {args.year}")
     logger.info(f"Fetch details: {not args.slugs_only}")
+    if not args.slugs_only:
+        if args.scrape_cloudbeds:
+            logger.info("Source: Cloudbeds (scraping - slower, rate limited)")
+        else:
+            logger.info("Source: Common Crawl archives (fast, no limits)")
 
     # Use service for enumeration
     service = Service()
@@ -117,6 +128,7 @@ Examples:
         year=args.year,
         concurrency=args.concurrency,
         fetch_details=not args.slugs_only,
+        use_archives=not args.scrape_cloudbeds,
     )
 
     logger.info("")
