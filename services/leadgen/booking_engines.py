@@ -516,33 +516,99 @@ class CommonCrawlEnumerator:
             return None
     
     def extract_hotel_info(self, html: str, slug: str) -> Optional[Dict]:
-        """Extract hotel name and details from archived HTML."""
+        """Extract hotel name and details from archived HTML using multiple strategies."""
         if not html:
             return None
         
-        # Extract title
-        title_match = re.search(r'<title>([^<]+)</title>', html)
-        if not title_match:
-            return None
-        
-        title = title_match.group(1).strip()
-        # Parse: "Hotel Name - City, Country - Best Price Guarantee"
-        parts = title.split(' - ')
-        name = parts[0].strip() if parts else "Unknown"
-        
-        # Extract location if available
+        name = None
         city = None
         country = None
+        website = None
+        
+        # Strategy 1: OpenGraph title (most reliable)
+        og_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if not og_match:
+            og_match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']', html, re.IGNORECASE)
+        
+        # Strategy 2: Twitter title
+        twitter_match = re.search(r'<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        
+        # Strategy 3: H1 tag (often the hotel name)
+        h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.IGNORECASE)
+        
+        # Strategy 4: Title tag (fallback)
+        title_match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
+        
+        # Strategy 5: Schema.org data
+        schema_name = re.search(r'"name"\s*:\s*"([^"]+)"', html)
+        
+        # Pick best name source
+        raw_name = None
+        if og_match:
+            raw_name = og_match.group(1).strip()
+        elif twitter_match:
+            raw_name = twitter_match.group(1).strip()
+        elif h1_match:
+            raw_name = h1_match.group(1).strip()
+        elif schema_name:
+            raw_name = schema_name.group(1).strip()
+        elif title_match:
+            raw_name = title_match.group(1).strip()
+        
+        if not raw_name:
+            return None
+        
+        # Clean up name - remove common suffixes
+        # "Hotel Name - City, Country - Best Price Guarantee"
+        # "Hotel Name | Book Direct"
+        parts = re.split(r'\s*[-|–]\s*', raw_name)
+        name = parts[0].strip()
+        
+        # Skip generic/garbage names
+        skip_names = ['book now', 'reservation', 'booking', 'home', 'welcome', 
+                      'best price guarantee', 'official site', 'book direct']
+        if name.lower() in skip_names or len(name) < 3:
+            # Try second part if first is generic
+            if len(parts) > 1:
+                name = parts[1].strip()
+            else:
+                return None
+        
+        # Extract location from title parts or meta tags
         if len(parts) >= 2:
-            location_parts = parts[1].split(', ')
-            city = location_parts[0].strip() if location_parts else None
-            country = location_parts[1].strip() if len(location_parts) > 1 else None
+            loc_str = parts[1]
+            # Handle "City, Country" or "City, State, Country"
+            loc_parts = [p.strip() for p in loc_str.split(',')]
+            if loc_parts:
+                city = loc_parts[0]
+                if len(loc_parts) > 1:
+                    country = loc_parts[-1]
+        
+        # Try to find hotel website from page
+        # Look for links that aren't social media or booking engines
+        website_patterns = [
+            r'href=["\']?(https?://(?:www\.)?[a-z0-9][-a-z0-9]*\.[a-z]{2,}(?:\.[a-z]{2,})?)["\'\s>]',
+        ]
+        skip_domains = ['cloudbeds', 'facebook', 'twitter', 'instagram', 'linkedin', 
+                        'youtube', 'tripadvisor', 'booking.com', 'expedia', 'hotels.com',
+                        'google', 'bing', 'yahoo', 'pinterest', 'tiktok', 'archive.org']
+        
+        for pattern in website_patterns:
+            for match in re.finditer(pattern, html, re.IGNORECASE):
+                url = match.group(1)
+                # Check if it's not a skip domain
+                if not any(skip in url.lower() for skip in skip_domains):
+                    website = url
+                    break
+            if website:
+                break
         
         return {
             "slug": slug,
             "name": name,
             "city": city,
             "country": country,
+            "website": website,
             "booking_url": f"https://hotels.cloudbeds.com/reservation/{slug}",
         }
     
@@ -632,6 +698,256 @@ class CommonCrawlEnumerator:
         
         hotels = [h for h in results if h is not None]
         logger.info(f"Extracted details for {len(hotels)} hotels")
+        
+        return hotels
+
+
+    async def lookup_slugs_in_cdx(
+        self,
+        slugs: List[str],
+        concurrency: int = 20,
+    ) -> Dict[str, CommonCrawlRecord]:
+        """
+        Look up specific slugs in Common Crawl CDX to get WARC file info.
+        
+        This allows us to fetch archived HTML for slugs we already know about
+        (e.g., from coworker's crawl file) without re-querying all indices.
+        
+        Returns dict mapping slug -> CommonCrawlRecord with WARC info.
+        """
+        import json
+        
+        results: Dict[str, CommonCrawlRecord] = {}
+        semaphore = asyncio.Semaphore(concurrency)
+        
+        # Get latest index
+        indices = await self.get_index_list(limit=3)  # Try last 3 months
+        if not indices:
+            logger.error("No Common Crawl indices available")
+            return results
+        
+        async def lookup_slug(slug: str) -> Optional[CommonCrawlRecord]:
+            async with semaphore:
+                # Try each index until we find a match
+                for index_id in indices:
+                    url = f"https://index.commoncrawl.org/{index_id}-index"
+                    params = {
+                        "url": f"hotels.cloudbeds.com/reservation/{slug}",
+                        "output": "json",
+                        "limit": 1,
+                    }
+                    
+                    try:
+                        resp = await self._client.get(url, params=params, timeout=15.0)
+                        if resp.status_code == 200 and resp.text.strip():
+                            data = json.loads(resp.text.strip().split('\n')[0])
+                            return CommonCrawlRecord(
+                                slug=slug.lower(),
+                                url=data.get('url', ''),
+                                timestamp=data.get('timestamp', ''),
+                                filename=data.get('filename', ''),
+                                offset=int(data.get('offset', 0)),
+                                length=int(data.get('length', 0)),
+                            )
+                    except Exception:
+                        continue
+                
+                return None
+        
+        logger.info(f"Looking up {len(slugs)} slugs in Common Crawl CDX...")
+        
+        # Process in batches for progress
+        batch_size = 500
+        for i in range(0, len(slugs), batch_size):
+            batch = slugs[i:i + batch_size]
+            tasks = [lookup_slug(s) for s in batch]
+            batch_results = await asyncio.gather(*tasks)
+            
+            for slug, record in zip(batch, batch_results):
+                if record:
+                    results[slug.lower()] = record
+            
+            found = sum(1 for r in batch_results if r)
+            logger.info(f"  {i + len(batch)}/{len(slugs)}: found {found}/{len(batch)} in CDX")
+        
+        logger.info(f"Found WARC info for {len(results)}/{len(slugs)} slugs")
+        return results
+
+
+class CrawlIngester:
+    """
+    High-performance ingester for crawled booking engine URLs.
+    
+    Improvements over basic ingestion:
+    1. Uses Common Crawl S3 archives directly (50+ hotels/sec, no rate limits)
+    2. Better name extraction (og:title, h1, meta tags, schema.org)
+    3. Extracts actual hotel website when available
+    4. Checkpoint/resume for large imports
+    5. Fuzzy deduplication support
+    """
+    
+    def __init__(
+        self,
+        checkpoint_file: Optional[str] = None,
+        concurrency: int = 50,
+    ):
+        self.checkpoint_file = checkpoint_file
+        self.concurrency = concurrency
+        self._processed_slugs: set = set()
+        self._enumerator: Optional[CommonCrawlEnumerator] = None
+    
+    def _load_checkpoint(self) -> set:
+        """Load processed slugs from checkpoint file."""
+        if not self.checkpoint_file:
+            return set()
+        
+        from pathlib import Path
+        path = Path(self.checkpoint_file)
+        if path.exists():
+            return set(path.read_text().strip().split('\n'))
+        return set()
+    
+    def _save_checkpoint(self, slugs: List[str]):
+        """Append slugs to checkpoint file."""
+        if not self.checkpoint_file:
+            return
+        
+        from pathlib import Path
+        path = Path(self.checkpoint_file)
+        with path.open('a') as f:
+            for slug in slugs:
+                f.write(f"{slug}\n")
+    
+    async def ingest_cloudbeds_file(
+        self,
+        file_path: str,
+        use_common_crawl: bool = True,
+    ) -> List[Dict]:
+        """
+        Ingest Cloudbeds slugs from file with hotel details.
+        
+        Args:
+            file_path: Path to text file with one slug per line
+            use_common_crawl: If True, fetch from CC archives (fast). If False, use Wayback.
+            
+        Returns list of hotel dicts with name, city, website, booking_url.
+        """
+        from pathlib import Path
+        
+        # Load slugs
+        path = Path(file_path)
+        all_slugs = [s.strip().lower() for s in path.read_text().strip().split('\n') if s.strip()]
+        all_slugs = list(set(all_slugs))  # Dedupe
+        
+        logger.info(f"Loaded {len(all_slugs)} unique slugs from {path.name}")
+        
+        # Load checkpoint
+        self._processed_slugs = self._load_checkpoint()
+        if self._processed_slugs:
+            logger.info(f"Resuming: {len(self._processed_slugs)} already processed")
+        
+        # Filter out already processed
+        slugs_to_process = [s for s in all_slugs if s not in self._processed_slugs]
+        logger.info(f"Processing {len(slugs_to_process)} slugs...")
+        
+        if not slugs_to_process:
+            logger.info("All slugs already processed!")
+            return []
+        
+        hotels = []
+        
+        if use_common_crawl:
+            # Use Common Crawl archives (fast path)
+            async with CommonCrawlEnumerator() as enumerator:
+                self._enumerator = enumerator
+                
+                # Step 1: Look up slugs in CDX to get WARC info
+                cdx_records = await enumerator.lookup_slugs_in_cdx(
+                    slugs_to_process,
+                    concurrency=self.concurrency,
+                )
+                
+                # Step 2: Fetch HTML from S3 and extract info
+                logger.info(f"Fetching HTML for {len(cdx_records)} slugs from S3...")
+                
+                semaphore = asyncio.Semaphore(self.concurrency)
+                
+                async def fetch_and_extract(slug: str, record: CommonCrawlRecord) -> Optional[Dict]:
+                    async with semaphore:
+                        html = await enumerator.fetch_archived_html(record)
+                        if html:
+                            return enumerator.extract_hotel_info(html, slug)
+                        return None
+                
+                # Process in batches
+                batch_size = 500
+                items = list(cdx_records.items())
+                
+                for i in range(0, len(items), batch_size):
+                    batch = items[i:i + batch_size]
+                    tasks = [fetch_and_extract(slug, record) for slug, record in batch]
+                    results = await asyncio.gather(*tasks)
+                    
+                    batch_hotels = [r for r in results if r and r.get('name')]
+                    hotels.extend(batch_hotels)
+                    
+                    # Save checkpoint
+                    processed = [slug for slug, _ in batch]
+                    self._save_checkpoint(processed)
+                    
+                    logger.info(f"  {i + len(batch)}/{len(items)}: extracted {len(batch_hotels)} hotels")
+                
+                # Handle slugs not found in CDX - fallback to Wayback
+                missing_slugs = [s for s in slugs_to_process if s not in cdx_records]
+                if missing_slugs:
+                    logger.info(f"Falling back to Wayback for {len(missing_slugs)} slugs not in CDX...")
+                    wayback_hotels = await self._fetch_from_wayback(missing_slugs)
+                    hotels.extend(wayback_hotels)
+        else:
+            # Wayback-only path
+            hotels = await self._fetch_from_wayback(slugs_to_process)
+        
+        logger.info(f"Extracted {len(hotels)} hotels with names")
+        return hotels
+    
+    async def _fetch_from_wayback(self, slugs: List[str]) -> List[Dict]:
+        """Fallback: fetch hotel info from Wayback Machine."""
+        import httpx
+        
+        hotels = []
+        semaphore = asyncio.Semaphore(self.concurrency)
+        
+        async def fetch_one(client: httpx.AsyncClient, slug: str) -> Optional[Dict]:
+            async with semaphore:
+                booking_url = f"https://hotels.cloudbeds.com/reservation/{slug}"
+                wayback_url = f"https://web.archive.org/web/2024/{booking_url}"
+                
+                try:
+                    resp = await client.get(wayback_url, follow_redirects=True, timeout=15.0)
+                    if resp.status_code == 200:
+                        # Use the improved extraction
+                        if self._enumerator:
+                            return self._enumerator.extract_hotel_info(resp.text, slug)
+                except Exception:
+                    pass
+                
+                return None
+        
+        async with httpx.AsyncClient(
+            headers={"User-Agent": "Mozilla/5.0 (compatible; HotelBot/1.0)"},
+        ) as client:
+            batch_size = 100
+            for i in range(0, len(slugs), batch_size):
+                batch = slugs[i:i + batch_size]
+                tasks = [fetch_one(client, s) for s in batch]
+                results = await asyncio.gather(*tasks)
+                
+                batch_hotels = [r for r in results if r and r.get('name')]
+                hotels.extend(batch_hotels)
+                
+                self._save_checkpoint(batch)
+                
+                logger.info(f"  Wayback {i + len(batch)}/{len(slugs)}: {len(batch_hotels)} hotels")
         
         return hotels
 

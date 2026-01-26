@@ -111,8 +111,29 @@ async def main():
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=20,
-        help="Number of concurrent HTTP requests for scraping (default: 20)"
+        default=50,
+        help="Number of concurrent requests (default: 50)"
+    )
+    parser.add_argument(
+        "--no-common-crawl",
+        action="store_true",
+        help="Use Wayback instead of Common Crawl (slower but works for all engines)"
+    )
+    parser.add_argument(
+        "--no-fuzzy",
+        action="store_true",
+        help="Disable fuzzy name matching (exact match only)"
+    )
+    parser.add_argument(
+        "--fuzzy-threshold",
+        type=float,
+        default=0.7,
+        help="Fuzzy match similarity threshold 0.0-1.0 (default: 0.7)"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        help="Path to checkpoint file for resume capability"
     )
     
     args = parser.parse_args()
@@ -177,6 +198,8 @@ async def main():
         "total": 0,
         "inserted": 0,
         "updated": 0,
+        "fuzzy_matched": 0,
+        "websites_found": 0,
         "engines_linked": 0,
         "skipped_no_name": 0,
         "skipped_duplicate": 0,
@@ -205,16 +228,22 @@ async def main():
                 source_tag=args.source,
                 scrape_names=not args.no_scrape,
                 concurrency=args.concurrency,
+                use_common_crawl=not args.no_common_crawl,
+                fuzzy_match=not args.no_fuzzy,
+                fuzzy_threshold=args.fuzzy_threshold,
+                checkpoint_file=args.checkpoint,
             )
             
             total_stats["files"] += 1
-            for key in ["total", "inserted", "updated", "engines_linked", "skipped_no_name", "skipped_duplicate", "errors"]:
+            for key in ["total", "inserted", "updated", "fuzzy_matched", "websites_found", "engines_linked", "skipped_no_name", "skipped_duplicate", "errors"]:
                 total_stats[key] += stats.get(key, 0)
             
             logger.info(f"  New hotels: {stats['inserted']}")
             logger.info(f"  Updated (source appended): {stats['updated']}")
+            logger.info(f"  Fuzzy matched: {stats.get('fuzzy_matched', 0)}")
+            logger.info(f"  Websites found: {stats.get('websites_found', 0)}")
             logger.info(f"  Engines linked: {stats['engines_linked']}")
-            logger.info(f"  Skipped (no name found): {stats['skipped_no_name']}")
+            logger.info(f"  Skipped (no name): {stats['skipped_no_name']}")
             logger.info(f"  Skipped (duplicate): {stats['skipped_duplicate']}")
             logger.info(f"  Errors: {stats['errors']}")
             
@@ -235,6 +264,8 @@ async def main():
     logger.info(f"Total slugs: {total_stats['total']}")
     logger.info(f"New hotels inserted: {total_stats['inserted']}")
     logger.info(f"Existing hotels updated: {total_stats['updated']}")
+    logger.info(f"Fuzzy matched: {total_stats['fuzzy_matched']}")
+    logger.info(f"Websites extracted: {total_stats['websites_found']}")
     logger.info(f"Booking engines linked: {total_stats['engines_linked']}")
     logger.info(f"Skipped (no name): {total_stats['skipped_no_name']}")
     logger.info(f"Skipped (duplicate): {total_stats['skipped_duplicate']}")
