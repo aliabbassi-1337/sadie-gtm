@@ -263,10 +263,10 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
         """
         Batch insert crawled hotels with booking engine linking.
         
-        For each hotel:
-        1. Check if booking_url already exists -> skip
-        2. Insert hotel with placeholder name
-        3. Link to booking engine in hotel_booking_engines
+        Uses true batch operations:
+        1. Bulk check which booking_urls already exist
+        2. Filter to new records only
+        3. Bulk insert via executemany (single query per record, but batched)
         """
         if not records:
             return 0
@@ -276,35 +276,48 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
             logger.error(f"Failed to get booking engine ID for {self.engine}")
             return 0
         
-        saved = 0
-        skipped = 0
+        total_saved = 0
+        total_skipped = 0
         
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
             
-            for record in batch:
-                try:
-                    hotel_id = await repo.insert_crawled_hotel(
-                        name=record.name,
-                        source=record.source,
-                        external_id=record.external_id,
-                        external_id_type=record.external_id_type,
-                        booking_engine_id=engine_id,
-                        booking_url=record.booking_url,
-                        slug=record.slug,
-                        detection_method=record.detection_method,
-                    )
-                    
-                    if hotel_id:
-                        saved += 1
-                    else:
-                        skipped += 1
-                        
-                except Exception as e:
-                    logger.debug(f"Error saving {record.slug}: {e}")
-                    skipped += 1
-                    continue
+            # Step 1: Bulk check existing booking URLs
+            booking_urls = [r.booking_url for r in batch]
+            existing_urls = await repo.get_existing_booking_urls(booking_urls)
             
-            logger.info(f"  Batch {i // batch_size + 1}: {i + len(batch)}/{len(records)} processed ({saved} saved, {skipped} skipped)")
+            # Step 2: Filter to new records only
+            new_records = [r for r in batch if r.booking_url not in existing_urls]
+            skipped = len(batch) - len(new_records)
+            total_skipped += skipped
+            
+            if not new_records:
+                logger.info(f"  Batch {i // batch_size + 1}: {i + len(batch)}/{len(records)} - all {skipped} skipped (duplicates)")
+                continue
+            
+            # Step 3: Bulk insert via executemany
+            # Format: (name, source, external_id, external_id_type, booking_engine_id, booking_url, slug, detection_method)
+            tuples = [
+                (
+                    r.name,
+                    r.source,
+                    r.external_id,
+                    r.external_id_type,
+                    engine_id,
+                    r.booking_url,
+                    r.slug,
+                    r.detection_method,
+                )
+                for r in new_records
+            ]
+            
+            try:
+                await repo.batch_insert_crawled_hotels(tuples)
+                total_saved += len(new_records)
+            except Exception as e:
+                logger.error(f"Batch insert failed: {e}")
+                total_skipped += len(new_records)
+            
+            logger.info(f"  Batch {i // batch_size + 1}: {i + len(batch)}/{len(records)} - {len(new_records)} saved, {skipped} skipped")
         
-        return saved
+        return total_saved
