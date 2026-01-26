@@ -87,7 +87,8 @@ WHERE id = :hotel_id;
 
 -- name: get_hotels_pending_detection
 -- Get hotels that need booking engine detection
--- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet
+-- Criteria: status < DETECTED (30), has website, no booking engine detected yet
+-- Includes: INGESTED (0), HAS_WEBSITE (10), HAS_LOCATION (20)
 SELECT
     h.id,
     h.name,
@@ -111,7 +112,7 @@ SELECT
     h.updated_at
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-WHERE h.status = 0
+WHERE h.status >= 0 AND h.status < 30  -- INGESTED, HAS_WEBSITE, HAS_LOCATION
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
@@ -119,7 +120,7 @@ LIMIT :limit;
 
 -- name: get_hotels_pending_detection_by_categories
 -- Get hotels that need booking engine detection, filtered by categories
--- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet, in categories list
+-- Criteria: status < DETECTED (30), has website, no booking engine detected yet, in categories list
 SELECT
     h.id,
     h.name,
@@ -143,7 +144,7 @@ SELECT
     h.updated_at
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-WHERE h.status = 0
+WHERE h.status >= 0 AND h.status < 30  -- INGESTED, HAS_WEBSITE, HAS_LOCATION
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
