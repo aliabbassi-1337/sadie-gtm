@@ -21,11 +21,14 @@ HOSTS=(
     "51.20.191.25"
 )
 
+# Source uv path on remote
+REMOTE_PREFIX="source ~/.local/bin/env 2>/dev/null || export PATH=\$HOME/.local/bin:\$PATH"
+
 run_on_all() {
     local cmd="$1"
     for host in "${HOSTS[@]}"; do
         echo "=== $host ==="
-        ssh -i "$KEY" -o StrictHostKeyChecking=no ubuntu@$host "$cmd" || echo "Failed on $host"
+        ssh -i "$KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$host "$REMOTE_PREFIX && $cmd" || echo "Failed on $host"
         echo ""
     done
 }
@@ -33,7 +36,7 @@ run_on_all() {
 run_on_primary() {
     local cmd="$1"
     echo "=== $PRIMARY_HOST (primary) ==="
-    ssh -i "$KEY" -o StrictHostKeyChecking=no ubuntu@$PRIMARY_HOST "$cmd"
+    ssh -i "$KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$PRIMARY_HOST "$REMOTE_PREFIX && $cmd"
 }
 
 case "$1" in
