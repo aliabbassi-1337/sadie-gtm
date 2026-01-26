@@ -2100,7 +2100,19 @@ class Service(IService):
                     
                     tasks = [fetch_and_extract(s, r) for s, r in cdx_records.items()]
                     results = await asyncio.gather(*tasks)
-                    hotels = [r for r in results if r and r.get('name')]
+                    # Keep all results, even without names - will use placeholder
+                    hotels = [r for r in results if r]
+                    
+                    # Also add hotels for slugs that weren't in CDX (404s)
+                    # These get placeholder names and will be enriched by SQS workers
+                    found_slugs = set(cdx_records.keys())
+                    for slug in batch_slugs:
+                        if slug not in found_slugs:
+                            hotels.append({
+                                "name": None,
+                                "slug": slug,
+                                "booking_url": f"https://hotels.cloudbeds.com/reservation/{slug}",
+                            })
                     
                     # Step 3: Save to DB immediately
                     batch_stats = await self._save_hotels_batch(
@@ -2161,12 +2173,13 @@ class Service(IService):
         
         for hotel in hotels:
             try:
-                name = hotel.get("name")
-                if not name:
-                    stats["skipped_no_name"] += 1
-                    continue
-                
                 slug = hotel.get("slug", "")
+                name = hotel.get("name")
+                
+                # Use placeholder name if none extracted - SQS enrichment will fix it
+                if not name:
+                    name = f"Unknown ({slug})" if slug else "Unknown Hotel"
+                    stats["skipped_no_name"] += 1  # Track but don't skip
                 city = hotel.get("city")
                 country = hotel.get("country", "USA")
                 website = hotel.get("website")
@@ -2330,16 +2343,20 @@ class Service(IService):
                                     break
                                 name = None
                         
-                        if name:
-                            return {
-                                "slug": slug,
-                                "name": name,
-                                "booking_url": booking_url,
-                            }
+                        return {
+                            "slug": slug,
+                            "name": name,  # May be None - _save_hotels_batch will use placeholder
+                            "booking_url": booking_url,
+                        }
                 except Exception:
                     pass
                 
-                return None
+                # Still return hotel without name - let enrichment fix it later
+                return {
+                    "slug": slug,
+                    "name": None,
+                    "booking_url": booking_url if url_pattern else None,
+                }
         
         async with httpx.AsyncClient(
             headers={"User-Agent": "Mozilla/5.0 (compatible; HotelBot/1.0)"},
@@ -2349,7 +2366,9 @@ class Service(IService):
                 batch = slugs[i:i + batch_size]
                 tasks = [scrape_one(client, s) for s in batch]
                 results = await asyncio.gather(*tasks)
+                # Keep all results including those without names
                 hotels.extend([r for r in results if r])
-                logger.info(f"  Scraped {i + len(batch)}/{len(slugs)}")
+                with_names = sum(1 for r in results if r and r.get('name'))
+                logger.info(f"  Scraped {i + len(batch)}/{len(slugs)} ({with_names} with names)")
         
         return hotels
