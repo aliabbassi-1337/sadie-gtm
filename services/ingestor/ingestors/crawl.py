@@ -17,7 +17,12 @@ from services.ingestor.base import BaseIngestor
 from services.ingestor.registry import register
 from services.ingestor.models.base import IngestStats
 from services.ingestor.models.crawl import CrawledHotel, URL_PATTERNS
+from services.ingestor.sources.s3 import S3Source
 from services.ingestor import repo
+
+
+# Known booking engines for detection
+KNOWN_ENGINES = ["cloudbeds", "mews", "rms", "siteminder"]
 
 
 @register("crawl")
@@ -83,14 +88,63 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
             logger.error(f"Directory not found: {dir_path}")
             return ingestors
         
-        # Known engine patterns
-        known_engines = ["cloudbeds", "mews", "rms", "siteminder"]
-        
         for txt_file in path.glob("*.txt"):
             filename_lower = txt_file.name.lower()
-            for engine in known_engines:
+            for engine in KNOWN_ENGINES:
                 if engine in filename_lower:
                     ingestors.append(cls(engine=engine, file_path=str(txt_file)))
+                    break
+        
+        return ingestors
+    
+    @classmethod
+    async def from_s3(
+        cls,
+        bucket: str,
+        prefix: str = "",
+        pattern: str = "*_deduped.txt",
+        cache_dir: Optional[str] = None,
+    ) -> List["CrawlIngestor"]:
+        """
+        Create ingestors for all crawl files in an S3 bucket.
+        
+        Args:
+            bucket: S3 bucket name
+            prefix: S3 key prefix (e.g., "crawl-data/")
+            pattern: Glob pattern for files (default: "*_deduped.txt" for deduped files)
+            cache_dir: Local directory to cache downloaded files
+        
+        Returns:
+            List of CrawlIngestor instances, one per engine file found
+        """
+        source = S3Source(bucket=bucket, prefix=prefix, cache_dir=cache_dir)
+        
+        # Also match simple engine names like "cloudbeds.txt"
+        patterns = [pattern, "*.txt"]
+        all_keys = set()
+        
+        for p in patterns:
+            keys = await source.list_files(p)
+            all_keys.update(keys)
+        
+        ingestors = []
+        for key in all_keys:
+            filename = key.split("/")[-1].lower()
+            
+            # Skip commoncrawl (raw) files - use deduped only
+            if "_commoncrawl" in filename:
+                continue
+            
+            # Detect engine from filename
+            for engine in KNOWN_ENGINES:
+                if engine in filename:
+                    # Download the file
+                    content = await source.fetch_file(key)
+                    slugs = content.decode("utf-8").strip().split("\n")
+                    slugs = [s.strip().lower() for s in slugs if s.strip()]
+                    
+                    logger.info(f"Loaded {len(slugs)} slugs for {engine} from s3://{bucket}/{key}")
+                    ingestors.append(cls(engine=engine, slugs=slugs))
                     break
         
         return ingestors

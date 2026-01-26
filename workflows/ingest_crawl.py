@@ -2,30 +2,26 @@
 """
 Ingest crawled booking engine URLs into the database.
 
-Reads text files containing slugs/URLs (one per line) from Common Crawl
-or similar sources and ingests them into the hotels table.
+Reads text files containing slugs/URLs (one per line) from S3 or local files
+and ingests them into the hotels table.
 
-Uses the proper CrawlIngestor from services/ingestor/ which:
+Uses the CrawlIngestor from services/ingestor/ which:
 - Inserts hotels with placeholder names ("Unknown (slug)")
 - Links to booking_engines table
 - SQS enrichment workers later scrape real names from live pages
 
 Usage:
-    # Ingest Cloudbeds slugs
-    uv run python -m workflows.ingest_crawl \
-        --file "data/crawl/cloudbeds.txt" \
-        --engine cloudbeds
+    # Ingest all deduped files from S3 (recommended)
+    uv run python -m workflows.ingest_crawl --s3 sadie-gtm --prefix crawl-data/
 
-    # Ingest all booking engine files from a directory
-    uv run python -m workflows.ingest_crawl \
-        --dir "data/crawl" \
-        --all
-        
-    # Dry run to see what would be imported
-    uv run python -m workflows.ingest_crawl \
-        --file "data/crawl/mews.txt" \
-        --engine mews \
-        --dry-run
+    # Ingest from local directory
+    uv run python -m workflows.ingest_crawl --dir data/crawl --all
+
+    # Single engine from local file
+    uv run python -m workflows.ingest_crawl --file data/crawl/cloudbeds.txt --engine cloudbeds
+
+    # Auto-enqueue for SQS enrichment after ingestion
+    uv run python -m workflows.ingest_crawl --s3 sadie-gtm --prefix crawl-data/ --enqueue
 """
 
 import argparse
@@ -52,18 +48,30 @@ def main():
         type=str,
         help="Directory containing crawl files (use with --all)"
     )
+    input_group.add_argument(
+        "--s3",
+        type=str,
+        metavar="BUCKET",
+        help="S3 bucket containing crawl files"
+    )
     
     # Engine selection
     parser.add_argument(
         "--engine", "-e",
         type=str,
         choices=["cloudbeds", "mews", "rms", "siteminder"],
-        help="Booking engine name (required with --file, auto-detected with --dir)"
+        help="Booking engine name (required with --file, auto-detected otherwise)"
     )
     parser.add_argument(
         "--all",
         action="store_true",
         help="Process all recognized files in directory"
+    )
+    parser.add_argument(
+        "--prefix",
+        type=str,
+        default="crawl-data/",
+        help="S3 key prefix (default: crawl-data/)"
     )
     
     # Options
@@ -82,6 +90,17 @@ def main():
         type=int,
         default=500,
         help="Batch size for database inserts (default: 500)"
+    )
+    parser.add_argument(
+        "--enqueue",
+        action="store_true",
+        help="Auto-enqueue newly inserted hotels for SQS name enrichment"
+    )
+    parser.add_argument(
+        "--enqueue-limit",
+        type=int,
+        default=10000,
+        help="Max hotels to enqueue for enrichment (default: 10000)"
     )
     
     args = parser.parse_args()
@@ -118,21 +137,25 @@ async def run_ingest(args):
             return
         ingestors = CrawlIngestor.from_directory(str(dir_path))
     
+    elif args.s3:
+        logger.info(f"Loading crawl files from s3://{args.s3}/{args.prefix}")
+        ingestors = await CrawlIngestor.from_s3(
+            bucket=args.s3,
+            prefix=args.prefix,
+            cache_dir="data/crawl_cache",
+        )
+    
     if not ingestors:
         logger.error("No files to process")
         return
     
-    logger.info(f"Found {len(ingestors)} file(s) to process")
+    logger.info(f"Found {len(ingestors)} engine(s) to process:")
+    for ing in ingestors:
+        slug_count = len(ing.slugs) if ing.slugs else "file"
+        logger.info(f"  - {ing.engine}: {slug_count} slugs")
     
     # Dry run - just show stats
     if args.dry_run:
-        for ingestor in ingestors:
-            if ingestor.file_path:
-                path = Path(ingestor.file_path)
-                lines = path.read_text().strip().split("\n")
-                slugs = [l.strip() for l in lines if l.strip()]
-                unique_slugs = len(set(slugs))
-                logger.info(f"  {path.name}: {len(slugs)} lines, {unique_slugs} unique ({ingestor.engine})")
         logger.info("Dry run complete - no changes made")
         return
     
@@ -153,15 +176,12 @@ async def run_ingest(args):
         
         try:
             # Apply limit if specified
-            if args.limit and ingestor.file_path:
-                path = Path(ingestor.file_path)
-                lines = path.read_text().strip().split("\n")[:args.limit]
-                ingestor.slugs = [l.strip().lower() for l in lines if l.strip()]
-                ingestor.file_path = None  # Use slugs instead of file
+            if args.limit and ingestor.slugs:
+                ingestor.slugs = ingestor.slugs[:args.limit]
             
             records, stats = await ingestor.ingest(
                 batch_size=args.batch_size,
-                upload_logs=False,  # Don't upload logs for now
+                upload_logs=False,
             )
             
             total_stats["files"] += 1
@@ -183,20 +203,75 @@ async def run_ingest(args):
     
     # Summary
     logger.info("\n" + "=" * 50)
-    logger.info("TOTAL SUMMARY")
+    logger.info("INGESTION SUMMARY")
     logger.info("=" * 50)
-    logger.info(f"Files processed: {total_stats['files']}")
+    logger.info(f"Engines processed: {total_stats['files']}")
     logger.info(f"Total slugs parsed: {total_stats['records_parsed']}")
     logger.info(f"Hotels saved: {total_stats['records_saved']}")
     logger.info(f"Duplicates skipped: {total_stats['duplicates_skipped']}")
     logger.info(f"Errors: {total_stats['errors']}")
     
-    # Reminder about SQS enrichment
-    if total_stats['records_saved'] > 0:
+    # Auto-enqueue for enrichment if requested
+    if args.enqueue and total_stats['records_saved'] > 0:
+        logger.info("\n" + "-" * 50)
+        logger.info("ENQUEUEING FOR NAME ENRICHMENT")
+        logger.info("-" * 50)
+        
+        await enqueue_for_enrichment(limit=args.enqueue_limit)
+    elif total_stats['records_saved'] > 0:
         logger.info("\n" + "-" * 50)
         logger.info("Hotels inserted with placeholder names.")
-        logger.info("Run the SQS enqueuer to start name enrichment:")
-        logger.info("  uv run python -m workflows.enrich_names_enqueue")
+        logger.info("To enqueue for name enrichment, run:")
+        logger.info("  uv run python -m workflows.enrich_names_enqueue --limit 10000")
+
+
+async def enqueue_for_enrichment(limit: int = 10000):
+    """Enqueue newly inserted hotels for SQS name enrichment."""
+    import os
+    from db.client import get_conn, queries
+    from infra.sqs import send_messages_batch, get_queue_attributes
+    
+    queue_url = os.getenv("SQS_NAME_ENRICHMENT_QUEUE_URL", "")
+    if not queue_url:
+        logger.warning("SQS_NAME_ENRICHMENT_QUEUE_URL not set - skipping enqueue")
+        return
+    
+    # Get hotels needing names
+    async with get_conn() as conn:
+        results = await queries.get_hotels_needing_names(conn, limit=limit)
+        hotels = [dict(row) for row in results]
+    
+    if not hotels:
+        logger.info("No hotels found needing name enrichment")
+        return
+    
+    logger.info(f"Found {len(hotels)} hotels needing names")
+    
+    # Group by engine for logging
+    by_engine = {}
+    for h in hotels:
+        eng = h["engine_name"]
+        by_engine[eng] = by_engine.get(eng, 0) + 1
+    for eng, count in sorted(by_engine.items()):
+        logger.info(f"  {eng}: {count}")
+    
+    # Create messages
+    messages = []
+    for h in hotels:
+        messages.append({
+            "hotel_id": h["id"],
+            "booking_url": h["booking_url"],
+            "slug": h["slug"],
+            "engine": h["engine_name"],
+        })
+    
+    # Send to SQS
+    sent = send_messages_batch(queue_url, messages)
+    logger.info(f"Sent {sent} messages to SQS")
+    
+    # Show queue stats
+    attrs = get_queue_attributes(queue_url)
+    logger.info(f"Queue: {attrs.get('ApproximateNumberOfMessages', 0)} messages pending")
 
 
 if __name__ == "__main__":
