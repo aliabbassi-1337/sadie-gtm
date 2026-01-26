@@ -1935,16 +1935,27 @@ class BatchDetector:
             processor = HotelProcessor(self.config, browser, semaphore, context_queue)
 
             # Process only reachable hotels (skip precheck in processor)
-            tasks = [
-                processor.process(
-                    hotel_id=h['id'],
-                    name=h['name'],
-                    website=h.get('website', ''),
-                    expected_city=h.get('city', ''),
-                    skip_precheck=True,  # Already done
-                )
-                for h in reachable_hotels
-            ]
+            # Wrap each in timeout to prevent infinite hangs
+            async def process_with_timeout(h: dict, timeout_sec: int = 90):
+                try:
+                    return await asyncio.wait_for(
+                        processor.process(
+                            hotel_id=h['id'],
+                            name=h['name'],
+                            website=h.get('website', ''),
+                            expected_city=h.get('city', ''),
+                            skip_precheck=True,
+                        ),
+                        timeout=timeout_sec
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Hotel {h['id']} processing timed out after {timeout_sec}s")
+                    return DetectionResult(
+                        hotel_id=h['id'],
+                        error=f"timeout: processing exceeded {timeout_sec}s"
+                    )
+
+            tasks = [process_with_timeout(h) for h in reachable_hotels]
 
             task_results = await asyncio.gather(*tasks, return_exceptions=True)
 
