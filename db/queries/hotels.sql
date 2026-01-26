@@ -850,33 +850,16 @@ AND ST_Within(
 -- ============================================================================
 
 -- name: get_pipeline_summary
--- Get pipeline progress summary (counts by stage)
+-- Get count of hotels at each pipeline stage
 SELECT 
-    CASE 
-        WHEN status = 0 THEN 'ingested'
-        WHEN status = 10 THEN 'has_website'
-        WHEN status = 20 THEN 'has_location'
-        WHEN status = 30 THEN 'detected'
-        WHEN status = 40 THEN 'enriched'
-        WHEN status = 100 THEN 'launched'
-        WHEN status = -1 THEN 'no_booking_engine'
-        WHEN status = -2 THEN 'location_mismatch'
-        WHEN status = -3 THEN 'detection_timeout'
-        WHEN status = -11 THEN 'enrichment_failed'
-        WHEN status = -12 THEN 'unenrichable'
-        WHEN status = -21 THEN 'duplicate'
-        WHEN status = -22 THEN 'non_hotel'
-        WHEN status = -23 THEN 'invalid_data'
-        ELSE 'unknown_' || status::text
-    END AS stage,
     status,
     COUNT(*) AS count
 FROM sadie_gtm.hotels
 GROUP BY status
 ORDER BY status DESC;
 
--- name: get_pipeline_summary_by_source
--- Get pipeline progress summary grouped by source
+-- name: get_pipeline_by_source
+-- Get pipeline breakdown by source
 SELECT 
     source,
     SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS ingested,
@@ -890,6 +873,16 @@ SELECT
 FROM sadie_gtm.hotels
 GROUP BY source
 ORDER BY total DESC;
+
+-- name: get_pipeline_by_source_name
+-- Get pipeline breakdown for a specific source
+SELECT 
+    status,
+    COUNT(*) AS count
+FROM sadie_gtm.hotels
+WHERE source = :source
+GROUP BY status
+ORDER BY status DESC;
 
 -- name: get_hotels_at_stage
 -- Get hotels at a specific pipeline stage
@@ -966,37 +959,76 @@ UPDATE sadie_gtm.hotels
 SET status = :terminal_status, updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
--- name: get_pipeline_summary
--- Get count of hotels at each pipeline stage
-SELECT 
-    status,
-    COUNT(*) AS count
-FROM sadie_gtm.hotels
-GROUP BY status
-ORDER BY status DESC;
+-- ============================================================================
+-- COMMON CRAWL / REVERSE LOOKUP QUERIES
+-- ============================================================================
 
--- name: get_pipeline_by_source
--- Get pipeline breakdown by source
-SELECT 
+-- name: find_hotel_by_name^
+-- Find hotel by normalized name (case-insensitive, trimmed)
+-- Used for matching Common Crawl hotels to existing records
+SELECT
+    id,
+    name,
+    website,
     source,
-    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS ingested,
-    SUM(CASE WHEN status = 10 THEN 1 ELSE 0 END) AS has_website,
-    SUM(CASE WHEN status = 20 THEN 1 ELSE 0 END) AS has_location,
-    SUM(CASE WHEN status = 30 THEN 1 ELSE 0 END) AS detected,
-    SUM(CASE WHEN status = 40 THEN 1 ELSE 0 END) AS enriched,
-    SUM(CASE WHEN status = 100 THEN 1 ELSE 0 END) AS launched,
-    SUM(CASE WHEN status < 0 THEN 1 ELSE 0 END) AS rejected,
-    COUNT(*) AS total
+    city,
+    state
 FROM sadie_gtm.hotels
-GROUP BY source
-ORDER BY total DESC;
+WHERE LOWER(TRIM(name)) = LOWER(TRIM(:name))
+LIMIT 1;
 
--- name: get_pipeline_by_source_name
--- Get pipeline breakdown for a specific source
-SELECT 
-    status,
-    COUNT(*) AS count
+-- name: find_hotel_by_name_and_city^
+-- Find hotel by name and city (more precise matching)
+SELECT
+    id,
+    name,
+    website,
+    source,
+    city,
+    state
 FROM sadie_gtm.hotels
-WHERE source = :source
-GROUP BY status
-ORDER BY status DESC;
+WHERE LOWER(TRIM(name)) = LOWER(TRIM(:name))
+  AND LOWER(TRIM(city)) = LOWER(TRIM(:city))
+LIMIT 1;
+
+-- name: update_hotel_source!
+-- Append source to existing hotel (e.g., dbpr -> dbpr::commoncrawl)
+UPDATE sadie_gtm.hotels
+SET source = CASE 
+    WHEN source IS NULL OR source = '' THEN :new_source
+    WHEN source LIKE '%' || :new_source || '%' THEN source  -- already has this source
+    ELSE source || '::' || :new_source
+    END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: upsert_commoncrawl_hotel<!
+-- Upsert hotel from Common Crawl with source appending
+-- If hotel exists (by external_id), append source; otherwise insert
+INSERT INTO sadie_gtm.hotels (
+    name, 
+    city, 
+    country,
+    source, 
+    status, 
+    external_id, 
+    external_id_type
+) VALUES (
+    :name,
+    :city,
+    :country,
+    :source,
+    0,
+    :external_id,
+    :external_id_type
+)
+ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL
+DO UPDATE SET
+    source = CASE 
+        WHEN hotels.source IS NULL OR hotels.source = '' THEN EXCLUDED.source
+        WHEN hotels.source LIKE '%' || EXCLUDED.source || '%' THEN hotels.source
+        ELSE hotels.source || '::' || EXCLUDED.source
+    END,
+    updated_at = CURRENT_TIMESTAMP
+RETURNING id, 
+    (xmax = 0) AS inserted;  -- True if inserted, False if updated

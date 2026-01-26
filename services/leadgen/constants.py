@@ -124,3 +124,21 @@ def next_action(stage: int, has_website: bool = False, has_location: bool = Fals
     if stage == PipelineStage.ENRICHED:
         return "launch"
     return "unknown"
+
+
+# Booking engine URL patterns for crawled data ingestion
+# {slug} or {id} will be replaced with the actual value
+BOOKING_ENGINE_URL_PATTERNS = {
+    "cloudbeds": "https://hotels.cloudbeds.com/reservation/{slug}",
+    "mews": "https://app.mews.com/distributor/{slug}",
+    "rms": None,  # RMS URLs are stored as full URLs in crawl file
+    "siteminder": "https://{slug}.siteminder.com",  # TODO: verify pattern
+}
+
+# Booking engine tier (1 = primary target, 2 = secondary, 3 = other)
+BOOKING_ENGINE_TIERS = {
+    "cloudbeds": 1,
+    "mews": 2,
+    "rms": 2,
+    "siteminder": 2,
+}

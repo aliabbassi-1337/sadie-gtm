@@ -20,6 +20,12 @@ from services.leadgen.reverse_lookup import (
     ReverseLookupResult,
     ReverseLookupStats,
 )
+from services.leadgen.booking_engines import (
+    GuestbookScraper,
+    GuestbookProperty,
+    CommonCrawlEnumerator,
+    CloudbedsPropertyExtractor,
+)
 from db.models.hotel import Hotel
 from db.client import init_db, get_conn, queries
 from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, DEFAULT_CELL_SIZE_KM
@@ -217,6 +223,140 @@ class IService(ABC):
         """Reset hotel status and delete HBE records to allow retry.
 
         Returns number of hotels reset.
+        """
+        pass
+
+    @abstractmethod
+    async def enumerate_guestbook(
+        self,
+        bbox: Optional[Dict] = None,
+        max_pages: Optional[int] = None,
+        cloudbeds_only: bool = True,
+    ) -> List[Dict]:
+        """
+        Enumerate hotels from TheGuestbook API (Cloudbeds partner directory).
+        
+        Args:
+            bbox: Bounding box polygon (default: continental US)
+            max_pages: Limit number of pages (for testing)
+            cloudbeds_only: Only return properties with beiStatus='automated'
+            
+        Returns list of hotel dicts with name, lat, lng, website, bei_status.
+        """
+        pass
+
+    @abstractmethod
+    async def enumerate_cloudbeds_sitemap(
+        self,
+        max_subdomains: Optional[int] = None,
+        concurrency: int = 5,
+        delay: float = 0.5,
+    ) -> List[Dict]:
+        """
+        Enumerate hotels from Cloudbeds sitemap (hotels.cloudbeds.com/sitemap.xml).
+        
+        Args:
+            max_subdomains: Limit number of subdomains to scrape (for testing)
+            concurrency: Number of concurrent requests
+            delay: Delay between requests in seconds
+            
+        Returns list of hotel dicts with subdomain, name, url.
+        """
+        pass
+
+    @abstractmethod
+    async def enumerate_commoncrawl(
+        self,
+        max_indices: Optional[int] = None,
+        year: Optional[int] = None,
+        concurrency: int = 10,
+        fetch_details: bool = True,
+        use_archives: bool = True,
+    ) -> List[Dict]:
+        """
+        Enumerate Cloudbeds hotels from Common Crawl CDX API.
+        
+        Common Crawl indexes billions of web pages. We query their CDX API
+        to find all indexed Cloudbeds reservation URLs, then fetch hotel
+        details from archived HTML (fast, no rate limits) or by scraping
+        Cloudbeds directly (slow, rate limited).
+        
+        Args:
+            max_indices: Limit number of CC indices to query (default: all ~350)
+            year: Only query indices from specific year
+            concurrency: Concurrent requests
+            fetch_details: If True, fetch hotel name/details
+            use_archives: If True (default), fetch from CC archives (fast).
+                         If False, scrape Cloudbeds (slow, rate limited).
+            
+        Returns list of hotel dicts with slug, name, city, booking_url.
+        """
+        pass
+
+    @abstractmethod
+    async def save_booking_engine_leads(
+        self,
+        leads: List[Dict],
+        source: str,
+        booking_engine: str,
+    ) -> Dict:
+        """
+        Save leads with known booking engine to database.
+        
+        Creates hotel record AND hotel_booking_engines record.
+        
+        Args:
+            leads: List of hotel dicts with name, website, lat, lng, etc.
+            source: Source identifier (e.g., 'guestbook_florida', 'cloudbeds_sitemap')
+            booking_engine: Booking engine name (e.g., 'Cloudbeds', 'RMS Cloud')
+            
+        Returns dict with insert/skip/error counts.
+        """
+        pass
+
+    @abstractmethod
+    async def ingest_commoncrawl_hotels(
+        self,
+        hotels: List[Dict],
+        source_tag: str = "commoncrawl",
+    ) -> Dict:
+        """
+        Ingest Common Crawl hotels with smart deduplication.
+        
+        Strategy:
+        1. Match by name (case-insensitive) - if found, append source
+        2. If no match, insert new hotel
+        3. Link to Cloudbeds booking engine
+        
+        Source encoding: existing_source::new_source (e.g., 'dbpr::commoncrawl')
+        
+        Returns dict with counts: inserted, updated, engines_linked, errors
+        """
+        pass
+
+    @abstractmethod
+    async def ingest_crawled_urls(
+        self,
+        file_path: str,
+        booking_engine: str,
+        source_tag: str = "commoncrawl",
+        scrape_names: bool = False,
+        concurrency: int = 10,
+    ) -> Dict:
+        """
+        Ingest crawled booking engine URLs/slugs from a file.
+        
+        Reads a text file with one slug/URL per line and ingests into database.
+        Optionally scrapes hotel names from booking pages.
+        
+        Args:
+            file_path: Path to text file with slugs/URLs
+            booking_engine: Engine name (cloudbeds, mews, rms, siteminder)
+            source_tag: Source identifier for tracking
+            scrape_names: If True, scrape hotel names from booking pages
+            concurrency: Number of concurrent scrape requests
+            
+        Returns dict with counts: total, inserted, engines_linked, errors
         """
         pass
 
@@ -1420,3 +1560,520 @@ class Service(IService):
         await repo.reset_hotels_for_retry(hotel_ids)
         logger.info(f"Reset {len(hotel_ids)} hotels for retry (status=0, HBE deleted)")
         return len(hotel_ids)
+
+    # =========================================================================
+    # BOOKING ENGINE ENUMERATION METHODS
+    # =========================================================================
+
+    async def enumerate_guestbook(
+        self,
+        bbox: Optional[Dict] = None,
+        max_pages: Optional[int] = None,
+        cloudbeds_only: bool = True,
+    ) -> List[Dict]:
+        """
+        Enumerate hotels from TheGuestbook API (Cloudbeds partner directory).
+        """
+        async with GuestbookScraper() as scraper:
+            properties = await scraper.fetch_all(
+                bbox=bbox,
+                max_pages=max_pages,
+                cloudbeds_only=cloudbeds_only,
+            )
+        
+        # Convert to dicts
+        return [
+            {
+                "id": p.id,
+                "name": p.name,
+                "lat": p.lat,
+                "lng": p.lng,
+                "website": p.website,
+                "bei_status": p.bei_status,
+                "trust_you_score": p.trust_you_score,
+                "review_count": p.review_count,
+            }
+            for p in properties
+        ]
+
+    async def enumerate_cloudbeds_sitemap(
+        self,
+        max_subdomains: Optional[int] = None,
+        concurrency: int = 5,
+        delay: float = 0.5,
+    ) -> List[Dict]:
+        """
+        Enumerate hotels from Cloudbeds sitemap.
+        """
+        import random
+        import re
+        import asyncio
+        
+        SITEMAP_URL = "https://hotels.cloudbeds.com/sitemap.xml"
+        
+        async with httpx.AsyncClient() as client:
+            # Fetch sitemap
+            resp = await client.get(SITEMAP_URL)
+            resp.raise_for_status()
+            
+            # Extract subdomains
+            urls = re.findall(r'<loc>([^<]+)</loc>', resp.text)
+            subdomains = set()
+            for url in urls:
+                match = re.match(r'https://([^.]+)\.cloudbeds\.com', url)
+                if match:
+                    subdomains.add(match.group(1))
+            
+            subdomains = list(subdomains)
+            if max_subdomains:
+                subdomains = subdomains[:max_subdomains]
+            
+            logger.info(f"Found {len(subdomains)} Cloudbeds subdomains in sitemap")
+            
+            # Scrape each subdomain for hotel name
+            results = []
+            semaphore = asyncio.Semaphore(concurrency)
+            
+            async def scrape_subdomain(subdomain: str) -> Optional[Dict]:
+                async with semaphore:
+                    url = f"https://{subdomain}.cloudbeds.com/"
+                    try:
+                        await asyncio.sleep(delay + random.uniform(0, delay * 0.5))
+                        resp = await client.get(url, follow_redirects=True, timeout=10.0)
+                        
+                        if resp.status_code == 429:
+                            await asyncio.sleep(30)
+                            resp = await client.get(url, follow_redirects=True, timeout=10.0)
+                        
+                        if resp.status_code != 200:
+                            return None
+                        
+                        # Extract name from title
+                        title_match = re.search(r'<title>([^<]+)</title>', resp.text)
+                        if title_match:
+                            name = title_match.group(1).strip()
+                            # Clean up title
+                            name = re.sub(r'\s*[-|–]\s*Cloudbeds.*$', '', name, flags=re.IGNORECASE)
+                            name = re.sub(r'\s*[-|–]\s*Book.*$', '', name, flags=re.IGNORECASE)
+                            if name and len(name) > 2:
+                                return {
+                                    "subdomain": subdomain,
+                                    "name": name,
+                                    "url": url,
+                                }
+                        return None
+                    except Exception:
+                        return None
+            
+            tasks = [scrape_subdomain(s) for s in subdomains]
+            scraped = await asyncio.gather(*tasks)
+            results = [r for r in scraped if r is not None]
+            
+            logger.info(f"Scraped {len(results)} hotels from Cloudbeds sitemap")
+            return results
+
+    async def save_booking_engine_leads(
+        self,
+        leads: List[Dict],
+        source: str,
+        booking_engine: str,
+    ) -> Dict:
+        """
+        Save leads with known booking engine to database.
+        """
+        stats = {
+            "total": len(leads),
+            "inserted": 0,
+            "engines_linked": 0,
+            "skipped_exists": 0,
+            "skipped_no_website": 0,
+            "errors": 0,
+        }
+
+        # Get booking engine ID (cached)
+        engine = await repo.get_booking_engine_by_name(booking_engine)
+        engine_id = engine.id if engine else None
+        
+        if not engine_id:
+            # Create booking engine if it doesn't exist
+            engine_id = await repo.insert_booking_engine(name=booking_engine, tier=2)
+            logger.info(f"Created booking engine '{booking_engine}' with id {engine_id}")
+
+        for i, lead in enumerate(leads):
+            if (i + 1) % 100 == 0:
+                logger.info(f"  Saved {i + 1}/{len(leads)}...")
+
+            try:
+                website = lead.get("website") or lead.get("url")
+                if not website:
+                    stats["skipped_no_website"] += 1
+                    continue
+
+                # Build external_id for deduplication
+                external_id = lead.get("external_id")
+                external_id_type = lead.get("external_id_type")
+                
+                if not external_id:
+                    # Generate from source + subdomain or name
+                    subdomain = lead.get("subdomain")
+                    if subdomain:
+                        external_id = f"{source}_{subdomain}"
+                        external_id_type = source
+                    else:
+                        external_id = f"{source}_{lead.get('id', lead['name'][:50])}"
+                        external_id_type = source
+
+                # Check if already exists by querying
+                async with get_conn() as conn:
+                    existing = await conn.fetchrow(
+                        "SELECT id FROM hotels WHERE external_id = $1 AND external_id_type = $2",
+                        external_id,
+                        external_id_type,
+                    )
+                    if existing:
+                        stats["skipped_exists"] += 1
+                        continue
+
+                # Insert hotel (uses latitude/longitude)
+                hotel_id = await repo.insert_hotel(
+                    name=lead["name"],
+                    website=website,
+                    source=source,
+                    status=0,
+                    latitude=lead.get("lat"),
+                    longitude=lead.get("lng"),
+                    external_id=external_id,
+                    external_id_type=external_id_type,
+                )
+                stats["inserted"] += 1
+
+                # Link to booking engine
+                if engine_id:
+                    await repo.insert_hotel_booking_engine(
+                        hotel_id=hotel_id,
+                        booking_engine_id=engine_id,
+                        detection_method=source,
+                        status=1,
+                    )
+                    stats["engines_linked"] += 1
+
+            except Exception as e:
+                logger.error(f"Error saving lead {lead.get('name', 'unknown')}: {e}")
+                stats["errors"] += 1
+
+        logger.info(f"Save complete: {stats}")
+        return stats
+
+    async def enumerate_commoncrawl(
+        self,
+        max_indices: Optional[int] = None,
+        year: Optional[int] = None,
+        concurrency: int = 10,
+        fetch_details: bool = True,
+        use_archives: bool = True,
+    ) -> List[Dict]:
+        """
+        Enumerate Cloudbeds hotels from Common Crawl CDX API.
+        
+        Args:
+            use_archives: If True (default), fetch hotel details from CC's archived
+                         HTML on S3 - NO rate limits, faster. If False, scrape
+                         Cloudbeds directly (slower, rate limited).
+        """
+        async with CommonCrawlEnumerator() as enumerator:
+            if fetch_details and use_archives:
+                # Option B: Fetch from Common Crawl archives (recommended)
+                # No rate limits, can parallelize freely
+                hotels = await enumerator.enumerate_with_details(
+                    max_indices=max_indices,
+                    year=year,
+                    concurrency=concurrency,
+                )
+                
+                # Add external_id for DB dedup
+                for h in hotels:
+                    h["external_id"] = f"cloudbeds_{h['slug']}"
+                    h["external_id_type"] = "commoncrawl"
+                
+                return hotels
+            
+            # Get slugs only
+            slugs = await enumerator.enumerate_all(
+                max_indices=max_indices,
+                year=year,
+                concurrency=concurrency,
+            )
+        
+        logger.info(f"Found {len(slugs)} unique Cloudbeds slugs from Common Crawl")
+        
+        if not fetch_details:
+            # Return just the slugs without fetching hotel details
+            return [
+                {
+                    "slug": slug,
+                    "booking_url": f"https://hotels.cloudbeds.com/reservation/{slug}",
+                }
+                for slug in slugs
+            ]
+        
+        # Option A: Fetch hotel details by scraping Cloudbeds directly
+        # (slower, rate limited - only use if archives don't work)
+        logger.info(f"Fetching hotel details from Cloudbeds for {len(slugs)} slugs...")
+        
+        async with CloudbedsPropertyExtractor() as extractor:
+            properties = await extractor.batch_fetch(slugs, concurrency=concurrency)
+        
+        logger.info(f"Successfully fetched details for {len(properties)} hotels")
+        
+        # Convert to dicts
+        return [
+            {
+                "slug": p.slug,
+                "name": p.name,
+                "booking_url": p.booking_url,
+                "property_id": p.property_id,
+                "external_id": f"cloudbeds_{p.slug}",
+                "external_id_type": "commoncrawl",
+            }
+            for p in properties
+        ]
+
+    async def ingest_commoncrawl_hotels(
+        self,
+        hotels: List[Dict],
+        source_tag: str = "commoncrawl",
+    ) -> Dict:
+        """
+        Ingest Common Crawl hotels into database with smart deduplication.
+        
+        Strategy:
+        1. First try to match by name (exact, case-insensitive)
+        2. If match found: append source (e.g., dbpr -> dbpr::commoncrawl)
+        3. If no match: insert new hotel
+        4. Always link to Cloudbeds booking engine using repo function
+        
+        Args:
+            hotels: List of hotel dicts from enumerate_commoncrawl()
+            source_tag: Source identifier to append (default: 'commoncrawl')
+            
+        Returns dict with counts: inserted, updated, engines_linked, errors
+        """
+        stats = {
+            "total": len(hotels),
+            "inserted": 0,
+            "updated": 0,
+            "engines_linked": 0,
+            "skipped": 0,
+            "errors": 0,
+        }
+        
+        # Get Cloudbeds engine ID using repo
+        engine = await repo.get_booking_engine_by_name("Cloudbeds")
+        engine_id = engine.id if engine else None
+        
+        if not engine_id:
+            engine_id = await repo.insert_booking_engine(name="Cloudbeds", tier=1)
+            logger.info(f"Created Cloudbeds booking engine with id {engine_id}")
+        
+        for i, hotel in enumerate(hotels):
+            if (i + 1) % 100 == 0:
+                logger.info(f"  Processed {i + 1}/{len(hotels)}...")
+            
+            try:
+                name = hotel.get("name")
+                if not name or name == "Unknown":
+                    stats["skipped"] += 1
+                    continue
+                
+                slug = hotel.get("slug", "")
+                city = hotel.get("city")
+                country = hotel.get("country", "USA")
+                booking_url = hotel.get("booking_url") or f"https://hotels.cloudbeds.com/reservation/{slug}"
+                external_id = hotel.get("external_id") or f"cloudbeds_{slug}"
+                
+                async with get_conn() as conn:
+                    # Try to find existing hotel by name (and city if available)
+                    existing = None
+                    if city:
+                        existing = await conn.fetchrow(
+                            """
+                            SELECT id, name, source FROM sadie_gtm.hotels
+                            WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+                              AND LOWER(TRIM(city)) = LOWER(TRIM($2))
+                            LIMIT 1
+                            """,
+                            name, city
+                        )
+                    
+                    if not existing:
+                        # Try matching by name only
+                        existing = await conn.fetchrow(
+                            """
+                            SELECT id, name, source FROM sadie_gtm.hotels
+                            WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+                            LIMIT 1
+                            """,
+                            name
+                        )
+                    
+                    if existing:
+                        # Update existing hotel: append source
+                        hotel_id = existing["id"]
+                        current_source = existing["source"] or ""
+                        
+                        # Append source if not already present
+                        if source_tag not in current_source:
+                            new_source = f"{current_source}::{source_tag}" if current_source else source_tag
+                            await conn.execute(
+                                """
+                                UPDATE sadie_gtm.hotels 
+                                SET source = $1, updated_at = CURRENT_TIMESTAMP
+                                WHERE id = $2
+                                """,
+                                new_source, hotel_id
+                            )
+                        
+                        stats["updated"] += 1
+                    else:
+                        # Insert new hotel using repo pattern
+                        hotel_id = await repo.insert_hotel(
+                            name=name,
+                            city=city,
+                            country=country,
+                            source=source_tag,
+                            status=0,
+                            external_id=external_id,
+                            external_id_type="commoncrawl",
+                        )
+                        stats["inserted"] += 1
+                
+                # Link to Cloudbeds booking engine using repo function
+                if hotel_id and engine_id:
+                    await repo.insert_hotel_booking_engine(
+                        hotel_id=hotel_id,
+                        booking_engine_id=engine_id,
+                        booking_url=booking_url,
+                        detection_method="commoncrawl",
+                        status=1,
+                    )
+                    stats["engines_linked"] += 1
+                        
+            except Exception as e:
+                logger.error(f"Error ingesting {hotel.get('name', 'unknown')}: {e}")
+                stats["errors"] += 1
+        
+        logger.info(f"Ingest complete: {stats}")
+        return stats
+
+    async def ingest_crawled_urls(
+        self,
+        file_path: str,
+        booking_engine: str,
+        source_tag: str = "commoncrawl",
+        scrape_names: bool = False,
+        concurrency: int = 10,
+    ) -> Dict:
+        """
+        Ingest crawled booking engine URLs/slugs from a file.
+        
+        Reads a text file with one slug/URL per line and ingests into database.
+        Optionally scrapes hotel names from booking pages.
+        """
+        from pathlib import Path
+        from .constants import BOOKING_ENGINE_URL_PATTERNS, BOOKING_ENGINE_TIERS
+        
+        stats = {
+            "total": 0,
+            "inserted": 0,
+            "engines_linked": 0,
+            "skipped_duplicate": 0,
+            "errors": 0,
+        }
+        
+        # Read slugs/URLs from file
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        lines = file_path.read_text().strip().split("\n")
+        slugs = [line.strip() for line in lines if line.strip()]
+        stats["total"] = len(slugs)
+        
+        logger.info(f"Loaded {len(slugs)} slugs from {file_path.name}")
+        
+        # Get or create booking engine
+        engine_name = booking_engine.title()  # Cloudbeds, Mews, Rms, Siteminder
+        if booking_engine.lower() == "rms":
+            engine_name = "RMS Cloud"
+        elif booking_engine.lower() == "siteminder":
+            engine_name = "SiteMinder"
+        
+        engine = await repo.get_booking_engine_by_name(engine_name)
+        engine_id = engine.id if engine else None
+        
+        if not engine_id:
+            tier = BOOKING_ENGINE_TIERS.get(booking_engine.lower(), 2)
+            engine_id = await repo.insert_booking_engine(name=engine_name, tier=tier)
+            logger.info(f"Created {engine_name} booking engine with id {engine_id}")
+        
+        # Get URL pattern
+        url_pattern = BOOKING_ENGINE_URL_PATTERNS.get(booking_engine.lower())
+        
+        # Process slugs
+        for i, slug in enumerate(slugs):
+            if (i + 1) % 500 == 0:
+                logger.info(f"  Processed {i + 1}/{len(slugs)}...")
+            
+            try:
+                # Build booking URL
+                if url_pattern:
+                    booking_url = url_pattern.replace("{slug}", slug)
+                else:
+                    # RMS: slug is already a full URL path
+                    booking_url = f"https://{slug}" if not slug.startswith("http") else slug
+                
+                # Create external ID for deduplication
+                external_id = f"{booking_engine.lower()}_{slug}"
+                external_id_type = f"{booking_engine.lower()}_crawl"
+                
+                # For now, use slug as placeholder name (can scrape later)
+                # Clean up the slug to make a readable name
+                if scrape_names:
+                    # TODO: Implement async scraping with httpx
+                    name = slug  # Placeholder
+                else:
+                    name = slug
+                
+                # Insert hotel
+                hotel_id = await repo.insert_hotel(
+                    name=name,
+                    source=source_tag,
+                    status=0,
+                    external_id=external_id,
+                    external_id_type=external_id_type,
+                )
+                
+                if hotel_id:
+                    stats["inserted"] += 1
+                    
+                    # Link to booking engine
+                    await repo.insert_hotel_booking_engine(
+                        hotel_id=hotel_id,
+                        booking_engine_id=engine_id,
+                        booking_url=booking_url,
+                        detection_method="crawl_import",
+                        status=1,
+                    )
+                    stats["engines_linked"] += 1
+                else:
+                    stats["skipped_duplicate"] += 1
+                    
+            except Exception as e:
+                if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+                    stats["skipped_duplicate"] += 1
+                else:
+                    logger.error(f"Error ingesting {slug}: {e}")
+                    stats["errors"] += 1
+        
+        logger.info(f"Ingest complete: {stats}")
+        return stats
