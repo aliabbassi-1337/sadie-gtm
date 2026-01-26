@@ -39,11 +39,23 @@ local:
     command: uv run python workflows/enqueue_detection.py --limit 500
 
   # Step 5: Export final leads
-  export:
-    description: Export leads to Excel and upload to S3
+  export_all:
+    description: Export all states to Excel and upload to S3
+    command: uv run python workflows/export.py --all
+    # Exports all states with hotels
+
+  export_state:
+    description: Export single state leads to Excel
     command: uv run python workflows/export.py --state FL
     # Use --state FL for full state export
     # Use --city "Miami" --state FL for single city
+    # Use --source dbpr to filter by source
+
+  export_crawl:
+    description: Export crawl data by booking engine
+    command: uv run python -m workflows.export_crawl --all
+    # Exports all booking engines (cloudbeds, mews, siteminder, rms)
+    # Use --engine cloudbeds for single engine
 
   # Utility: Check pipeline status
   status:
