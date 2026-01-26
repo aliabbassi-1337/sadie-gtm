@@ -578,10 +578,15 @@ class Service(IService):
                 )
                 return
 
-            # Check if error is retriable (timeout, browser crash, etc.)
-            # For retriable errors, DON'T create HBE record - let SQS retry
-            retriable_errors = ("timeout", "precheck_failed: timeout", "browser", "context")
-            is_retriable = result.error and any(e in result.error.lower() for e in retriable_errors)
+            # Check if error is retriable (browser crash only, NOT precheck failures)
+            # Precheck failures (timeout, 403, 404, etc.) won't resolve on retry - website is unreachable
+            # Only retry actual playwright/browser crashes where retry might help
+            retriable_errors = ("browser closed", "target page", "context closed", "target closed")
+            is_retriable = (
+                result.error
+                and any(e in result.error.lower() for e in retriable_errors)
+                and "precheck_failed" not in result.error.lower()
+            )
             
             if result.error and result.error not in ("location_mismatch",):
                 if is_retriable:
