@@ -20,6 +20,7 @@ async def bulk_insert():
         database=os.environ["SADIE_DB_NAME"],
         user=os.environ["SADIE_DB_USER"],
         password=os.environ["SADIE_DB_PASSWORD"],
+        statement_cache_size=0,  # Required for pgbouncer/Supabase
     )
 
     # Get or create booking engine IDs
