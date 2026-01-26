@@ -2083,8 +2083,9 @@ class Service(IService):
                 for batch_start in range(0, len(slugs_to_process), batch_size):
                     batch_slugs = slugs_to_process[batch_start:batch_start + batch_size]
                     
-                    # Step 1: Look up in CDX
-                    cdx_records = await enumerator.lookup_slugs_in_cdx(batch_slugs, concurrency=concurrency)
+                    # Step 1: Look up in CDX (cap at 10 to avoid rate limiting)
+                    cdx_concurrency = min(concurrency, 10)
+                    cdx_records = await enumerator.lookup_slugs_in_cdx(batch_slugs, concurrency=cdx_concurrency)
                     
                     # Step 2: Fetch HTML and extract
                     hotels = []

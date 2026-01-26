@@ -705,7 +705,7 @@ class CommonCrawlEnumerator:
     async def lookup_slugs_in_cdx(
         self,
         slugs: List[str],
-        concurrency: int = 20,
+        concurrency: int = 10,
     ) -> Dict[str, CommonCrawlRecord]:
         """
         Look up specific slugs in Common Crawl CDX to get WARC file info.
@@ -737,27 +737,35 @@ class CommonCrawlEnumerator:
                         "limit": 1,
                     }
                     
-                    try:
-                        resp = await self._client.get(url, params=params, timeout=15.0)
-                        if resp.status_code == 200 and resp.text.strip():
-                            data = json.loads(resp.text.strip().split('\n')[0])
-                            return CommonCrawlRecord(
-                                slug=slug.lower(),
-                                url=data.get('url', ''),
-                                timestamp=data.get('timestamp', ''),
-                                filename=data.get('filename', ''),
-                                offset=int(data.get('offset', 0)),
-                                length=int(data.get('length', 0)),
-                            )
-                    except Exception:
-                        continue
+                    # Retry with exponential backoff for 503 errors
+                    for attempt in range(3):
+                        try:
+                            resp = await self._client.get(url, params=params, timeout=15.0)
+                            if resp.status_code == 200 and resp.text.strip():
+                                data = json.loads(resp.text.strip().split('\n')[0])
+                                return CommonCrawlRecord(
+                                    slug=slug.lower(),
+                                    url=data.get('url', ''),
+                                    timestamp=data.get('timestamp', ''),
+                                    filename=data.get('filename', ''),
+                                    offset=int(data.get('offset', 0)),
+                                    length=int(data.get('length', 0)),
+                                )
+                            elif resp.status_code == 503:
+                                # Rate limited - wait and retry
+                                await asyncio.sleep(2 ** attempt)
+                                continue
+                            else:
+                                break  # Other error, try next index
+                        except Exception:
+                            break  # Network error, try next index
                 
                 return None
         
         logger.info(f"Looking up {len(slugs)} slugs in Common Crawl CDX...")
         
-        # Process in batches for progress
-        batch_size = 500
+        # Process in batches for progress (smaller batches to avoid rate limiting)
+        batch_size = 100
         for i in range(0, len(slugs), batch_size):
             batch = slugs[i:i + batch_size]
             tasks = [lookup_slug(s) for s in batch]
@@ -769,6 +777,10 @@ class CommonCrawlEnumerator:
             
             found = sum(1 for r in batch_results if r)
             logger.info(f"  {i + len(batch)}/{len(slugs)}: found {found}/{len(batch)} in CDX")
+            
+            # Small delay between batches to avoid rate limiting
+            if i + batch_size < len(slugs):
+                await asyncio.sleep(1)
         
         logger.info(f"Found WARC info for {len(results)}/{len(slugs)} slugs")
         return results
