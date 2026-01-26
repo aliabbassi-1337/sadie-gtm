@@ -17,16 +17,7 @@ from services.ingestor.base import BaseIngestor
 from services.ingestor.registry import register
 from services.ingestor.models.base import IngestStats
 from services.ingestor.models.crawl import CrawledHotel, URL_PATTERNS
-from db.client import get_conn, queries
-
-
-# Engine display names
-ENGINE_NAMES = {
-    "cloudbeds": "Cloudbeds",
-    "mews": "Mews",
-    "rms": "RMS Cloud",
-    "siteminder": "SiteMinder",
-}
+from services.ingestor import repo
 
 
 @register("crawl")
@@ -62,6 +53,7 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
         self.file_path = file_path
         self.slugs = slugs
         self._booking_engine_id: Optional[int] = None
+        self._engine_name: Optional[str] = None
     
     @property
     def source_name(self) -> str:
@@ -91,9 +83,12 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
             logger.error(f"Directory not found: {dir_path}")
             return ingestors
         
+        # Known engine patterns
+        known_engines = ["cloudbeds", "mews", "rms", "siteminder"]
+        
         for txt_file in path.glob("*.txt"):
             filename_lower = txt_file.name.lower()
-            for engine in ENGINE_NAMES.keys():
+            for engine in known_engines:
                 if engine in filename_lower:
                     ingestors.append(cls(engine=engine, file_path=str(txt_file)))
                     break
@@ -162,29 +157,40 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
             return None
         return record
     
+    async def _get_engine_display_name(self) -> str:
+        """
+        Get the display name for this engine from the database.
+        Falls back to title case if not found.
+        """
+        if self._engine_name:
+            return self._engine_name
+        
+        # Try to find existing engine in DB
+        engine = await repo.get_booking_engine_by_name(self.engine.title())
+        if engine:
+            self._engine_name = engine["name"]
+            return self._engine_name
+        
+        # Known display names as fallback
+        fallbacks = {
+            "cloudbeds": "Cloudbeds",
+            "mews": "Mews",
+            "rms": "RMS Cloud",
+            "siteminder": "SiteMinder",
+        }
+        self._engine_name = fallbacks.get(self.engine, self.engine.title())
+        return self._engine_name
+    
     async def _get_or_create_booking_engine_id(self) -> Optional[int]:
-        """Get or create the booking engine ID using proper queries."""
+        """Get or create the booking engine ID from the database."""
         if self._booking_engine_id:
             return self._booking_engine_id
         
-        engine_name = ENGINE_NAMES.get(self.engine, self.engine.title())
-        
-        async with get_conn() as conn:
-            # Try to get existing
-            row = await queries.get_booking_engine_by_name(conn, name=engine_name)
-            if row:
-                self._booking_engine_id = row["id"]
-                return self._booking_engine_id
-            
-            # Create new
-            engine_id = await queries.insert_booking_engine(
-                conn,
-                name=engine_name,
-                domains=None,
-                tier=1,
-            )
-            self._booking_engine_id = engine_id
-            return engine_id
+        engine_name = await self._get_engine_display_name()
+        self._booking_engine_id = await repo.get_or_create_booking_engine(
+            name=engine_name, tier=1
+        )
+        return self._booking_engine_id
     
     async def _batch_save(self, records: List[CrawledHotel], batch_size: int = 500) -> int:
         """
@@ -206,57 +212,32 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
         saved = 0
         skipped = 0
         
-        async with get_conn() as conn:
-            for i in range(0, len(records), batch_size):
-                batch = records[i:i + batch_size]
-                
-                for record in batch:
-                    try:
-                        # Check if booking URL already exists
-                        existing = await queries.get_hotel_by_booking_url(
-                            conn, booking_url=record.booking_url
-                        )
-                        if existing:
-                            skipped += 1
-                            continue
-                        
-                        # Insert hotel with placeholder name
-                        hotel_id = await queries.insert_hotel_with_external_id(
-                            conn,
-                            name=record.name,
-                            website=None,
-                            source=record.source,
-                            status=0,  # PENDING
-                            address=None,
-                            city=None,
-                            state=None,
-                            country="USA",
-                            phone=None,
-                            category=None,
-                            external_id=record.external_id,
-                            external_id_type=record.external_id_type,
-                        )
-                        
-                        if not hotel_id:
-                            continue
-                        
-                        # Link booking engine
-                        await queries.insert_hotel_booking_engine(
-                            conn,
-                            hotel_id=hotel_id,
-                            booking_engine_id=engine_id,
-                            booking_url=record.booking_url,
-                            engine_property_id=record.slug,
-                            detection_method=record.detection_method,
-                            status=1,
-                        )
-                        
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            
+            for record in batch:
+                try:
+                    hotel_id = await repo.insert_crawled_hotel(
+                        name=record.name,
+                        source=record.source,
+                        external_id=record.external_id,
+                        external_id_type=record.external_id_type,
+                        booking_engine_id=engine_id,
+                        booking_url=record.booking_url,
+                        slug=record.slug,
+                        detection_method=record.detection_method,
+                    )
+                    
+                    if hotel_id:
                         saved += 1
+                    else:
+                        skipped += 1
                         
-                    except Exception as e:
-                        logger.debug(f"Error saving {record.slug}: {e}")
-                        continue
-                
-                logger.info(f"  Batch {i // batch_size + 1}: {i + len(batch)}/{len(records)} processed ({saved} saved, {skipped} skipped)")
+                except Exception as e:
+                    logger.debug(f"Error saving {record.slug}: {e}")
+                    skipped += 1
+                    continue
+            
+            logger.info(f"  Batch {i // batch_size + 1}: {i + len(batch)}/{len(records)} processed ({saved} saved, {skipped} skipped)")
         
         return saved
