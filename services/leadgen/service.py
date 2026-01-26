@@ -2047,33 +2047,115 @@ class Service(IService):
             engine_id = await repo.insert_booking_engine(name=engine_name, tier=tier)
             logger.info(f"Created {engine_name} booking engine with id {engine_id}")
         
-        # Use CrawlIngester for Cloudbeds (fast path with Common Crawl)
+        # Load slugs from file
+        lines = file_path.read_text().strip().split("\n")
+        all_slugs = list(set([s.strip().lower() for s in lines if s.strip()]))
+        stats["total"] = len(all_slugs)
+        
+        logger.info(f"Loaded {len(all_slugs)} unique slugs")
+        
+        # Load checkpoint to skip already processed
+        processed_slugs = set()
+        if checkpoint_file:
+            from pathlib import Path
+            cp = Path(checkpoint_file)
+            if cp.exists():
+                processed_slugs = set(cp.read_text().strip().split('\n'))
+                logger.info(f"Resuming: {len(processed_slugs)} already processed")
+        
+        slugs_to_process = [s for s in all_slugs if s not in processed_slugs]
+        logger.info(f"Processing {len(slugs_to_process)} slugs...")
+        
+        if not slugs_to_process:
+            logger.info("All slugs already processed!")
+            return stats
+        
+        # Process incrementally in batches - fetch, extract, save immediately
+        from .booking_engines import CommonCrawlEnumerator, CrawlIngester
+        
+        batch_size = 100  # Save to DB every 100 hotels
+        
         if booking_engine.lower() == "cloudbeds" and use_common_crawl:
-            logger.info("Using Common Crawl S3 archives for fast extraction...")
+            logger.info("Using Common Crawl S3 archives (incremental save)...")
             
-            ingester = CrawlIngester(
-                checkpoint_file=checkpoint_file,
-                concurrency=concurrency,
-            )
-            hotels = await ingester.ingest_cloudbeds_file(
-                str(file_path),
-                use_common_crawl=True,
-            )
-            stats["total"] = len(hotels)
+            async with CommonCrawlEnumerator() as enumerator:
+                # Process in batches
+                for batch_start in range(0, len(slugs_to_process), batch_size):
+                    batch_slugs = slugs_to_process[batch_start:batch_start + batch_size]
+                    
+                    # Step 1: Look up in CDX
+                    cdx_records = await enumerator.lookup_slugs_in_cdx(batch_slugs, concurrency=concurrency)
+                    
+                    # Step 2: Fetch HTML and extract
+                    hotels = []
+                    semaphore = asyncio.Semaphore(concurrency)
+                    
+                    async def fetch_and_extract(slug, record):
+                        async with semaphore:
+                            html = await enumerator.fetch_archived_html(record)
+                            if html:
+                                return enumerator.extract_hotel_info(html, slug)
+                            return None
+                    
+                    tasks = [fetch_and_extract(s, r) for s, r in cdx_records.items()]
+                    results = await asyncio.gather(*tasks)
+                    hotels = [r for r in results if r and r.get('name')]
+                    
+                    # Step 3: Save to DB immediately
+                    batch_stats = await self._save_hotels_batch(
+                        hotels, engine_id, booking_engine, source_tag,
+                        fuzzy_match, fuzzy_threshold
+                    )
+                    
+                    # Update stats
+                    for key in batch_stats:
+                        stats[key] = stats.get(key, 0) + batch_stats[key]
+                    
+                    # Save checkpoint
+                    if checkpoint_file:
+                        with open(checkpoint_file, 'a') as f:
+                            for slug in batch_slugs:
+                                f.write(f"{slug}\n")
+                    
+                    logger.info(f"  Batch {batch_start + len(batch_slugs)}/{len(slugs_to_process)}: "
+                               f"+{batch_stats['inserted']} new, +{batch_stats['updated']} updated")
         else:
-            # Fallback: use old Wayback method for other engines
+            # Wayback fallback - also incremental
             hotels = await self._scrape_hotels_wayback(
                 file_path, booking_engine, concurrency
             )
-            stats["total"] = len(hotels)
+            batch_stats = await self._save_hotels_batch(
+                hotels, engine_id, booking_engine, source_tag,
+                fuzzy_match, fuzzy_threshold
+            )
+            for key in batch_stats:
+                stats[key] = stats.get(key, 0) + batch_stats[key]
         
-        # Insert into database with fuzzy matching
-        logger.info(f"Inserting {len(hotels)} hotels into database...")
+        logger.info(f"Ingest complete: {stats}")
+        return stats
+    
+    async def _save_hotels_batch(
+        self,
+        hotels: List[Dict],
+        engine_id: int,
+        booking_engine: str,
+        source_tag: str,
+        fuzzy_match: bool,
+        fuzzy_threshold: float,
+    ) -> Dict:
+        """Save a batch of hotels to DB with deduplication."""
+        stats = {
+            "inserted": 0,
+            "updated": 0,
+            "fuzzy_matched": 0,
+            "websites_found": 0,
+            "engines_linked": 0,
+            "skipped_no_name": 0,
+            "skipped_duplicate": 0,
+            "errors": 0,
+        }
         
-        for i, hotel in enumerate(hotels):
-            if (i + 1) % 500 == 0:
-                logger.info(f"  Processed {i + 1}/{len(hotels)}...")
-            
+        for hotel in hotels:
             try:
                 name = hotel.get("name")
                 if not name:
@@ -2083,7 +2165,7 @@ class Service(IService):
                 slug = hotel.get("slug", "")
                 city = hotel.get("city")
                 country = hotel.get("country", "USA")
-                website = hotel.get("website")  # May be extracted from page
+                website = hotel.get("website")
                 booking_url = hotel.get("booking_url", "")
                 
                 external_id = f"{booking_engine.lower()}_{slug}"
@@ -2091,19 +2173,12 @@ class Service(IService):
                 
                 async with get_conn() as conn:
                     existing = None
-                    match_type = None
                     
                     # Try exact match first
                     existing = await conn.fetchrow(
-                        """
-                        SELECT id, source, website FROM sadie_gtm.hotels
-                        WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
-                        LIMIT 1
-                        """,
+                        "SELECT id, source, website FROM sadie_gtm.hotels WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 1",
                         name
                     )
-                    if existing:
-                        match_type = "exact"
                     
                     # Try fuzzy match if enabled and no exact match
                     if not existing and fuzzy_match:
@@ -2114,27 +2189,20 @@ class Service(IService):
                                 FROM sadie_gtm.hotels
                                 WHERE similarity(name, $1) > $2
                                   AND ($3::text IS NULL OR city IS NULL OR LOWER(city) = LOWER($3))
-                                ORDER BY sim DESC
-                                LIMIT 1
+                                ORDER BY sim DESC LIMIT 1
                                 """,
                                 name, fuzzy_threshold, city
                             )
                             if existing:
-                                match_type = "fuzzy"
                                 stats["fuzzy_matched"] += 1
-                                logger.debug(f"Fuzzy matched: '{name}' -> '{existing['name']}' (sim={existing.get('sim', 0):.2f})")
-                        except Exception as e:
-                            # pg_trgm extension might not be installed
-                            if "similarity" in str(e):
-                                logger.warning("pg_trgm extension not available, skipping fuzzy match")
-                                fuzzy_match = False  # Disable for rest of run
+                        except Exception:
+                            pass  # pg_trgm not installed
                     
                     if existing:
                         hotel_id = existing["id"]
                         current_source = existing["source"] or ""
                         current_website = existing["website"]
                         
-                        # Append source if not already present
                         updates = []
                         params = []
                         
@@ -2143,7 +2211,6 @@ class Service(IService):
                             updates.append("source = $1")
                             params.append(new_source)
                         
-                        # Update website if we found one and it's missing
                         if website and not current_website:
                             updates.append(f"website = ${len(params) + 1}")
                             params.append(website)
@@ -2158,10 +2225,9 @@ class Service(IService):
                         
                         stats["updated"] += 1
                     else:
-                        # Insert new hotel
                         hotel_id = await repo.insert_hotel(
                             name=name,
-                            website=website,  # Use extracted website if available
+                            website=website,
                             city=city,
                             country=country,
                             source=source_tag,
@@ -2173,7 +2239,6 @@ class Service(IService):
                         if website:
                             stats["websites_found"] += 1
                 
-                # Link to booking engine
                 if hotel_id:
                     await repo.insert_hotel_booking_engine(
                         hotel_id=hotel_id,
@@ -2189,10 +2254,8 @@ class Service(IService):
                 if "duplicate" in str(e).lower() or "unique" in str(e).lower():
                     stats["skipped_duplicate"] += 1
                 else:
-                    logger.error(f"Error ingesting {hotel.get('name', 'unknown')}: {e}")
                     stats["errors"] += 1
         
-        logger.info(f"Ingest complete: {stats}")
         return stats
     
     async def _scrape_hotels_wayback(

@@ -952,6 +952,208 @@ class CrawlIngester:
         return hotels
 
 
+class RMSScanner:
+    """
+    Scan RMS Cloud for hotel properties by ID enumeration.
+    
+    RMS uses numeric IDs that are sparse (not sequential).
+    We need to scan ranges to find valid properties.
+    
+    URL patterns:
+    - ibe13.rmscloud.com/{id}/3 (newer)
+    - bookings12.rmscloud.com/search/index/{id}/3 (older)
+    
+    RATE LIMITING:
+    - Default: 10 concurrent, 0.2s delay = ~50 req/sec
+    - Conservative: 5 concurrent, 0.5s delay = ~10 req/sec
+    - Distributed: Split ranges across multiple EC2 instances
+    
+    For 20,000 IDs:
+    - Aggressive (100 conc): ~3 min, HIGH ban risk
+    - Default (10 conc, 0.2s): ~40 min, medium risk
+    - Conservative (5 conc, 0.5s): ~2 hours, low risk
+    - Distributed (7 EC2 × 10 conc): ~6 min, low risk
+    """
+    
+    # Known RMS subdomains (from Common Crawl analysis)
+    SUBDOMAINS = [
+        "ibe13.rmscloud.com",
+        "ibe12.rmscloud.com", 
+        "ibe14.rmscloud.com",
+        "bookings12.rmscloud.com",
+        "bookings10.rmscloud.com",
+        "bookings8.rmscloud.com",
+    ]
+    
+    def __init__(
+        self,
+        concurrency: int = 10,  # Conservative default
+        timeout: float = 5.0,
+        delay: float = 0.2,  # Delay between requests
+    ):
+        self.concurrency = concurrency
+        self.timeout = timeout
+        self.delay = delay
+        self._client: Optional[httpx.AsyncClient] = None
+    
+    async def __aenter__(self):
+        self._client = httpx.AsyncClient(
+            timeout=self.timeout,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; HotelBot/1.0)"},
+            follow_redirects=True,
+        )
+        return self
+    
+    async def __aexit__(self, *args):
+        if self._client:
+            await self._client.aclose()
+    
+    async def check_id(self, property_id: int, subdomain: str = "ibe13.rmscloud.com") -> Optional[Dict]:
+        """
+        Check if a property ID exists and extract hotel info.
+        
+        Returns dict with id, name, booking_url or None if not found.
+        """
+        if subdomain.startswith("ibe"):
+            url = f"https://{subdomain}/{property_id}/3"
+        else:
+            url = f"https://{subdomain}/search/index/{property_id}/3"
+        
+        try:
+            # Rate limiting delay
+            if self.delay > 0:
+                await asyncio.sleep(self.delay)
+            
+            resp = await self._client.get(url)
+            
+            # Handle rate limiting
+            if resp.status_code == 429:
+                logger.warning(f"Rate limited at ID {property_id}, backing off...")
+                await asyncio.sleep(5)
+                return None
+            
+            # Valid property returns 200, invalid returns 404 or redirect
+            if resp.status_code != 200:
+                return None
+            
+            html = resp.text
+            
+            # Check for error pages
+            if "not found" in html.lower() or "error" in html.lower()[:500]:
+                return None
+            
+            # Extract hotel name
+            name = None
+            
+            # Try multiple extraction methods
+            patterns = [
+                r'<div[^>]*class="[^"]*prop-name[^"]*"[^>]*>([^<]+)</div>',
+                r'<h1[^>]*>([^<]+)</h1>',
+                r'<title>([^<]+)</title>',
+                r'"propertyName"\s*:\s*"([^"]+)"',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, html, re.IGNORECASE)
+                if match:
+                    raw_name = match.group(1).strip()
+                    # Clean up
+                    raw_name = re.split(r'\s*[-|–]\s*', raw_name)[0].strip()
+                    if raw_name and raw_name.lower() not in ['search', 'booking', 'rms']:
+                        name = raw_name
+                        break
+            
+            if not name:
+                return None
+            
+            return {
+                "id": property_id,
+                "name": name,
+                "booking_url": url,
+                "subdomain": subdomain,
+            }
+            
+        except Exception:
+            return None
+    
+    async def scan_range(
+        self,
+        start_id: int,
+        end_id: int,
+        subdomain: str = "ibe13.rmscloud.com",
+        on_found: Optional[callable] = None,
+    ) -> List[Dict]:
+        """
+        Scan a range of IDs for valid properties.
+        
+        Args:
+            start_id: First ID to check
+            end_id: Last ID to check (inclusive)
+            subdomain: RMS subdomain to scan
+            on_found: Optional callback(hotel_dict) for incremental processing
+            
+        Returns list of found hotels.
+        """
+        found = []
+        semaphore = asyncio.Semaphore(self.concurrency)
+        
+        async def check_with_limit(property_id: int) -> Optional[Dict]:
+            async with semaphore:
+                return await self.check_id(property_id, subdomain)
+        
+        total = end_id - start_id + 1
+        batch_size = 1000
+        
+        for batch_start in range(start_id, end_id + 1, batch_size):
+            batch_end = min(batch_start + batch_size - 1, end_id)
+            tasks = [check_with_limit(i) for i in range(batch_start, batch_end + 1)]
+            results = await asyncio.gather(*tasks)
+            
+            batch_found = [r for r in results if r]
+            found.extend(batch_found)
+            
+            # Callback for incremental processing
+            if on_found:
+                for hotel in batch_found:
+                    await on_found(hotel)
+            
+            processed = batch_end - start_id + 1
+            logger.info(f"  Scanned {processed}/{total} IDs, found {len(found)} properties")
+        
+        return found
+    
+    async def scan_all_subdomains(
+        self,
+        start_id: int = 1,
+        end_id: int = 20000,
+        on_found: Optional[callable] = None,
+    ) -> List[Dict]:
+        """
+        Scan all known RMS subdomains for properties.
+        
+        Default range 1-20000 covers most properties (~30 min at 100 concurrency).
+        """
+        all_found = []
+        seen_names = set()  # Dedupe by name
+        
+        for subdomain in self.SUBDOMAINS:
+            logger.info(f"Scanning {subdomain} ({start_id}-{end_id})...")
+            
+            found = await self.scan_range(
+                start_id, end_id, subdomain, on_found
+            )
+            
+            # Dedupe
+            for hotel in found:
+                name_key = hotel["name"].lower().strip()
+                if name_key not in seen_names:
+                    seen_names.add(name_key)
+                    all_found.append(hotel)
+        
+        logger.info(f"Total unique properties: {len(all_found)}")
+        return all_found
+
+
 # Known Cloudbeds slugs for reference/testing
 KNOWN_SLUGS = {
     "cl6l0S": {"name": "The Kendall", "property_id": 317832, "city": "Boerne", "state": "TX"},
