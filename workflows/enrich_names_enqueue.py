@@ -50,9 +50,9 @@ async def run(
             return 0
         
         # Count what needs enrichment
-        needs_name = sum(1 for h in hotels if h.get("needs_name"))
-        needs_address = sum(1 for h in hotels if h.get("needs_address"))
-        needs_both = sum(1 for h in hotels if h.get("needs_name") and h.get("needs_address"))
+        needs_name = sum(1 for h in hotels if h.needs_name)
+        needs_address = sum(1 for h in hotels if h.needs_address)
+        needs_both = sum(1 for h in hotels if h.needs_name and h.needs_address)
         
         logger.info(f"Found {len(hotels)} hotels needing enrichment")
         logger.info(f"  Needs name: {needs_name}")
@@ -62,7 +62,7 @@ async def run(
         # Group by engine for logging
         by_engine = {}
         for h in hotels:
-            eng = h.get("engine_name", "unknown")
+            eng = h.engine_name or "unknown"
             by_engine[eng] = by_engine.get(eng, 0) + 1
         for eng, count in sorted(by_engine.items()):
             logger.info(f"  {eng}: {count}")
@@ -74,10 +74,10 @@ async def run(
         # Create messages
         messages = [
             {
-                "hotel_id": h["id"],
-                "booking_url": h["booking_url"],
-                "slug": h.get("slug"),
-                "engine": h.get("engine_name"),
+                "hotel_id": h.id,
+                "booking_url": h.booking_url,
+                "slug": h.slug,
+                "engine": h.engine_name,
             }
             for h in hotels
         ]

@@ -64,21 +64,21 @@ async def process_message(
         delay=delay,
     )
     
-    if result["skipped"]:
+    if result.skipped:
         # Already enriched
         delete_message(queue_url, receipt_handle)
         return (True, False, False)
     
-    if result["success"]:
+    if result.success:
         parts = []
-        if result["name_updated"]:
+        if result.name_updated:
             parts.append("name")
-        if result["address_updated"]:
+        if result.address_updated:
             parts.append("address")
         if parts:
             logger.info(f"  Updated hotel {hotel_id}: {', '.join(parts)}")
         delete_message(queue_url, receipt_handle)
-        return (True, result["name_updated"], result["address_updated"])
+        return (True, result.name_updated, result.address_updated)
     else:
         # Error - don't delete, will retry
         return (False, False, False)
