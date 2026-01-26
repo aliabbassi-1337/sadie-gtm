@@ -31,6 +31,8 @@ class HotelLead(BaseModel):
     # Booking engine
     booking_engine_name: Optional[str] = None
     booking_engine_tier: Optional[int] = None
+    booking_url: Optional[str] = None
+    engine_property_id: Optional[str] = None
 
     # Enrichment data
     room_count: Optional[int] = None

@@ -2171,6 +2171,23 @@ class Service(IService):
                 external_id = f"{booking_engine.lower()}_{slug}"
                 external_id_type = f"{booking_engine.lower()}_crawl"
                 
+                # STEP 0: Check if booking URL already exists (most reliable match)
+                existing_by_url = await repo.get_hotel_by_booking_url(booking_url)
+                if existing_by_url:
+                    # Hotel already has this booking URL - just update detection method
+                    hotel_id = existing_by_url["hotel_id"]
+                    await repo.insert_hotel_booking_engine(
+                        hotel_id=hotel_id,
+                        booking_engine_id=engine_id,
+                        booking_url=booking_url,
+                        engine_property_id=slug,
+                        detection_method="crawl_import",
+                        status=1,
+                    )
+                    stats["updated"] += 1
+                    stats["engines_linked"] += 1
+                    continue
+                
                 async with get_conn() as conn:
                     existing = None
                     
@@ -2225,13 +2242,14 @@ class Service(IService):
                         
                         stats["updated"] += 1
                     else:
+                        # Insert at DETECTED status - we already know their booking engine
                         hotel_id = await repo.insert_hotel(
                             name=name,
                             website=website,
                             city=city,
                             country=country,
                             source=source_tag,
-                            status=0,
+                            status=PipelineStage.DETECTED,
                             external_id=external_id,
                             external_id_type=external_id_type,
                         )

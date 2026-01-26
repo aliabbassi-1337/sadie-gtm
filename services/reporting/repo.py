@@ -24,6 +24,18 @@ async def get_leads_for_state(state: str, source_pattern: str = None) -> List[Ho
         return [HotelLead.model_validate(dict(row)) for row in results]
 
 
+async def get_leads_by_booking_engine(booking_engine: str, source_pattern: str) -> List[HotelLead]:
+    """Get hotel leads by booking engine and source pattern.
+    
+    For crawl data exports - doesn't require launched status.
+    """
+    async with get_conn() as conn:
+        results = await queries.get_leads_by_booking_engine(
+            conn, booking_engine=booking_engine, source_pattern=source_pattern
+        )
+        return [HotelLead.model_validate(dict(row)) for row in results]
+
+
 async def get_city_stats(city: str, state: str) -> CityStats:
     """Get analytics stats for a city."""
     async with get_conn() as conn:
@@ -137,3 +149,29 @@ async def get_launched_count() -> int:
     async with get_conn() as conn:
         result = await queries.get_launched_count(conn)
         return result["count"] if result else 0
+
+
+# ============================================================================
+# PIPELINE STATUS FUNCTIONS
+# ============================================================================
+
+
+async def get_pipeline_summary() -> list:
+    """Get count of hotels at each pipeline stage."""
+    async with get_conn() as conn:
+        results = await queries.get_pipeline_summary(conn)
+        return [(r['status'], r['count']) for r in results]
+
+
+async def get_pipeline_by_source() -> list:
+    """Get pipeline breakdown by source."""
+    async with get_conn() as conn:
+        results = await queries.get_pipeline_by_source(conn)
+        return [dict(r) for r in results]
+
+
+async def get_pipeline_by_source_name(source: str) -> list:
+    """Get pipeline breakdown for a specific source."""
+    async with get_conn() as conn:
+        results = await queries.get_pipeline_by_source_name(conn, source=source)
+        return [(r['status'], r['count']) for r in results]

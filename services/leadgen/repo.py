@@ -74,9 +74,9 @@ async def get_hotels_pending_detection(
     """Get hotels that need booking engine detection.
 
     Criteria:
-    - status = 0 (scraped)
+    - status < DETECTED (30): INGESTED, HAS_WEBSITE, or HAS_LOCATION
     - website is not null
-    - not a big chain (Marriott, Hilton, IHG, Hyatt, Wyndham, etc.)
+    - no hotel_booking_engines record yet (excludes reverse lookup leads)
     - optionally filtered by categories (e.g., ['hotel', 'motel'])
     """
     async with get_conn() as conn:
@@ -175,6 +175,23 @@ async def insert_booking_engine(
             tier=tier,
         )
         return result
+
+
+async def get_hotel_by_booking_url(booking_url: str) -> Optional[dict]:
+    """Find hotel by booking URL.
+    
+    Used for deduplication when ingesting crawled booking engine URLs.
+    If this booking URL already exists, returns hotel info so we can update
+    rather than create a duplicate.
+    
+    Returns dict with: hotel_id, booking_engine_id, booking_url, detection_method,
+                       name, website, status
+    """
+    async with get_conn() as conn:
+        result = await queries.get_hotel_by_booking_url(conn, booking_url=booking_url)
+        if result:
+            return dict(result)
+        return None
 
 
 async def insert_hotel_booking_engine(

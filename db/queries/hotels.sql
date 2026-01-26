@@ -87,7 +87,8 @@ WHERE id = :hotel_id;
 
 -- name: get_hotels_pending_detection
 -- Get hotels that need booking engine detection
--- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet
+-- Criteria: status < DETECTED (30), has website, no booking engine detected yet
+-- Includes: INGESTED (0), HAS_WEBSITE (10), HAS_LOCATION (20)
 SELECT
     h.id,
     h.name,
@@ -111,7 +112,7 @@ SELECT
     h.updated_at
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-WHERE h.status = 0
+WHERE h.status >= 0 AND h.status < 30  -- INGESTED, HAS_WEBSITE, HAS_LOCATION
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
@@ -119,7 +120,7 @@ LIMIT :limit;
 
 -- name: get_hotels_pending_detection_by_categories
 -- Get hotels that need booking engine detection, filtered by categories
--- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet, in categories list
+-- Criteria: status < DETECTED (30), has website, no booking engine detected yet, in categories list
 SELECT
     h.id,
     h.name,
@@ -143,7 +144,7 @@ SELECT
     h.updated_at
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-WHERE h.status = 0
+WHERE h.status >= 0 AND h.status < 30  -- INGESTED, HAS_WEBSITE, HAS_LOCATION
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
@@ -296,6 +297,40 @@ LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
   AND h.status = 1
   AND h.source LIKE :source_pattern;
+
+-- name: get_leads_by_booking_engine
+-- Get hotel leads by booking engine name and source pattern
+-- For crawl data exports (doesn't require launched status)
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.category,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hbe.booking_url,
+    hbe.engine_property_id,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE be.name = :booking_engine
+  AND h.source LIKE :source_pattern
+ORDER BY h.city, h.name;
 
 -- name: get_city_stats^
 -- Get stats for a city (for analytics tab)
@@ -844,6 +879,124 @@ AND ST_Within(
     location::geometry,
     ST_MakeEnvelope(:lng_min, :lat_min, :lng_max, :lat_max, 4326)
 );
+
+-- ============================================================================
+-- PIPELINE STATE MACHINE QUERIES
+-- ============================================================================
+
+-- name: get_pipeline_summary
+-- Get count of hotels at each pipeline stage
+SELECT 
+    status,
+    COUNT(*) AS count
+FROM sadie_gtm.hotels
+GROUP BY status
+ORDER BY status DESC;
+
+-- name: get_pipeline_by_source
+-- Get pipeline breakdown by source
+SELECT 
+    source,
+    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS ingested,
+    SUM(CASE WHEN status = 10 THEN 1 ELSE 0 END) AS has_website,
+    SUM(CASE WHEN status = 20 THEN 1 ELSE 0 END) AS has_location,
+    SUM(CASE WHEN status = 30 THEN 1 ELSE 0 END) AS detected,
+    SUM(CASE WHEN status = 40 THEN 1 ELSE 0 END) AS enriched,
+    SUM(CASE WHEN status = 100 THEN 1 ELSE 0 END) AS launched,
+    SUM(CASE WHEN status < 0 THEN 1 ELSE 0 END) AS rejected,
+    COUNT(*) AS total
+FROM sadie_gtm.hotels
+GROUP BY source
+ORDER BY total DESC;
+
+-- name: get_pipeline_by_source_name
+-- Get pipeline breakdown for a specific source
+SELECT 
+    status,
+    COUNT(*) AS count
+FROM sadie_gtm.hotels
+WHERE source = :source
+GROUP BY status
+ORDER BY status DESC;
+
+-- name: get_hotels_at_stage
+-- Get hotels at a specific pipeline stage
+SELECT
+    id, name, website, city, state, source,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude
+FROM sadie_gtm.hotels
+WHERE status = :stage
+ORDER BY id
+LIMIT :limit;
+
+-- name: get_hotels_needing_action
+-- Get hotels that need action (between stages, not terminal)
+SELECT
+    id, name, website, city, state, source, status,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude,
+    CASE 
+        WHEN status = 0 AND website IS NOT NULL THEN 'detect'
+        WHEN status = 0 THEN 'enrich_website'
+        WHEN status = 10 AND location IS NOT NULL THEN 'detect'
+        WHEN status = 10 THEN 'enrich_location'
+        WHEN status = 20 THEN 'detect'
+        WHEN status = 30 THEN 'enrich_room_count'
+        WHEN status = 40 THEN 'launch'
+        ELSE 'unknown'
+    END AS next_action
+FROM sadie_gtm.hotels
+WHERE status >= 0 AND status < 100
+ORDER BY status, id
+LIMIT :limit;
+
+-- name: advance_to_has_website!
+-- Advance hotels to HAS_WEBSITE stage after enrichment
+UPDATE sadie_gtm.hotels
+SET status = 10, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 10
+  AND website IS NOT NULL AND website != '';
+
+-- name: advance_to_has_location!
+-- Advance hotels to HAS_LOCATION stage after location enrichment
+UPDATE sadie_gtm.hotels
+SET status = 20, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 20
+  AND location IS NOT NULL;
+
+-- name: advance_to_detected!
+-- Advance hotels to DETECTED stage after booking engine detection
+UPDATE sadie_gtm.hotels
+SET status = 30, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 30;
+
+-- name: advance_to_enriched!
+-- Advance hotels to ENRICHED stage after all enrichments
+UPDATE sadie_gtm.hotels
+SET status = 40, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 40;
+
+-- name: advance_to_launched!
+-- Advance hotels to LAUNCHED stage
+UPDATE sadie_gtm.hotels
+SET status = 100, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 100;
+
+-- name: set_terminal_status!
+-- Set a terminal (rejected) status
+UPDATE sadie_gtm.hotels
+SET status = :terminal_status, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- ============================================================================
+-- COMMON CRAWL / REVERSE LOOKUP QUERIES
+-- ============================================================================
 
 -- name: find_hotel_by_name^
 -- Find hotel by normalized name (case-insensitive, trimmed)

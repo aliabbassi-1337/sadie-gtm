@@ -38,6 +38,21 @@ class IService(ABC):
         pass
 
     @abstractmethod
+    async def export_by_booking_engine(
+        self,
+        booking_engine: str,
+        source_pattern: str = "%commoncrawl%",
+    ) -> tuple[str, int]:
+        """Generate Excel report for hotels with a specific booking engine from crawl data.
+
+        Creates files like: cloudbeds_crawldata.xlsx
+
+        Returns:
+            Tuple of (s3_uri, lead_count)
+        """
+        pass
+
+    @abstractmethod
     def send_slack_notification(
         self,
         location: str,
@@ -94,6 +109,26 @@ class IService(ABC):
     async def get_launched_count(self) -> int:
         """Count hotels that have been launched."""
         pass
+
+    # =========================================================================
+    # PIPELINE STATUS METHODS
+    # =========================================================================
+
+    @abstractmethod
+    async def get_pipeline_summary(self) -> list:
+        """Get count of hotels at each pipeline stage."""
+        pass
+
+    @abstractmethod
+    async def get_pipeline_by_source(self) -> list:
+        """Get pipeline breakdown by source."""
+        pass
+
+    @abstractmethod
+    async def get_pipeline_by_source_name(self, source: str) -> list:
+        """Get pipeline breakdown for a specific source."""
+        pass
+
 
 class Service(IService):
     """Implementation of the reporting service."""
@@ -200,6 +235,135 @@ class Service(IService):
             return s3_uri, len(leads)
         finally:
             os.unlink(tmp_path)
+
+    async def export_by_booking_engine(
+        self,
+        booking_engine: str,
+        source_pattern: str = "%commoncrawl%",
+    ) -> tuple[str, int]:
+        """Generate Excel report for hotels with a specific booking engine from crawl data.
+
+        Creates files like: cloudbeds_crawldata.xlsx
+        """
+        import subprocess
+
+        # Normalize engine name for query (e.g., "cloudbeds" -> "Cloudbeds")
+        engine_name = booking_engine.title()
+        if booking_engine.lower() == "rms":
+            engine_name = "RMS Cloud"
+        elif booking_engine.lower() == "siteminder":
+            engine_name = "SiteMinder"
+
+        logger.info(f"Generating crawl data report for {engine_name}")
+
+        # Get leads
+        leads = await repo.get_leads_by_booking_engine(engine_name, source_pattern)
+        logger.info(f"Found {len(leads)} leads for {engine_name}")
+
+        if not leads:
+            logger.warning(f"No leads found for {engine_name} with source pattern {source_pattern}")
+            return "", 0
+
+        # Create workbook with simplified leads sheet (no stats for crawl data)
+        workbook = self._create_crawl_workbook(leads, engine_name)
+
+        # Save to temp file and upload
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            workbook.save(tmp.name)
+            tmp_path = tmp.name
+
+        try:
+            # Filename: cloudbeds_crawldata.xlsx
+            source_tag = source_pattern.replace('%', '').replace('_', '')
+            filename = f"{booking_engine.lower()}_{source_tag}.xlsx"
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/crawl-data/{filename}"
+
+            # Try s5cmd first (faster)
+            result = subprocess.run(
+                ["s5cmd", "cp", tmp_path, s3_uri],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
+                s3_key = f"HotelLeadGen/crawl-data/{filename}"
+                s3_uri = upload_file(tmp_path, s3_key)
+
+            logger.info(f"Uploaded crawl data report to {s3_uri}")
+            return s3_uri, len(leads)
+        finally:
+            os.unlink(tmp_path)
+
+    def _create_crawl_workbook(self, leads: List[HotelLead], engine_name: str) -> Workbook:
+        """Create Excel workbook for crawl data (simpler format, no stats)."""
+        workbook = Workbook()
+
+        # Create leads sheet
+        leads_sheet = workbook.active
+        leads_sheet.title = "Leads"
+        self._populate_crawl_leads_sheet(leads_sheet, leads)
+
+        return workbook
+
+    def _populate_crawl_leads_sheet(self, sheet, leads: List[HotelLead]) -> None:
+        """Populate the crawl leads sheet with hotel data."""
+        # Headers for crawl data
+        headers = ["Hotel", "City", "Country", "Website", "Booking URL", "Booking Engine"]
+
+        # Style definitions
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        thin_border = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
+        )
+
+        # Write headers
+        for col, header in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+        # Write data rows
+        for row, lead in enumerate(leads, 2):
+            col = 1
+            # Hotel name
+            sheet.cell(row=row, column=col, value=lead.hotel_name).border = thin_border
+            col += 1
+
+            # City
+            sheet.cell(row=row, column=col, value=lead.city or "").border = thin_border
+            col += 1
+
+            # Country
+            sheet.cell(row=row, column=col, value=lead.country or "").border = thin_border
+            col += 1
+
+            # Website
+            sheet.cell(row=row, column=col, value=lead.website or "").border = thin_border
+            col += 1
+
+            # Booking URL
+            sheet.cell(row=row, column=col, value=lead.booking_url or "").border = thin_border
+            col += 1
+
+            # Booking engine
+            sheet.cell(row=row, column=col, value=lead.booking_engine_name or "").border = thin_border
+
+        # Auto-adjust column widths
+        for col in range(1, len(headers) + 1):
+            max_length = len(headers[col - 1])
+            for row in range(2, min(len(leads) + 2, 100)):  # Sample first 100 rows
+                cell_value = sheet.cell(row=row, column=col).value
+                if cell_value:
+                    max_length = max(max_length, len(str(cell_value)))
+            sheet.column_dimensions[get_column_letter(col)].width = min(max_length + 2, 60)
 
     def send_slack_notification(
         self,
@@ -515,3 +679,18 @@ class Service(IService):
         """Count hotels that have been launched."""
         return await repo.get_launched_count()
 
+    # =========================================================================
+    # PIPELINE STATUS METHODS
+    # =========================================================================
+
+    async def get_pipeline_summary(self) -> list:
+        """Get count of hotels at each pipeline stage."""
+        return await repo.get_pipeline_summary()
+
+    async def get_pipeline_by_source(self) -> list:
+        """Get pipeline breakdown by source."""
+        return await repo.get_pipeline_by_source()
+
+    async def get_pipeline_by_source_name(self, source: str) -> list:
+        """Get pipeline breakdown for a specific source."""
+        return await repo.get_pipeline_by_source_name(source)
