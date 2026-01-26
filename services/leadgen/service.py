@@ -1734,12 +1734,13 @@ class Service(IService):
                         stats["skipped_exists"] += 1
                         continue
 
-                # Insert hotel (uses latitude/longitude)
+                # Insert hotel at DETECTED stage (30) since booking engine is known
+                # These leads come with website + known booking engine
                 hotel_id = await repo.insert_hotel(
                     name=lead["name"],
                     website=website,
                     source=source,
-                    status=0,
+                    status=PipelineStage.DETECTED,  # Skip straight to DETECTED
                     latitude=lead.get("lat"),
                     longitude=lead.get("lng"),
                     external_id=external_id,
@@ -1917,7 +1918,7 @@ class Service(IService):
                         )
                     
                     if existing:
-                        # Update existing hotel: append source
+                        # Update existing hotel: append source and advance to DETECTED
                         hotel_id = existing["id"]
                         current_source = existing["source"] or ""
                         
@@ -1933,15 +1934,27 @@ class Service(IService):
                                 new_source, hotel_id
                             )
                         
+                        # Advance to DETECTED if they have a website
+                        await conn.execute(
+                            """
+                            UPDATE sadie_gtm.hotels 
+                            SET status = $1, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = $2 
+                              AND status < $1
+                              AND website IS NOT NULL AND website != ''
+                            """,
+                            PipelineStage.DETECTED, hotel_id
+                        )
+                        
                         stats["updated"] += 1
                     else:
-                        # Insert new hotel using repo pattern
+                        # Insert new hotel at INGESTED - needs website enrichment
                         hotel_id = await repo.insert_hotel(
                             name=name,
                             city=city,
                             country=country,
                             source=source_tag,
-                            status=0,
+                            status=PipelineStage.INGESTED,
                             external_id=external_id,
                             external_id_type="commoncrawl",
                         )
@@ -2044,11 +2057,11 @@ class Service(IService):
                 else:
                     name = slug
                 
-                # Insert hotel
+                # Insert hotel at INGESTED - needs name and website enrichment
                 hotel_id = await repo.insert_hotel(
                     name=name,
                     source=source_tag,
-                    status=0,
+                    status=PipelineStage.INGESTED,
                     external_id=external_id,
                     external_id_type=external_id_type,
                 )
