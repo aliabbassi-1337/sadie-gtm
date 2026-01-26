@@ -148,13 +148,8 @@ async def get_existing_booking_urls(booking_urls: List[str]) -> set:
         return set()
     
     async with get_conn() as conn:
-        results = await conn.fetch(
-            """
-            SELECT booking_url 
-            FROM sadie_gtm.hotel_booking_engines 
-            WHERE booking_url = ANY($1)
-            """,
-            booking_urls
+        results = await queries.get_existing_booking_urls(
+            conn, booking_urls=booking_urls
         )
         return {r["booking_url"] for r in results}
 
