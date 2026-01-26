@@ -25,24 +25,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncio
 import argparse
-from typing import List
 
 from loguru import logger
 
-from db.client import init_db, close_db, get_conn
+from db.client import init_db, close_db
 from services.reporting.service import Service
-
-
-async def get_distinct_states() -> List[str]:
-    """Get all distinct states that have hotels."""
-    async with get_conn() as conn:
-        results = await conn.fetch("""
-            SELECT DISTINCT state 
-            FROM sadie_gtm.hotels 
-            WHERE state IS NOT NULL AND state != ''
-            ORDER BY state
-        """)
-        return [r["state"] for r in results]
 
 
 async def export_city_workflow(
@@ -122,44 +109,16 @@ async def export_all_states_workflow(
 
     try:
         service = Service()
-        states = await get_distinct_states()
-        
-        logger.info(f"Found {len(states)} states with hotels")
-        
-        total_leads = 0
-        exports = []
-        
-        for state in states:
-            if not state:
-                continue
-            try:
-                logger.info(f"Exporting {state}...")
-                s3_uri, lead_count = await service.export_state(state, country, source_pattern=source)
-                if lead_count > 0:
-                    exports.append((state, s3_uri, lead_count))
-                    total_leads += lead_count
-                    logger.info(f"  {state}: {lead_count} leads -> {s3_uri}")
-                else:
-                    logger.info(f"  {state}: no leads")
-            except Exception as e:
-                logger.error(f"  {state}: failed - {e}")
-        
-        # Summary
-        logger.info("\n" + "=" * 50)
-        logger.info("EXPORT SUMMARY")
-        logger.info("=" * 50)
-        for state, s3_uri, count in exports:
-            logger.info(f"  {state}: {count} leads")
-        logger.info(f"Total: {total_leads} leads across {len(exports)} states")
-        
-        if notify and total_leads > 0:
+        result = await service.export_all_states(country=country, source_pattern=source)
+
+        if notify and result["total_leads"] > 0:
             service.send_slack_notification(
                 location="All States",
-                lead_count=total_leads,
-                s3_uri=f"{len(exports)} state exports",
+                lead_count=result["total_leads"],
+                s3_uri=f"{result['states']} state exports",
             )
-        
-        return {"states": len(exports), "total_leads": total_leads}
+
+        return result
 
     finally:
         await close_db()

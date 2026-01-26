@@ -175,3 +175,10 @@ async def get_pipeline_by_source_name(source: str) -> list:
     async with get_conn() as conn:
         results = await queries.get_pipeline_by_source_name(conn, source=source)
         return [(r['status'], r['count']) for r in results]
+
+
+async def get_distinct_states() -> List[str]:
+    """Get all distinct states that have hotels."""
+    async with get_conn() as conn:
+        results = await queries.get_distinct_states(conn)
+        return [r["state"] for r in results]
