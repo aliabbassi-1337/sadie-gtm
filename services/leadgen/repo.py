@@ -177,6 +177,23 @@ async def insert_booking_engine(
         return result
 
 
+async def get_hotel_by_booking_url(booking_url: str) -> Optional[dict]:
+    """Find hotel by booking URL.
+    
+    Used for deduplication when ingesting crawled booking engine URLs.
+    If this booking URL already exists, returns hotel info so we can update
+    rather than create a duplicate.
+    
+    Returns dict with: hotel_id, booking_engine_id, booking_url, detection_method,
+                       name, website, status
+    """
+    async with get_conn() as conn:
+        result = await queries.get_hotel_by_booking_url(conn, booking_url=booking_url)
+        if result:
+            return dict(result)
+        return None
+
+
 async def insert_hotel_booking_engine(
     hotel_id: int,
     booking_engine_id: Optional[int] = None,

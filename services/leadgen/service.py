@@ -1996,7 +1996,13 @@ class Service(IService):
         Ingest crawled booking engine URLs/slugs from a file.
         
         Reads a text file with one slug/URL per line and ingests into database.
-        Optionally scrapes hotel names from booking pages.
+        
+        Matching strategy:
+        1. Check if booking_url already exists in hotel_booking_engines
+           - If found: update that hotel's engine record (crawl data is more reliable)
+        2. Check if external_id already exists (re-run protection)
+           - If found: skip duplicate
+        3. If no match: insert new hotel at DETECTED status
         """
         from pathlib import Path
         from .constants import BOOKING_ENGINE_URL_PATTERNS, BOOKING_ENGINE_TIERS
@@ -2004,6 +2010,7 @@ class Service(IService):
         stats = {
             "total": 0,
             "inserted": 0,
+            "updated_existing": 0,
             "engines_linked": 0,
             "skipped_duplicate": 0,
             "errors": 0,
@@ -2055,19 +2062,33 @@ class Service(IService):
                 external_id = f"{booking_engine.lower()}_{slug}"
                 external_id_type = f"{booking_engine.lower()}_crawl"
                 
-                # For now, use slug as placeholder name (can scrape later)
-                # Clean up the slug to make a readable name
-                if scrape_names:
-                    # TODO: Implement async scraping with httpx
-                    name = slug  # Placeholder
-                else:
-                    name = slug
+                # STEP 1: Check if booking URL already exists (most reliable match)
+                existing = await repo.get_hotel_by_booking_url(booking_url)
                 
-                # Insert hotel at INGESTED - needs name and website enrichment
+                if existing:
+                    # Hotel already has this booking URL - update engine record
+                    # Crawl data is more reliable than detection, so update detection_method
+                    hotel_id = existing["hotel_id"]
+                    await repo.insert_hotel_booking_engine(
+                        hotel_id=hotel_id,
+                        booking_engine_id=engine_id,
+                        booking_url=booking_url,
+                        detection_method="crawl_import",  # Upgrade from detection
+                        status=1,
+                    )
+                    stats["updated_existing"] += 1
+                    stats["engines_linked"] += 1
+                    continue
+                
+                # STEP 2: No existing booking URL - insert new hotel
+                # Use slug as placeholder name
+                name = slug
+                
+                # Insert hotel at DETECTED - we already know their booking engine
                 hotel_id = await repo.insert_hotel(
                     name=name,
                     source=source_tag,
-                    status=PipelineStage.INGESTED,
+                    status=PipelineStage.DETECTED,
                     external_id=external_id,
                     external_id_type=external_id_type,
                 )
@@ -2085,6 +2106,7 @@ class Service(IService):
                     )
                     stats["engines_linked"] += 1
                 else:
+                    # insert_hotel returned None - likely external_id duplicate
                     stats["skipped_duplicate"] += 1
                     
             except Exception as e:
