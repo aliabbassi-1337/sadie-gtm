@@ -113,6 +113,11 @@ async def batch_insert_crawled_hotels(
     Uses executemany for fast bulk inserts. Single query per record inserts
     both hotel and booking_engine link atomically.
     
+    Wrapped in a transaction for:
+    - Single commit (faster)
+    - Atomicity (all or nothing)
+    - Clean rollback on failure
+    
     Args:
         records: List of tuples (name, source, external_id, external_id_type,
                                  booking_engine_id, booking_url, slug, detection_method)
@@ -124,8 +129,9 @@ async def batch_insert_crawled_hotels(
         return 0
     
     async with get_conn() as conn:
-        await conn.executemany(BATCH_INSERT_CRAWLED_HOTELS, records)
-        return len(records)
+        async with conn.transaction():
+            await conn.executemany(BATCH_INSERT_CRAWLED_HOTELS, records)
+            return len(records)
 
 
 async def get_existing_booking_urls(booking_urls: List[str]) -> set:
