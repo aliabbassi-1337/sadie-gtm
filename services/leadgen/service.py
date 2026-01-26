@@ -20,7 +20,12 @@ from services.leadgen.reverse_lookup import (
     ReverseLookupResult,
     ReverseLookupStats,
 )
-from services.leadgen.booking_engines import GuestbookScraper, GuestbookProperty
+from services.leadgen.booking_engines import (
+    GuestbookScraper,
+    GuestbookProperty,
+    CommonCrawlEnumerator,
+    CloudbedsPropertyExtractor,
+)
 from db.models.hotel import Hotel
 from db.client import init_db, get_conn, queries
 from services.leadgen.grid_scraper import GridScraper, ScrapedHotel, ScrapeEstimate, DEFAULT_CELL_SIZE_KM
@@ -256,6 +261,31 @@ class IService(ABC):
             delay: Delay between requests in seconds
             
         Returns list of hotel dicts with subdomain, name, url.
+        """
+        pass
+
+    @abstractmethod
+    async def enumerate_commoncrawl(
+        self,
+        max_indices: Optional[int] = None,
+        year: Optional[int] = None,
+        concurrency: int = 5,
+        fetch_details: bool = True,
+    ) -> List[Dict]:
+        """
+        Enumerate Cloudbeds hotels from Common Crawl CDX API.
+        
+        Common Crawl indexes billions of web pages. We query their CDX API
+        to find all indexed Cloudbeds reservation URLs, then optionally
+        fetch hotel details from each booking page.
+        
+        Args:
+            max_indices: Limit number of CC indices to query (default: all ~350)
+            year: Only query indices from specific year
+            concurrency: Concurrent requests
+            fetch_details: If True, fetch hotel name/details from booking pages
+            
+        Returns list of hotel dicts with slug, name, booking_url.
         """
         pass
 
@@ -1685,3 +1715,54 @@ class Service(IService):
 
         logger.info(f"Save complete: {stats}")
         return stats
+
+    async def enumerate_commoncrawl(
+        self,
+        max_indices: Optional[int] = None,
+        year: Optional[int] = None,
+        concurrency: int = 5,
+        fetch_details: bool = True,
+    ) -> List[Dict]:
+        """
+        Enumerate Cloudbeds hotels from Common Crawl CDX API.
+        """
+        # Step 1: Get slugs from Common Crawl
+        async with CommonCrawlEnumerator() as enumerator:
+            slugs = await enumerator.enumerate_all(
+                max_indices=max_indices,
+                year=year,
+                concurrency=concurrency,
+            )
+        
+        logger.info(f"Found {len(slugs)} unique Cloudbeds slugs from Common Crawl")
+        
+        if not fetch_details:
+            # Return just the slugs without fetching hotel details
+            return [
+                {
+                    "slug": slug,
+                    "booking_url": f"https://hotels.cloudbeds.com/reservation/{slug}",
+                }
+                for slug in slugs
+            ]
+        
+        # Step 2: Fetch hotel details from each booking page
+        logger.info(f"Fetching hotel details for {len(slugs)} slugs...")
+        
+        async with CloudbedsPropertyExtractor() as extractor:
+            properties = await extractor.batch_fetch(slugs, concurrency=concurrency)
+        
+        logger.info(f"Successfully fetched details for {len(properties)} hotels")
+        
+        # Convert to dicts
+        return [
+            {
+                "slug": p.slug,
+                "name": p.name,
+                "booking_url": p.booking_url,
+                "property_id": p.property_id,
+                "external_id": f"cloudbeds_{p.slug}",
+                "external_id_type": "commoncrawl",
+            }
+            for p in properties
+        ]

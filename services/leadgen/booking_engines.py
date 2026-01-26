@@ -359,6 +359,127 @@ def analyze_cloudbeds_slug(slug: str) -> Dict[str, Any]:
     }
 
 
+class CommonCrawlEnumerator:
+    """
+    Enumerate Cloudbeds slugs from Common Crawl CDX API.
+    
+    Common Crawl indexes billions of web pages monthly. We can query their
+    CDX API to find all indexed Cloudbeds reservation URLs.
+    
+    This finds MORE hotels than the sitemap because:
+    1. Historical data - hotels removed from sitemap
+    2. Direct crawled pages - not dependent on sitemap
+    3. Multiple monthly snapshots
+    """
+    
+    COLLINFO_URL = "https://index.commoncrawl.org/collinfo.json"
+    CLOUDBEDS_PATTERN = "hotels.cloudbeds.com/reservation/*"
+    
+    def __init__(self, timeout: float = 60.0):
+        self.timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
+    
+    async def __aenter__(self):
+        self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self
+    
+    async def __aexit__(self, *args):
+        if self._client:
+            await self._client.aclose()
+    
+    async def get_index_list(self, year: Optional[int] = None, limit: Optional[int] = None) -> List[str]:
+        """Fetch list of Common Crawl indices."""
+        resp = await self._client.get(self.COLLINFO_URL)
+        resp.raise_for_status()
+        
+        indices = []
+        for item in resp.json():
+            index_id = item.get("id", "")
+            if index_id.startswith("CC-MAIN-"):
+                if year:
+                    if f"CC-MAIN-{year}" in index_id:
+                        indices.append(index_id)
+                else:
+                    indices.append(index_id)
+        
+        if limit:
+            indices = indices[:limit]
+        
+        return indices
+    
+    async def query_index(self, index_id: str, max_retries: int = 3) -> set:
+        """Query a single Common Crawl index for Cloudbeds slugs."""
+        url = f"https://index.commoncrawl.org/{index_id}-index"
+        params = {"url": self.CLOUDBEDS_PATTERN, "output": "json"}
+        
+        slugs = set()
+        
+        for attempt in range(max_retries):
+            try:
+                resp = await self._client.get(url, params=params)
+                
+                if resp.status_code == 404:
+                    return slugs
+                
+                if resp.status_code == 503:
+                    wait_time = 5 * (attempt + 1)
+                    logger.warning(f"  {index_id}: 503, retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                resp.raise_for_status()
+                
+                # Extract 6-char slugs (lowercase for dedup)
+                for match in re.finditer(r'reservation/([A-Za-z0-9]{6})', resp.text):
+                    slugs.add(match.group(1).lower())
+                
+                logger.info(f"  {index_id}: {len(slugs)} slugs")
+                return slugs
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5)
+                else:
+                    logger.error(f"  {index_id}: {e}")
+        
+        return slugs
+    
+    async def enumerate_all(
+        self,
+        max_indices: Optional[int] = None,
+        year: Optional[int] = None,
+        concurrency: int = 5,
+    ) -> List[str]:
+        """
+        Query Common Crawl indices for all Cloudbeds slugs.
+        
+        Args:
+            max_indices: Limit number of indices to query
+            year: Only query indices from specific year
+            concurrency: Concurrent requests
+            
+        Returns list of unique slugs (lowercase).
+        """
+        indices = await self.get_index_list(year=year, limit=max_indices)
+        logger.info(f"Querying {len(indices)} Common Crawl indices...")
+        
+        all_slugs: set = set()
+        semaphore = asyncio.Semaphore(concurrency)
+        
+        async def query_with_limit(index_id: str) -> set:
+            async with semaphore:
+                return await self.query_index(index_id)
+        
+        tasks = [query_with_limit(idx) for idx in indices]
+        results = await asyncio.gather(*tasks)
+        
+        for slugs in results:
+            all_slugs.update(slugs)
+        
+        logger.info(f"Total unique slugs: {len(all_slugs)}")
+        return sorted(all_slugs)
+
+
 # Known Cloudbeds slugs for reference/testing
 KNOWN_SLUGS = {
     "cl6l0S": {"name": "The Kendall", "property_id": 317832, "city": "Boerne", "state": "TX"},
