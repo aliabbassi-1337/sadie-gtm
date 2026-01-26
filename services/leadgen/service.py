@@ -314,6 +314,26 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def ingest_commoncrawl_hotels(
+        self,
+        hotels: List[Dict],
+        source_tag: str = "commoncrawl",
+    ) -> Dict:
+        """
+        Ingest Common Crawl hotels with smart deduplication.
+        
+        Strategy:
+        1. Match by name (case-insensitive) - if found, append source
+        2. If no match, insert new hotel
+        3. Link to Cloudbeds booking engine
+        
+        Source encoding: existing_source::new_source (e.g., 'dbpr::commoncrawl')
+        
+        Returns dict with counts: inserted, updated, engines_linked, errors
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self, detection_config: DetectionConfig = None, api_key: Optional[str] = None) -> None:
@@ -1793,3 +1813,130 @@ class Service(IService):
             }
             for p in properties
         ]
+
+    async def ingest_commoncrawl_hotels(
+        self,
+        hotels: List[Dict],
+        source_tag: str = "commoncrawl",
+    ) -> Dict:
+        """
+        Ingest Common Crawl hotels into database with smart deduplication.
+        
+        Strategy:
+        1. First try to match by name (exact, case-insensitive)
+        2. If match found: append source (e.g., dbpr -> dbpr::commoncrawl)
+        3. If no match: insert new hotel
+        4. Always link to Cloudbeds booking engine using repo function
+        
+        Args:
+            hotels: List of hotel dicts from enumerate_commoncrawl()
+            source_tag: Source identifier to append (default: 'commoncrawl')
+            
+        Returns dict with counts: inserted, updated, engines_linked, errors
+        """
+        stats = {
+            "total": len(hotels),
+            "inserted": 0,
+            "updated": 0,
+            "engines_linked": 0,
+            "skipped": 0,
+            "errors": 0,
+        }
+        
+        # Get Cloudbeds engine ID using repo
+        engine = await repo.get_booking_engine_by_name("Cloudbeds")
+        engine_id = engine.id if engine else None
+        
+        if not engine_id:
+            engine_id = await repo.insert_booking_engine(name="Cloudbeds", tier=1)
+            logger.info(f"Created Cloudbeds booking engine with id {engine_id}")
+        
+        for i, hotel in enumerate(hotels):
+            if (i + 1) % 100 == 0:
+                logger.info(f"  Processed {i + 1}/{len(hotels)}...")
+            
+            try:
+                name = hotel.get("name")
+                if not name or name == "Unknown":
+                    stats["skipped"] += 1
+                    continue
+                
+                slug = hotel.get("slug", "")
+                city = hotel.get("city")
+                country = hotel.get("country", "USA")
+                booking_url = hotel.get("booking_url") or f"https://hotels.cloudbeds.com/reservation/{slug}"
+                external_id = hotel.get("external_id") or f"cloudbeds_{slug}"
+                
+                async with get_conn() as conn:
+                    # Try to find existing hotel by name (and city if available)
+                    existing = None
+                    if city:
+                        existing = await conn.fetchrow(
+                            """
+                            SELECT id, name, source FROM sadie_gtm.hotels
+                            WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+                              AND LOWER(TRIM(city)) = LOWER(TRIM($2))
+                            LIMIT 1
+                            """,
+                            name, city
+                        )
+                    
+                    if not existing:
+                        # Try matching by name only
+                        existing = await conn.fetchrow(
+                            """
+                            SELECT id, name, source FROM sadie_gtm.hotels
+                            WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+                            LIMIT 1
+                            """,
+                            name
+                        )
+                    
+                    if existing:
+                        # Update existing hotel: append source
+                        hotel_id = existing["id"]
+                        current_source = existing["source"] or ""
+                        
+                        # Append source if not already present
+                        if source_tag not in current_source:
+                            new_source = f"{current_source}::{source_tag}" if current_source else source_tag
+                            await conn.execute(
+                                """
+                                UPDATE sadie_gtm.hotels 
+                                SET source = $1, updated_at = CURRENT_TIMESTAMP
+                                WHERE id = $2
+                                """,
+                                new_source, hotel_id
+                            )
+                        
+                        stats["updated"] += 1
+                    else:
+                        # Insert new hotel using repo pattern
+                        hotel_id = await repo.insert_hotel(
+                            name=name,
+                            city=city,
+                            country=country,
+                            source=source_tag,
+                            status=0,
+                            external_id=external_id,
+                            external_id_type="commoncrawl",
+                        )
+                        stats["inserted"] += 1
+                
+                # Link to Cloudbeds booking engine using repo function
+                if hotel_id and engine_id:
+                    await repo.insert_hotel_booking_engine(
+                        hotel_id=hotel_id,
+                        booking_engine_id=engine_id,
+                        booking_url=booking_url,
+                        detection_method="commoncrawl",
+                        status=1,
+                    )
+                    stats["engines_linked"] += 1
+                        
+            except Exception as e:
+                logger.error(f"Error ingesting {hotel.get('name', 'unknown')}: {e}")
+                stats["errors"] += 1
+        
+        logger.info(f"Ingest complete: {stats}")
+        return stats

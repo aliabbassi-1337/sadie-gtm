@@ -844,3 +844,73 @@ AND ST_Within(
     location::geometry,
     ST_MakeEnvelope(:lng_min, :lat_min, :lng_max, :lat_max, 4326)
 );
+
+-- name: find_hotel_by_name^
+-- Find hotel by normalized name (case-insensitive, trimmed)
+-- Used for matching Common Crawl hotels to existing records
+SELECT
+    id,
+    name,
+    website,
+    source,
+    city,
+    state
+FROM sadie_gtm.hotels
+WHERE LOWER(TRIM(name)) = LOWER(TRIM(:name))
+LIMIT 1;
+
+-- name: find_hotel_by_name_and_city^
+-- Find hotel by name and city (more precise matching)
+SELECT
+    id,
+    name,
+    website,
+    source,
+    city,
+    state
+FROM sadie_gtm.hotels
+WHERE LOWER(TRIM(name)) = LOWER(TRIM(:name))
+  AND LOWER(TRIM(city)) = LOWER(TRIM(:city))
+LIMIT 1;
+
+-- name: update_hotel_source!
+-- Append source to existing hotel (e.g., dbpr -> dbpr::commoncrawl)
+UPDATE sadie_gtm.hotels
+SET source = CASE 
+    WHEN source IS NULL OR source = '' THEN :new_source
+    WHEN source LIKE '%' || :new_source || '%' THEN source  -- already has this source
+    ELSE source || '::' || :new_source
+    END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: upsert_commoncrawl_hotel<!
+-- Upsert hotel from Common Crawl with source appending
+-- If hotel exists (by external_id), append source; otherwise insert
+INSERT INTO sadie_gtm.hotels (
+    name, 
+    city, 
+    country,
+    source, 
+    status, 
+    external_id, 
+    external_id_type
+) VALUES (
+    :name,
+    :city,
+    :country,
+    :source,
+    0,
+    :external_id,
+    :external_id_type
+)
+ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL
+DO UPDATE SET
+    source = CASE 
+        WHEN hotels.source IS NULL OR hotels.source = '' THEN EXCLUDED.source
+        WHEN hotels.source LIKE '%' || EXCLUDED.source || '%' THEN hotels.source
+        ELSE hotels.source || '::' || EXCLUDED.source
+    END,
+    updated_at = CURRENT_TIMESTAMP
+RETURNING id, 
+    (xmax = 0) AS inserted;  -- True if inserted, False if updated

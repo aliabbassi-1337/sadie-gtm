@@ -154,30 +154,19 @@ Examples:
         
         await init_db()
         
-        # Prepare leads
-        leads = []
-        for h in hotels:
-            name = h.get("name", "Unknown")
-            if name == "Unknown":
-                continue
-            leads.append({
-                "name": name,
-                "website": h.get("booking_url"),
-                "external_id": h.get("external_id") or f"cloudbeds_{h['slug']}",
-                "external_id_type": "commoncrawl",
-            })
+        logger.info(f"Ingesting {len(hotels)} hotels to database...")
+        logger.info("Strategy: Match by name -> append source, or insert new")
         
-        logger.info(f"Saving {len(leads)} leads to database...")
-        stats = await service.save_booking_engine_leads(
-            leads=leads,
-            source="commoncrawl",
-            booking_engine="Cloudbeds",
+        stats = await service.ingest_commoncrawl_hotels(
+            hotels=hotels,
+            source_tag="commoncrawl",
         )
         
         logger.info(f"Database results:")
-        logger.info(f"  Inserted: {stats['inserted']}")
+        logger.info(f"  Inserted (new): {stats['inserted']}")
+        logger.info(f"  Updated (existing): {stats['updated']}")
         logger.info(f"  Engines linked: {stats['engines_linked']}")
-        logger.info(f"  Skipped (exists): {stats['skipped_exists']}")
+        logger.info(f"  Skipped: {stats['skipped']}")
         logger.info(f"  Errors: {stats['errors']}")
 
     # Show sample results
