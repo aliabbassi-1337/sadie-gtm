@@ -172,7 +172,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5):
                 messages = receive_messages(
                     QUEUE_URL,
                     max_messages=10,
-                    wait_time=20,
+                    wait_time_seconds=20,
                     visibility_timeout=60,
                 )
                 
