@@ -9,12 +9,43 @@ Find hotels by identifying websites using specific booking engine software (Clou
 - Bypasses Google Maps limitations entirely
 - These are pre-qualified leads - they already have booking software
 
+## Cloudbeds ID Structure (Research Findings - Jan 2026)
+
+Cloudbeds uses two types of identifiers:
+
+### 1. Public Slug (6 alphanumeric chars)
+- Format: e.g., `cl6l0S`, `UxSswi`
+- Used in booking URLs: `hotels.cloudbeds.com/reservation/{slug}`
+- **Not a simple base62 encoding** of the numeric ID
+- Likely hash-based or encrypted
+
+### 2. Internal Numeric ID (Sequential)
+- Format: e.g., `317832`, `202743`
+- Currently ~300,000+ properties in Cloudbeds
+- Exposed in:
+  - Image URLs: `h-img*.cloudbeds.com/uploads/{property_id}/`
+  - Analytics: `ep.property_id={property_id}`
+  - Facebook tracking: `cd[property_id]={property_id}`
+- **Cannot be used directly** in booking URLs
+
+### Known Mappings
+
+| Hotel                         | Slug    | Numeric ID | City        | State |
+|-------------------------------|---------|------------|-------------|-------|
+| The Kendall                   | cl6l0S  | 317832     | Boerne      | TX    |
+| 7 Seas Hotel                  | UxSswi  | 202743     | Miami       | FL    |
+| St Augustine Hotel            | sEhTC1  | -          | Miami Beach | FL    |
+| Casa Ocean                    | TxCgVr  | -          | Miami Beach | FL    |
+| Sebastian Gardens Inn & Suites| iocJE7  | -          | Sebastian   | FL    |
+| Up Midtown                    | UpukGL  | -          | Miami       | FL    |
+
 ## Target Booking Engines
 
 ### Cloudbeds
 - **Booking URLs**: `hotels.cloudbeds.com/reservation/{property-slug}`
 - **Widget patterns**: Scripts loading from `static1.cloudbeds.com`
 - **Google dork**: `site:hotels.cloudbeds.com florida`
+- **TheGuestbook API**: Partner directory with 800+ Cloudbeds hotels
 
 ### Guesty
 - **Booking URLs**: `*.guestybookings.com`
@@ -77,75 +108,114 @@ curl "https://crt.sh/?q=%.cloudbeds.com&output=json"
 **Pros**: Free, comprehensive
 **Cons**: Need to filter/dedupe, some false positives
 
-## Approach 4: Direct Subdomain Enumeration
+## Approach 4: TheGuestbook API ⭐ NEW - IMPLEMENTED
+
+TheGuestbook is Cloudbeds' rewards program that lists 800+ partner hotels.
+It has a public JSON API that returns hotel data including:
+- Hotel name, coordinates, website
+- Integration status (`beiStatus: "automated"` = Cloudbeds)
+- Review scores
+
+**API Endpoint**: 
+```
+GET https://theguestbook.com/en/destinations/guestbook/fetch_properties
+?check_in=2026-02-08&check_out=2026-02-11
+&filters={"bbox":{"type":"Polygon","coordinates":[[...]]}}
+&page=1&format=json
+```
+
+**Response**:
+```json
+{
+  "results": {
+    "15340": {
+      "id": 15340,
+      "name": "Glover Park Hotel Georgetown",
+      "lat": "38.9233322",
+      "lng": "-77.074961",
+      "beiStatus": "automated",
+      "trustYouScore": 8.8,
+      "website": "https://..."
+    }
+  },
+  "totalCount": 810,
+  "totalPages": 41
+}
+```
+
+**Pros**: Free, structured data, 800+ hotels, includes coordinates
+**Cons**: Only Cloudbeds partners on TheGuestbook network
+
+## Approach 5: Direct Subdomain Enumeration
 
 Cloudbeds booking pages follow pattern: `hotels.cloudbeds.com/reservation/{slug}`
 
-```python
-# Could potentially enumerate or find sitemap
-# Some booking engines have public property directories
-```
+The slug is a 6-character alphanumeric code that cannot be enumerated sequentially
+(it's not a simple base62 encoding of the property ID).
 
-## Approach 5: Scrape Booking Engine Marketing
+## Approach 6: Scrape Booking Engine Marketing
 
 Some engines showcase customers:
 - Case studies pages
 - Customer testimonials
 - "Powered by" footers on hotel sites
 
-## Implementation Plan
+## Implementation Status
 
-### Phase 1: Google Dorks (Quick Win)
-1. Build list of dorks for each booking engine
-2. Use Serper or SerpAPI to run searches
-3. Extract hotel URLs from results
-4. Dedupe against existing database
+### ✅ Phase 1: Google Dorks (COMPLETE)
+- Implemented in `services/leadgen/reverse_lookup.py`
+- CLI: `uv run python -m workflows.reverse_lookup -l "Florida"`
+- Supports 15+ booking engines
 
-### Phase 2: BuiltWith Integration
-1. Evaluate BuiltWith API pricing
-2. Query for hospitality tech in Florida
-3. Cross-reference with our detected engines
-4. Find hotels we missed
+### ✅ Phase 2: TheGuestbook API (COMPLETE - Jan 2026)
+- Implemented in `services/leadgen/booking_engines.py`
+- CLI: `uv run python -m workflows.guestbook_enum --florida`
+- Returns 800+ Cloudbeds partner hotels
 
-### Phase 3: Certificate Transparency
-1. Query crt.sh for booking engine subdomains
-2. Parse and filter results
-3. Extract property names from subdomain patterns
-4. Validate and enrich
+### 🔄 Phase 3: BuiltWith Integration (PLANNED)
+- Evaluate API pricing ($295/mo)
+- Would give broader coverage
+
+### 🔄 Phase 4: Certificate Transparency (PLANNED)
+- Query crt.sh for booking engine subdomains
+- Parse and filter results
 
 ## Expected Results
 
-| Source | Est. New Leads | Cost | Effort |
-|--------|---------------|------|--------|
-| Google Dorks | 50-200 | Free (use existing Serper) | Low |
-| BuiltWith | 500-2000 | $295/mo | Medium |
-| CT Logs | 100-500 | Free | Medium |
+| Source | Est. New Leads | Cost | Effort | Status |
+|--------|---------------|------|--------|--------|
+| Google Dorks | 50-200 | Free (use existing Serper) | Low | ✅ Done |
+| TheGuestbook | 800+ | Free | Low | ✅ Done |
+| BuiltWith | 500-2000 | $295/mo | Medium | Planned |
+| CT Logs | 100-500 | Free | Medium | Planned |
 
-## Files to Create
+## Files
 
 ```
 services/leadgen/
-├── reverse_lookup.py      # Main reverse lookup logic
-├── dorks.py               # Google dork patterns
-└── builtwith.py           # BuiltWith API client
+├── reverse_lookup.py      # Google dork patterns and models
+├── booking_engines.py     # TheGuestbook scraper, Cloudbeds extractor
+└── service.py             # reverse_lookup() method
 
 workflows/
-└── reverse_lookup.py      # CLI workflow
+├── reverse_lookup.py      # Google dorks CLI
+└── guestbook_enum.py      # TheGuestbook enumeration CLI
 ```
 
 ## Quick Test
 
-Run this manually to validate approach:
 ```bash
 # Test Google dork via Serper
-curl -X POST 'https://google.serper.dev/search' \
-  -H 'X-API-KEY: YOUR_KEY' \
-  -H 'Content-Type: application/json' \
-  -d '{"q": "site:hotels.cloudbeds.com florida"}'
+uv run python -m workflows.reverse_lookup -l "Palm Beach Florida" --dry-run
+
+# Test TheGuestbook API (fetch first 2 pages)
+uv run python -m workflows.guestbook_enum --florida --max-pages 2
 ```
 
 ## Next Steps
-- [ ] Test Google dorks manually to validate results
-- [ ] Build dork scraper using existing Serper credits
+- [x] Test Google dorks manually to validate results
+- [x] Build dork scraper using existing Serper credits
+- [x] Implement TheGuestbook API scraper
 - [ ] Evaluate BuiltWith API trial
 - [ ] Parse CT logs for Cloudbeds/Guesty subdomains
+- [ ] Build Cloudbeds property detail extractor (with Playwright)
