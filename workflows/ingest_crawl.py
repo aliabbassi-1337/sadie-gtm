@@ -8,7 +8,7 @@ and ingests them into the hotels table.
 Uses the CrawlIngestor from services/ingestor/ which:
 - Inserts hotels with placeholder names ("Unknown (slug)")
 - Links to booking_engines table
-- SQS enrichment workers later scrape real names from live pages
+- Cron-scheduled enqueuer picks up new hotels for SQS name enrichment
 
 Usage:
     # Ingest all deduped files from S3 (recommended)
@@ -19,9 +19,6 @@ Usage:
 
     # Single engine from local file
     uv run python -m workflows.ingest_crawl --file data/crawl/cloudbeds.txt --engine cloudbeds
-
-    # Auto-enqueue for SQS enrichment after ingestion
-    uv run python -m workflows.ingest_crawl --s3 sadie-gtm --prefix crawl-data/ --enqueue
 """
 
 import argparse
@@ -90,17 +87,6 @@ def main():
         type=int,
         default=500,
         help="Batch size for database inserts (default: 500)"
-    )
-    parser.add_argument(
-        "--enqueue",
-        action="store_true",
-        help="Auto-enqueue newly inserted hotels for SQS name enrichment"
-    )
-    parser.add_argument(
-        "--enqueue-limit",
-        type=int,
-        default=10000,
-        help="Max hotels to enqueue for enrichment (default: 10000)"
     )
     
     args = parser.parse_args()
@@ -211,67 +197,11 @@ async def run_ingest(args):
     logger.info(f"Duplicates skipped: {total_stats['duplicates_skipped']}")
     logger.info(f"Errors: {total_stats['errors']}")
     
-    # Auto-enqueue for enrichment if requested
-    if args.enqueue and total_stats['records_saved'] > 0:
-        logger.info("\n" + "-" * 50)
-        logger.info("ENQUEUEING FOR NAME ENRICHMENT")
-        logger.info("-" * 50)
-        
-        await enqueue_for_enrichment(limit=args.enqueue_limit)
-    elif total_stats['records_saved'] > 0:
+    if total_stats['records_saved'] > 0:
         logger.info("\n" + "-" * 50)
         logger.info("Hotels inserted with placeholder names.")
-        logger.info("To enqueue for name enrichment, run:")
-        logger.info("  uv run python -m workflows.enrich_names_enqueue --limit 10000")
-
-
-async def enqueue_for_enrichment(limit: int = 10000):
-    """Enqueue newly inserted hotels for SQS name enrichment."""
-    import os
-    from db.client import get_conn, queries
-    from infra.sqs import send_messages_batch, get_queue_attributes
-    
-    queue_url = os.getenv("SQS_NAME_ENRICHMENT_QUEUE_URL", "")
-    if not queue_url:
-        logger.warning("SQS_NAME_ENRICHMENT_QUEUE_URL not set - skipping enqueue")
-        return
-    
-    # Get hotels needing names
-    async with get_conn() as conn:
-        results = await queries.get_hotels_needing_names(conn, limit=limit)
-        hotels = [dict(row) for row in results]
-    
-    if not hotels:
-        logger.info("No hotels found needing name enrichment")
-        return
-    
-    logger.info(f"Found {len(hotels)} hotels needing names")
-    
-    # Group by engine for logging
-    by_engine = {}
-    for h in hotels:
-        eng = h["engine_name"]
-        by_engine[eng] = by_engine.get(eng, 0) + 1
-    for eng, count in sorted(by_engine.items()):
-        logger.info(f"  {eng}: {count}")
-    
-    # Create messages
-    messages = []
-    for h in hotels:
-        messages.append({
-            "hotel_id": h["id"],
-            "booking_url": h["booking_url"],
-            "slug": h["slug"],
-            "engine": h["engine_name"],
-        })
-    
-    # Send to SQS
-    sent = send_messages_batch(queue_url, messages)
-    logger.info(f"Sent {sent} messages to SQS")
-    
-    # Show queue stats
-    attrs = get_queue_attributes(queue_url)
-    logger.info(f"Queue: {attrs.get('ApproximateNumberOfMessages', 0)} messages pending")
+        logger.info("Cron enqueuer will pick them up for name enrichment.")
+        logger.info("  Schedule: */10 * * * * (every 10 min)")
 
 
 if __name__ == "__main__":
