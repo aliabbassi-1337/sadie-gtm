@@ -1,7 +1,7 @@
-"""Enqueue hotels for name enrichment via SQS.
+"""Enqueue hotels for enrichment via SQS.
 
-Finds hotels with booking URLs but missing names, queues them for workers
-to scrape from booking pages.
+Finds hotels needing name and/or address enrichment, queues them for workers
+to scrape from booking pages. Workers automatically detect what's missing.
 
 Usage:
     uv run python -m workflows.enrich_names_enqueue --limit 1000
@@ -14,7 +14,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncio
-import json
 import os
 from typing import Optional
 from loguru import logger
@@ -26,10 +25,13 @@ from infra.sqs import send_messages_batch, get_queue_attributes
 QUEUE_URL = os.getenv("SQS_NAME_ENRICHMENT_QUEUE_URL", "")
 
 
-async def get_hotels_needing_names(limit: int = 1000):
-    """Get hotels with booking URLs but no names."""
+async def get_hotels_needing_enrichment(limit: int = 1000):
+    """Get hotels needing any enrichment (name or address)."""
     async with get_conn() as conn:
-        results = await queries.get_hotels_needing_names(conn, limit=limit)
+        # Use 'both' to get all hotels needing any enrichment
+        results = await queries.get_hotels_needing_enrichment(
+            conn, enrich_type="both", limit=limit
+        )
         return [dict(row) for row in results]
 
 
@@ -38,25 +40,33 @@ async def run(
     engine: Optional[str] = None,
     dry_run: bool = False,
 ):
-    """Enqueue hotels for name enrichment."""
+    """Enqueue hotels for enrichment."""
     if not QUEUE_URL:
         logger.error("SQS_NAME_ENRICHMENT_QUEUE_URL not set")
         return 0
     
     await init_db()
     try:
-        # Get hotels needing names
-        hotels = await get_hotels_needing_names(limit)
+        # Get hotels needing any enrichment
+        hotels = await get_hotels_needing_enrichment(limit)
         
         # Filter by engine if specified
         if engine:
             hotels = [h for h in hotels if h["engine_name"].lower() == engine.lower()]
         
         if not hotels:
-            logger.info("No hotels found needing name enrichment")
+            logger.info("No hotels found needing enrichment")
             return 0
         
-        logger.info(f"Found {len(hotels)} hotels needing names")
+        # Count what needs enrichment
+        needs_name = sum(1 for h in hotels if h.get("needs_name"))
+        needs_address = sum(1 for h in hotels if h.get("needs_address"))
+        needs_both = sum(1 for h in hotels if h.get("needs_name") and h.get("needs_address"))
+        
+        logger.info(f"Found {len(hotels)} hotels needing enrichment")
+        logger.info(f"  Needs name: {needs_name}")
+        logger.info(f"  Needs address: {needs_address}")
+        logger.info(f"  Needs both: {needs_both}")
         
         # Group by engine for logging
         by_engine = {}
@@ -70,7 +80,7 @@ async def run(
             logger.info("Dry run - not sending to SQS")
             return len(hotels)
         
-        # Create messages (1 hotel per message for simple processing)
+        # Create messages - consumer will figure out what to update
         messages = []
         for h in hotels:
             messages.append({
@@ -98,18 +108,23 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Enqueue hotels for name enrichment via SQS",
+        description="Enqueue hotels for enrichment via SQS",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Enqueue up to 1000 hotels
+    # Enqueue hotels needing enrichment
     uv run python -m workflows.enrich_names_enqueue --limit 1000
 
-    # Enqueue only Cloudbeds hotels
-    uv run python -m workflows.enrich_names_enqueue --limit 5000 --engine cloudbeds
+    # Filter by booking engine
+    uv run python -m workflows.enrich_names_enqueue --engine cloudbeds --limit 5000
 
     # Dry run (don't send to SQS)
     uv run python -m workflows.enrich_names_enqueue --limit 1000 --dry-run
+
+The consumer automatically detects what each hotel needs:
+- Missing name (null/empty/Unknown) -> extracts from booking page
+- Missing address (null city/state) -> extracts from booking page
+- Already has data -> preserves existing values
 
 Environment:
     SQS_NAME_ENRICHMENT_QUEUE_URL - Required. The SQS queue URL.
