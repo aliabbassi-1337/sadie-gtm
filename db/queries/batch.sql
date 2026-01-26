@@ -27,3 +27,22 @@ WHERE h.external_id_type = $2 AND h.external_id = $3
 ON CONFLICT (hotel_id) DO UPDATE SET
     room_count = EXCLUDED.room_count,
     confidence = EXCLUDED.confidence;
+
+-- BATCH_INSERT_CRAWLED_HOTELS
+-- Params: (name, source, external_id, external_id_type, booking_engine_id, booking_url, slug, detection_method)
+-- Single query: Insert hotel + link to booking engine in one go
+-- Uses CTE to insert hotel first, then links booking engine
+-- Skips if booking_url already exists
+WITH new_hotel AS (
+    INSERT INTO sadie_gtm.hotels (name, source, external_id, external_id_type, status)
+    VALUES ($1, $2, $3, $4, 0)
+    ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL 
+    DO NOTHING
+    RETURNING id
+)
+INSERT INTO sadie_gtm.hotel_booking_engines (hotel_id, booking_engine_id, booking_url, engine_property_id, detection_method, status, detected_at, updated_at)
+SELECT id, $5, $6, $7, $8, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+FROM new_hotel
+WHERE NOT EXISTS (
+    SELECT 1 FROM sadie_gtm.hotel_booking_engines WHERE booking_url = $6
+);

@@ -75,3 +75,11 @@ LIMIT :limit;
 UPDATE sadie_gtm.hotels
 SET name = :name, updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
+
+-- name: get_existing_booking_urls
+-- Bulk check which booking URLs already exist
+-- Used for fast deduplication during crawl ingestion
+-- Note: Uses ANY() for array parameter - call with booking_urls=list
+SELECT booking_url 
+FROM sadie_gtm.hotel_booking_engines 
+WHERE booking_url = ANY(:booking_urls);

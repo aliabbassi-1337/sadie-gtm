@@ -4,7 +4,7 @@ Ingestor Repository - Database operations for ingested data.
 
 from typing import Optional, List, Tuple, Dict, Any
 from db.client import queries, get_conn
-from db.queries.batch import BATCH_INSERT_HOTELS, BATCH_INSERT_ROOM_COUNTS
+from db.queries.batch import BATCH_INSERT_HOTELS, BATCH_INSERT_ROOM_COUNTS, BATCH_INSERT_CRAWLED_HOTELS
 
 
 # =============================================================================
@@ -102,6 +102,56 @@ async def insert_crawled_hotel(
         )
         
         return hotel_id
+
+
+async def batch_insert_crawled_hotels(
+    records: List[Tuple[str, str, str, str, int, str, str, str]],
+) -> int:
+    """
+    Batch insert crawled hotels with booking engine linking.
+    
+    Uses executemany for fast bulk inserts. Single query per record inserts
+    both hotel and booking_engine link atomically.
+    
+    Wrapped in a transaction for:
+    - Single commit (faster)
+    - Atomicity (all or nothing)
+    - Clean rollback on failure
+    
+    Args:
+        records: List of tuples (name, source, external_id, external_id_type,
+                                 booking_engine_id, booking_url, slug, detection_method)
+    
+    Returns:
+        Number of records processed
+    """
+    if not records:
+        return 0
+    
+    async with get_conn() as conn:
+        async with conn.transaction():
+            await conn.executemany(BATCH_INSERT_CRAWLED_HOTELS, records)
+            return len(records)
+
+
+async def get_existing_booking_urls(booking_urls: List[str]) -> set:
+    """
+    Check which booking URLs already exist in the database.
+    
+    Args:
+        booking_urls: List of booking URLs to check
+    
+    Returns:
+        Set of booking URLs that already exist
+    """
+    if not booking_urls:
+        return set()
+    
+    async with get_conn() as conn:
+        results = await queries.get_existing_booking_urls(
+            conn, booking_urls=booking_urls
+        )
+        return {r["booking_url"] for r in results}
 
 
 async def get_hotel_by_external_id(external_id_type: str, external_id: str) -> Optional[int]:
