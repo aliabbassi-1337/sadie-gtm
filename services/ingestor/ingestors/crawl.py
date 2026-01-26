@@ -17,8 +17,16 @@ from services.ingestor.base import BaseIngestor
 from services.ingestor.registry import register
 from services.ingestor.models.base import IngestStats
 from services.ingestor.models.crawl import CrawledHotel, URL_PATTERNS
-from services.ingestor.sources.local import LocalSource
 from db.client import get_conn, queries
+
+
+# Engine display names
+ENGINE_NAMES = {
+    "cloudbeds": "Cloudbeds",
+    "mews": "Mews",
+    "rms": "RMS Cloud",
+    "siteminder": "SiteMinder",
+}
 
 
 @register("crawl")
@@ -83,17 +91,10 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
             logger.error(f"Directory not found: {dir_path}")
             return ingestors
         
-        engine_patterns = {
-            "cloudbeds": "cloudbeds",
-            "mews": "mews", 
-            "rms": "rms",
-            "siteminder": "siteminder",
-        }
-        
         for txt_file in path.glob("*.txt"):
             filename_lower = txt_file.name.lower()
-            for engine, pattern in engine_patterns.items():
-                if pattern in filename_lower:
+            for engine in ENGINE_NAMES.keys():
+                if engine in filename_lower:
                     ingestors.append(cls(engine=engine, file_path=str(txt_file)))
                     break
         
@@ -162,33 +163,25 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
         return record
     
     async def _get_or_create_booking_engine_id(self) -> Optional[int]:
-        """Get or create the booking engine ID."""
+        """Get or create the booking engine ID using proper queries."""
         if self._booking_engine_id:
             return self._booking_engine_id
         
-        engine_names = {
-            "cloudbeds": "Cloudbeds",
-            "mews": "Mews",
-            "rms": "RMS Cloud",
-            "siteminder": "SiteMinder",
-        }
-        
-        engine_name = engine_names.get(self.engine, self.engine.title())
+        engine_name = ENGINE_NAMES.get(self.engine, self.engine.title())
         
         async with get_conn() as conn:
             # Try to get existing
-            row = await conn.fetchrow(
-                "SELECT id FROM sadie_gtm.booking_engines WHERE name = $1",
-                engine_name
-            )
+            row = await queries.get_booking_engine_by_name(conn, name=engine_name)
             if row:
-                self._booking_engine_id = row[0]
+                self._booking_engine_id = row["id"]
                 return self._booking_engine_id
             
             # Create new
-            engine_id = await conn.fetchval(
-                "INSERT INTO sadie_gtm.booking_engines (name, tier) VALUES ($1, 1) RETURNING id",
-                engine_name
+            engine_id = await queries.insert_booking_engine(
+                conn,
+                name=engine_name,
+                domains=None,
+                tier=1,
             )
             self._booking_engine_id = engine_id
             return engine_id
@@ -220,39 +213,42 @@ class CrawlIngestor(BaseIngestor[CrawledHotel]):
                 for record in batch:
                     try:
                         # Check if booking URL already exists
-                        existing = await conn.fetchval(
-                            "SELECT hotel_id FROM sadie_gtm.hotel_booking_engines WHERE booking_url = $1",
-                            record.booking_url
+                        existing = await queries.get_hotel_by_booking_url(
+                            conn, booking_url=record.booking_url
                         )
                         if existing:
                             skipped += 1
                             continue
                         
-                        # Insert hotel
-                        hotel_id = await conn.fetchval(
-                            """INSERT INTO sadie_gtm.hotels 
-                               (name, source, external_id, external_id_type, status) 
-                               VALUES ($1, $2, $3, $4, 0) 
-                               RETURNING id""",
-                            record.name,
-                            record.source,
-                            record.external_id,
-                            record.external_id_type,
+                        # Insert hotel with placeholder name
+                        hotel_id = await queries.insert_hotel_with_external_id(
+                            conn,
+                            name=record.name,
+                            website=None,
+                            source=record.source,
+                            status=0,  # PENDING
+                            address=None,
+                            city=None,
+                            state=None,
+                            country="USA",
+                            phone=None,
+                            category=None,
+                            external_id=record.external_id,
+                            external_id_type=record.external_id_type,
                         )
                         
                         if not hotel_id:
                             continue
                         
                         # Link booking engine
-                        await conn.execute(
-                            """INSERT INTO sadie_gtm.hotel_booking_engines 
-                               (hotel_id, booking_engine_id, booking_url, engine_property_id, detection_method, status) 
-                               VALUES ($1, $2, $3, $4, $5, 1)""",
-                            hotel_id,
-                            engine_id,
-                            record.booking_url,
-                            record.slug,
-                            record.detection_method,
+                        await queries.insert_hotel_booking_engine(
+                            conn,
+                            hotel_id=hotel_id,
+                            booking_engine_id=engine_id,
+                            booking_url=record.booking_url,
+                            engine_property_id=record.slug,
+                            detection_method=record.detection_method,
+                            status=1,
                         )
                         
                         saved += 1
