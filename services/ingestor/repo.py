@@ -2,9 +2,106 @@
 Ingestor Repository - Database operations for ingested data.
 """
 
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 from db.client import queries, get_conn
 from db.queries.batch import BATCH_INSERT_HOTELS, BATCH_INSERT_ROOM_COUNTS
+
+
+# =============================================================================
+# Booking Engine Operations
+# =============================================================================
+
+async def get_booking_engine_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """
+    Look up booking engine by name.
+    Returns dict with id, name, domains, tier if found.
+    """
+    async with get_conn() as conn:
+        return await queries.get_booking_engine_by_name(conn, name=name)
+
+
+async def get_or_create_booking_engine(name: str, tier: int = 1) -> int:
+    """
+    Get existing booking engine by name or create new one.
+    Returns the booking engine ID.
+    """
+    async with get_conn() as conn:
+        existing = await queries.get_booking_engine_by_name(conn, name=name)
+        if existing:
+            return existing["id"]
+        
+        engine_id = await queries.insert_booking_engine(
+            conn, name=name, domains=None, tier=tier
+        )
+        return engine_id
+
+
+# =============================================================================
+# Crawl Ingestor Operations
+# =============================================================================
+
+async def get_hotel_by_booking_url(booking_url: str) -> Optional[Dict[str, Any]]:
+    """
+    Check if a booking URL already exists in hotel_booking_engines.
+    Returns hotel info if found, None otherwise.
+    """
+    async with get_conn() as conn:
+        return await queries.get_hotel_by_booking_url(conn, booking_url=booking_url)
+
+
+async def insert_crawled_hotel(
+    name: str,
+    source: str,
+    external_id: str,
+    external_id_type: str,
+    booking_engine_id: int,
+    booking_url: str,
+    slug: str,
+    detection_method: str = "crawl_import",
+) -> Optional[int]:
+    """
+    Insert a crawled hotel and link to booking engine.
+    
+    Returns hotel_id if inserted, None if duplicate.
+    """
+    async with get_conn() as conn:
+        # Check if booking URL already exists
+        existing = await queries.get_hotel_by_booking_url(conn, booking_url=booking_url)
+        if existing:
+            return None
+        
+        # Insert hotel
+        hotel_id = await queries.insert_hotel_with_external_id(
+            conn,
+            name=name,
+            website=None,
+            source=source,
+            status=0,  # PENDING
+            address=None,
+            city=None,
+            state=None,
+            country="USA",
+            phone=None,
+            category=None,
+            external_id=external_id,
+            external_id_type=external_id_type,
+        )
+        
+        if not hotel_id:
+            return None
+        
+        # Link to booking engine
+        await queries.insert_hotel_booking_engine(
+            conn,
+            hotel_id=hotel_id,
+            booking_engine_id=booking_engine_id,
+            booking_url=booking_url,
+            engine_property_id=slug,
+            detection_method=detection_method,
+            status=1,
+        )
+        
+        return hotel_id
 
 
 async def get_hotel_by_external_id(external_id_type: str, external_id: str) -> Optional[int]:

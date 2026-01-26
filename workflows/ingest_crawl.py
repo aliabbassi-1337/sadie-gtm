@@ -2,60 +2,33 @@
 """
 Ingest crawled booking engine URLs into the database.
 
-Reads text files containing slugs/URLs (one per line) from Common Crawl
-or similar sources and ingests them into the hotels table.
+Reads text files containing slugs/URLs (one per line) from S3 or local files
+and ingests them into the hotels table.
+
+Uses the CrawlIngestor from services/ingestor/ which:
+- Inserts hotels with placeholder names ("Unknown (slug)")
+- Links to booking_engines table
+- Cron-scheduled enqueuer picks up new hotels for SQS name enrichment
 
 Usage:
-    # Ingest Cloudbeds slugs
-    uv run python -m workflows.ingest_crawl \
-        --file "/path/to/cloudbeds_commoncrawl_full.txt" \
-        --engine cloudbeds
+    # Ingest all deduped files from S3 (recommended)
+    uv run python -m workflows.ingest_crawl --s3 sadie-gtm --prefix crawl-data/
 
-    # Ingest all booking engine files from a directory
-    uv run python -m workflows.ingest_crawl \
-        --dir "/path/to/crawled booking engine urls" \
-        --all
-        
-    # Dry run to see what would be imported
-    uv run python -m workflows.ingest_crawl \
-        --file "/path/to/mews_commoncrawl_full.txt" \
-        --engine mews \
-        --dry-run
+    # Ingest from local directory
+    uv run python -m workflows.ingest_crawl --dir data/crawl --all
+
+    # Single engine from local file
+    uv run python -m workflows.ingest_crawl --file data/crawl/cloudbeds.txt --engine cloudbeds
 """
 
 import argparse
 import asyncio
-import logging
 from pathlib import Path
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
-# File patterns for auto-detection
-ENGINE_FILE_PATTERNS = {
-    "cloudbeds": "cloudbeds",
-    "mews": "mews",
-    "rms": "rms",
-    "siteminder": "siteminder",
-}
-
-
-from typing import Optional
-
-def detect_engine_from_filename(filename: str) -> Optional[str]:
-    """Detect booking engine from filename."""
-    filename_lower = filename.lower()
-    for engine, pattern in ENGINE_FILE_PATTERNS.items():
-        if pattern in filename_lower:
-            return engine
-    return None
-
-
-async def main():
+def main():
     parser = argparse.ArgumentParser(
         description="Ingest crawled booking engine URLs into database"
     )
@@ -72,27 +45,33 @@ async def main():
         type=str,
         help="Directory containing crawl files (use with --all)"
     )
+    input_group.add_argument(
+        "--s3",
+        type=str,
+        metavar="BUCKET",
+        help="S3 bucket containing crawl files"
+    )
     
     # Engine selection
     parser.add_argument(
         "--engine", "-e",
         type=str,
         choices=["cloudbeds", "mews", "rms", "siteminder"],
-        help="Booking engine name (required with --file, auto-detected with --dir)"
+        help="Booking engine name (required with --file, auto-detected otherwise)"
     )
     parser.add_argument(
         "--all",
         action="store_true",
         help="Process all recognized files in directory"
     )
+    parser.add_argument(
+        "--prefix",
+        type=str,
+        default="crawl-data/",
+        help="S3 key prefix (default: crawl-data/)"
+    )
     
     # Options
-    parser.add_argument(
-        "--source",
-        type=str,
-        default="commoncrawl",
-        help="Source tag for tracking (default: commoncrawl)"
-    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -104,36 +83,10 @@ async def main():
         help="Limit number of slugs to process (for testing)"
     )
     parser.add_argument(
-        "--no-scrape",
-        action="store_true",
-        help="Skip scraping hotel names (import slugs only - NOT recommended)"
-    )
-    parser.add_argument(
-        "--concurrency",
+        "--batch-size",
         type=int,
-        default=50,
-        help="Number of concurrent requests (default: 50)"
-    )
-    parser.add_argument(
-        "--no-common-crawl",
-        action="store_true",
-        help="Use Wayback instead of Common Crawl (slower but works for all engines)"
-    )
-    parser.add_argument(
-        "--no-fuzzy",
-        action="store_true",
-        help="Disable fuzzy name matching (exact match only)"
-    )
-    parser.add_argument(
-        "--fuzzy-threshold",
-        type=float,
-        default=0.7,
-        help="Fuzzy match similarity threshold 0.0-1.0 (default: 0.7)"
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        help="Path to checkpoint file for resume capability"
+        default=500,
+        help="Batch size for database inserts (default: 500)"
     )
     
     args = parser.parse_args()
@@ -145,132 +98,111 @@ async def main():
     if args.dir and not args.all:
         parser.error("--all is required when using --dir")
     
-    # Collect files to process
-    files_to_process = []
+    asyncio.run(run_ingest(args))
+
+
+async def run_ingest(args):
+    """Run the ingestion."""
+    from db.client import init_db
+    from services.ingestor.ingestors.crawl import CrawlIngestor
+    
+    # Collect ingestors to run
+    ingestors = []
     
     if args.file:
         file_path = Path(args.file)
         if not file_path.exists():
             logger.error(f"File not found: {file_path}")
             return
-        files_to_process.append((file_path, args.engine))
+        ingestors.append(CrawlIngestor(engine=args.engine, file_path=str(file_path)))
     
     elif args.dir:
         dir_path = Path(args.dir)
         if not dir_path.exists():
             logger.error(f"Directory not found: {dir_path}")
             return
-        
-        for file_path in dir_path.glob("*.txt"):
-            engine = detect_engine_from_filename(file_path.name)
-            if engine:
-                files_to_process.append((file_path, engine))
-            else:
-                logger.warning(f"Skipping unrecognized file: {file_path.name}")
+        ingestors = CrawlIngestor.from_directory(str(dir_path))
     
-    if not files_to_process:
+    elif args.s3:
+        logger.info(f"Loading crawl files from s3://{args.s3}/{args.prefix}")
+        ingestors = await CrawlIngestor.from_s3(
+            bucket=args.s3,
+            prefix=args.prefix,
+            cache_dir="data/crawl_cache",
+        )
+    
+    if not ingestors:
         logger.error("No files to process")
         return
     
-    logger.info(f"Found {len(files_to_process)} file(s) to process")
+    logger.info(f"Found {len(ingestors)} engine(s) to process:")
+    for ing in ingestors:
+        slug_count = len(ing.slugs) if ing.slugs else "file"
+        logger.info(f"  - {ing.engine}: {slug_count} slugs")
     
     # Dry run - just show stats
     if args.dry_run:
-        for file_path, engine in files_to_process:
-            lines = file_path.read_text().strip().split("\n")
-            slugs = [l.strip() for l in lines if l.strip()]
-            unique_slugs = len(set(slugs))
-            logger.info(f"  {file_path.name}: {len(slugs)} lines, {unique_slugs} unique ({engine})")
         logger.info("Dry run complete - no changes made")
         return
     
     # Initialize database
-    from db.client import init_db
     await init_db()
     
-    # Initialize service
-    from services.leadgen.service import Service
-    service = Service()
-    
-    # Process each file
+    # Process each ingestor
     total_stats = {
         "files": 0,
-        "total": 0,
-        "inserted": 0,
-        "updated": 0,
-        "fuzzy_matched": 0,
-        "websites_found": 0,
-        "engines_linked": 0,
-        "skipped_no_name": 0,
-        "skipped_duplicate": 0,
+        "records_parsed": 0,
+        "records_saved": 0,
+        "duplicates_skipped": 0,
         "errors": 0,
     }
     
-    for file_path, engine in files_to_process:
-        logger.info(f"\nProcessing {file_path.name} ({engine})...")
-        
-        # Apply limit if specified
-        if args.limit:
-            # Read file, limit lines, write to temp file
-            lines = file_path.read_text().strip().split("\n")[:args.limit]
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                f.write("\n".join(lines))
-                temp_path = f.name
-            file_to_process = temp_path
-        else:
-            file_to_process = str(file_path)
+    for ingestor in ingestors:
+        logger.info(f"\nProcessing {ingestor.engine}...")
         
         try:
-            stats = await service.ingest_crawled_urls(
-                file_path=file_to_process,
-                booking_engine=engine,
-                source_tag=args.source,
-                scrape_names=not args.no_scrape,
-                concurrency=args.concurrency,
-                use_common_crawl=not args.no_common_crawl,
-                fuzzy_match=not args.no_fuzzy,
-                fuzzy_threshold=args.fuzzy_threshold,
-                checkpoint_file=args.checkpoint,
+            # Apply limit if specified
+            if args.limit and ingestor.slugs:
+                ingestor.slugs = ingestor.slugs[:args.limit]
+            
+            records, stats = await ingestor.ingest(
+                batch_size=args.batch_size,
+                upload_logs=False,
             )
             
             total_stats["files"] += 1
-            for key in ["total", "inserted", "updated", "fuzzy_matched", "websites_found", "engines_linked", "skipped_no_name", "skipped_duplicate", "errors"]:
-                total_stats[key] += stats.get(key, 0)
+            total_stats["records_parsed"] += stats.records_parsed
+            total_stats["records_saved"] += stats.records_saved
+            total_stats["duplicates_skipped"] += stats.duplicates_skipped
+            total_stats["errors"] += stats.errors
             
-            logger.info(f"  New hotels: {stats['inserted']}")
-            logger.info(f"  Updated (source appended): {stats['updated']}")
-            logger.info(f"  Fuzzy matched: {stats.get('fuzzy_matched', 0)}")
-            logger.info(f"  Websites found: {stats.get('websites_found', 0)}")
-            logger.info(f"  Engines linked: {stats['engines_linked']}")
-            logger.info(f"  Skipped (no name): {stats['skipped_no_name']}")
-            logger.info(f"  Skipped (duplicate): {stats['skipped_duplicate']}")
-            logger.info(f"  Errors: {stats['errors']}")
+            logger.info(f"  Parsed: {stats.records_parsed}")
+            logger.info(f"  Saved: {stats.records_saved}")
+            logger.info(f"  Duplicates skipped: {stats.duplicates_skipped}")
+            logger.info(f"  Errors: {stats.errors}")
             
         except Exception as e:
-            logger.error(f"Failed to process {file_path.name}: {e}")
+            logger.error(f"Failed to process {ingestor.engine}: {e}")
+            import traceback
+            traceback.print_exc()
             total_stats["errors"] += 1
-        
-        finally:
-            if args.limit:
-                import os
-                os.unlink(temp_path)
     
     # Summary
     logger.info("\n" + "=" * 50)
-    logger.info("TOTAL SUMMARY")
+    logger.info("INGESTION SUMMARY")
     logger.info("=" * 50)
-    logger.info(f"Files processed: {total_stats['files']}")
-    logger.info(f"Total slugs: {total_stats['total']}")
-    logger.info(f"New hotels inserted: {total_stats['inserted']}")
-    logger.info(f"Existing hotels updated: {total_stats['updated']}")
-    logger.info(f"Fuzzy matched: {total_stats['fuzzy_matched']}")
-    logger.info(f"Websites extracted: {total_stats['websites_found']}")
-    logger.info(f"Booking engines linked: {total_stats['engines_linked']}")
-    logger.info(f"Skipped (no name): {total_stats['skipped_no_name']}")
-    logger.info(f"Skipped (duplicate): {total_stats['skipped_duplicate']}")
+    logger.info(f"Engines processed: {total_stats['files']}")
+    logger.info(f"Total slugs parsed: {total_stats['records_parsed']}")
+    logger.info(f"Hotels saved: {total_stats['records_saved']}")
+    logger.info(f"Duplicates skipped: {total_stats['duplicates_skipped']}")
     logger.info(f"Errors: {total_stats['errors']}")
+    
+    if total_stats['records_saved'] > 0:
+        logger.info("\n" + "-" * 50)
+        logger.info("Hotels inserted with placeholder names.")
+        logger.info("Cron enqueuer will pick them up for name enrichment.")
+        logger.info("  Schedule: */10 * * * * (every 10 min)")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
