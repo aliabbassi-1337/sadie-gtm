@@ -99,8 +99,8 @@ ec2:
 
   # Name enrichment (scrape hotel names from booking pages)
   name_enrichment_consumer:
-    description: Poll SQS and scrape hotel names from booking pages
-    command: uv run python -m workflows.enrich_names_consumer
+    description: Poll SQS and scrape hotel names from booking pages (with archive fallback for 404s)
+    command: uv run python -m workflows.enrich_names_consumer --archive-fallback
     type: systemd  # Runs continuously while instance is up
 
   enqueue_name_enrichment:
