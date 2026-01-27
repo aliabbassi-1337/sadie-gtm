@@ -1122,15 +1122,15 @@ WHERE h.name IS NOT NULL
 -- Updates location, contact info, and coordinates
 UPDATE sadie_gtm.hotels
 SET 
-    address = COALESCE(:address, address),
-    city = COALESCE(:city, city),
-    state = COALESCE(:state, state),
-    country = COALESCE(:country, country),
+    address = COALESCE(CAST(:address AS TEXT), address),
+    city = COALESCE(CAST(:city AS TEXT), city),
+    state = COALESCE(CAST(:state AS TEXT), state),
+    country = COALESCE(CAST(:country AS TEXT), country),
     location = CASE 
-        WHEN :latitude IS NOT NULL AND :longitude IS NOT NULL 
-        THEN ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography
+        WHEN CAST(:latitude AS FLOAT) IS NOT NULL AND CAST(:longitude AS FLOAT) IS NOT NULL 
+        THEN ST_SetSRID(ST_MakePoint(CAST(:longitude AS FLOAT), CAST(:latitude AS FLOAT)), 4326)::geography
         ELSE location
     END,
-    phone_google = COALESCE(:phone, phone_google),
+    phone_google = COALESCE(CAST(:phone AS TEXT), phone_google),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
