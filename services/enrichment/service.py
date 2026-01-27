@@ -360,10 +360,11 @@ class BookingPageEnricher:
 
     @staticmethod
     def needs_address_enrichment(hotel) -> bool:
-        """Check if hotel needs address enrichment."""
+        """Check if hotel needs address/location enrichment (city, state, or country)."""
         city = hotel.city if hasattr(hotel, 'city') else hotel.get("city", "")
         state = hotel.state if hasattr(hotel, 'state') else hotel.get("state", "")
-        return not city or not state
+        country = hotel.country if hasattr(hotel, 'country') else hotel.get("country", "")
+        return not city or not state or not country
 
 
 class IService(ABC):
