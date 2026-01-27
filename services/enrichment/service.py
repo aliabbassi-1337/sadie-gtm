@@ -215,6 +215,190 @@ class BookingPageEnricher:
         except Exception:
             return None
 
+    async def extract_from_url_with_archive_fallback(
+        self,
+        client: httpx.AsyncClient,
+        booking_url: str,
+    ) -> Optional[ExtractedBookingData]:
+        """Extract data from booking page with archive fallback for 404s.
+        
+        1. Try live page
+        2. If 404 or garbage data, try Common Crawl (older indexes)
+        3. If still no data, try Wayback Machine
+        """
+        import gzip
+        
+        # Archive indexes for dead URLs (2019-2022 when hotels were active)
+        ARCHIVE_INDEXES = [
+            "CC-MAIN-2020-34",
+            "CC-MAIN-2021-04", 
+            "CC-MAIN-2019-51",
+            "CC-MAIN-2022-05",
+            "CC-MAIN-2020-16",
+        ]
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        
+        html = None
+        source = "live"
+        
+        # Step 1: Try live page
+        try:
+            resp = await client.get(booking_url, headers=headers, follow_redirects=True, timeout=30.0)
+            if resp.status_code == 200:
+                html = resp.text
+                # Check for garbage data (Cloudbeds homepage redirect or error page)
+                garbage_indicators = [
+                    "soluções online",
+                    "oops! something went wrong",
+                    "page not found",
+                    "404",
+                ]
+                is_garbage = any(ind in html.lower() for ind in garbage_indicators)
+                if is_garbage:
+                    html = None  # Treat as 404, use archive
+        except Exception:
+            pass
+        
+        # Step 2: Try Common Crawl archives
+        if not html:
+            for crawl_id in ARCHIVE_INDEXES:
+                try:
+                    resp = await client.get(
+                        f"https://index.commoncrawl.org/{crawl_id}-index",
+                        params={"url": booking_url, "output": "json"},
+                        timeout=15,
+                    )
+                    if resp.status_code != 200 or not resp.text.strip():
+                        continue
+                    
+                    import json as json_module
+                    data = json_module.loads(resp.text.strip().split("\n")[0])
+                    if data.get("status") != "200":
+                        continue
+                    
+                    warc_url = f"https://data.commoncrawl.org/{data['filename']}"
+                    offset = int(data["offset"])
+                    length = int(data["length"])
+                    warc_headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
+                    
+                    resp2 = await client.get(warc_url, headers=warc_headers, timeout=60)
+                    if resp2.status_code == 206:
+                        content = gzip.decompress(resp2.content)
+                        html = content.decode("utf-8", errors="ignore")
+                        source = "commoncrawl"
+                        break
+                except Exception:
+                    continue
+        
+        # Step 3: Try Wayback Machine
+        if not html:
+            try:
+                resp = await client.get(
+                    "https://archive.org/wayback/available",
+                    params={"url": booking_url},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    wayback_url = data.get("archived_snapshots", {}).get("closest", {}).get("url")
+                    if wayback_url:
+                        resp2 = await client.get(wayback_url, timeout=30, follow_redirects=True)
+                        if resp2.status_code == 200:
+                            html = resp2.text
+                            source = "wayback"
+            except Exception:
+                pass
+        
+        if not html:
+            return None
+        
+        # Extract data using existing methods
+        return self.extract_from_html(html)
+
+    def extract_from_html(self, html: str) -> Optional[ExtractedBookingData]:
+        """Extract hotel data from HTML (live or archived)."""
+        # Try Cloudbeds-specific extraction first (modern format)
+        cloudbeds_data = self.extract_from_cloudbeds(html)
+        if cloudbeds_data and (cloudbeds_data.city or cloudbeds_data.address):
+            # Get name from other sources
+            name = None
+            json_ld = self.extract_json_ld(html)
+            if json_ld and json_ld.get("name"):
+                name = json_ld["name"].strip()
+            if not name:
+                meta_data = self.extract_from_meta_tags(html)
+                name = meta_data.name
+            cloudbeds_data.name = name
+            return cloudbeds_data
+        
+        # Try older Cloudbeds format (archives from 2019-2022)
+        older_data = self.extract_from_older_cloudbeds(html)
+        if older_data and (older_data.city or older_data.address):
+            return older_data
+        
+        # Try JSON-LD
+        json_ld = self.extract_json_ld(html)
+        if json_ld:
+            data = self.parse_address_from_json_ld(json_ld)
+            if data.city or data.address:  # Need location, not just name
+                return data
+        
+        # Fall back to meta tags
+        data = self.extract_from_meta_tags(html)
+        if data.city or data.address:  # Need location, not just name
+            return data
+        
+        # Return whatever we have (even just name)
+        return older_data or data
+
+    @staticmethod
+    def extract_from_older_cloudbeds(html: str) -> Optional[ExtractedBookingData]:
+        """Extract from older Cloudbeds HTML format (pre-2022 archives)."""
+        name = None
+        city = None
+        country = None
+        address = None
+        
+        # Title: "Hotel Name - City, Country - Best Price Guarantee"
+        title_match = re.search(r'<title>([^<]+)</title>', html)
+        if title_match:
+            title = title_match.group(1).strip()
+            if 'cloudbeds' not in title.lower() and 'soluções' not in title.lower():
+                title = re.sub(r'\s*-\s*Best Price Guarantee.*$', '', title, flags=re.I)
+                parts = title.split(' - ')
+                if len(parts) >= 2:
+                    name = parts[0].strip()
+                    loc = parts[1].strip()
+                    loc_parts = loc.split(',')
+                    if len(loc_parts) >= 2:
+                        city = loc_parts[0].strip()
+                        country = loc_parts[-1].strip()
+                    else:
+                        city = loc
+        
+        # Address: "Address 1:</span> Street Address</p>"
+        addr_match = re.search(r'Address\s*\d?:</span>\s*([^<]+)</p>', html)
+        if addr_match:
+            address = addr_match.group(1).strip()
+        
+        # City from older format
+        city_match = re.search(r'City\s*:</span>\s*([^<]+)</p>', html)
+        if city_match and not city:
+            city = city_match.group(1).strip().split(' - ')[0].strip()
+        
+        if name or city or address:
+            return ExtractedBookingData(
+                name=name,
+                address=address,
+                city=city,
+                country=country,
+            )
+        return None
+
     @staticmethod
     def extract_from_cloudbeds(html: str) -> Optional[ExtractedBookingData]:
         """
@@ -965,6 +1149,7 @@ class Service(IService):
         hotel_id: int,
         booking_url: str,
         delay: float = 0.5,
+        use_archive_fallback: bool = False,
     ) -> BookingPageEnrichmentResult:
         """Enrich a single hotel from its booking page.
         
@@ -976,6 +1161,7 @@ class Service(IService):
             hotel_id: Hotel ID to enrich
             booking_url: Booking page URL to scrape
             delay: Delay before request (rate limiting)
+            use_archive_fallback: Try Common Crawl/Wayback if live page fails
             
         Returns BookingPageEnrichmentResult.
         """
@@ -991,11 +1177,15 @@ class Service(IService):
         if not needs_name and not needs_address:
             return BookingPageEnrichmentResult(success=True, skipped=True)
         
-        # Rate limiting
-        await asyncio.sleep(delay)
+        # Rate limiting (skip for archive since they don't rate limit)
+        if not use_archive_fallback:
+            await asyncio.sleep(delay)
         
-        # Extract data from booking page
-        data = await enricher.extract_from_url(client, booking_url)
+        # Extract data from booking page (with optional archive fallback)
+        if use_archive_fallback:
+            data = await enricher.extract_from_url_with_archive_fallback(client, booking_url)
+        else:
+            data = await enricher.extract_from_url(client, booking_url)
         
         if not data:
             return BookingPageEnrichmentResult(success=True)

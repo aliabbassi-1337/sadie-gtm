@@ -42,6 +42,7 @@ async def process_message(
     message: Dict[str, Any],
     queue_url: str,
     delay: float,
+    use_archive_fallback: bool = False,
 ) -> tuple:
     """Process a single SQS message.
     
@@ -62,6 +63,7 @@ async def process_message(
         hotel_id=hotel_id,
         booking_url=booking_url,
         delay=delay,
+        use_archive_fallback=use_archive_fallback,
     )
     
     if result.skipped:
@@ -84,7 +86,7 @@ async def process_message(
         return (False, False, False)
 
 
-async def run_worker(delay: float = 0.5, poll_interval: int = 5):
+async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fallback: bool = False):
     """Main worker loop - poll SQS and process messages."""
     global shutdown_requested
     
@@ -102,7 +104,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5):
     addresses_updated = 0
     errors = 0
     
-    logger.info(f"Starting enrichment worker (delay={delay}s)")
+    logger.info(f"Starting enrichment worker (delay={delay}s, archive_fallback={use_archive_fallback})")
     logger.info(f"Queue: {QUEUE_URL}")
     
     async with httpx.AsyncClient() as client:
@@ -135,7 +137,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5):
                         break
                     
                     success, name_up, addr_up = await process_message(
-                        service, client, msg, QUEUE_URL, delay
+                        service, client, msg, QUEUE_URL, delay, use_archive_fallback
                     )
                     processed += 1
                     if name_up:
@@ -173,13 +175,18 @@ Environment:
     
     parser.add_argument("--delay", "-d", type=float, default=0.5)
     parser.add_argument("--poll-interval", type=int, default=5)
+    parser.add_argument(
+        "--archive-fallback", 
+        action="store_true",
+        help="Try Common Crawl/Wayback if live page fails (for 404 recovery)"
+    )
     
     args = parser.parse_args()
     
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
     
-    asyncio.run(run_worker(args.delay, args.poll_interval))
+    asyncio.run(run_worker(args.delay, args.poll_interval, args.archive_fallback))
 
 
 if __name__ == "__main__":
