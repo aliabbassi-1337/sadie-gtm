@@ -52,11 +52,10 @@ async def run_status(source: str = None):
 
 async def run_dry_run(limit: int, source: str = None):
     """Show what would be processed without making API calls."""
-    from services.enrichment import repo
-    
     await init_db()
     try:
-        hotels = await repo.get_hotels_needing_geocoding(limit=limit, source=source)
+        service = EnrichmentService()
+        hotels = await service.get_hotels_needing_geocoding(limit=limit, source=source)
         
         logger.info(f"Would geocode {len(hotels)} hotels:")
         

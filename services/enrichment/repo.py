@@ -546,6 +546,7 @@ async def update_hotel_geocoding(
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
     phone: Optional[str] = None,
+    email: Optional[str] = None,
 ) -> None:
     """Update hotel with geocoding results from Serper Places."""
     async with get_conn() as conn:
@@ -559,4 +560,30 @@ async def update_hotel_geocoding(
             latitude=latitude,
             longitude=longitude,
             phone=phone,
+            email=email,
         )
+
+
+async def batch_update_hotel_geocoding(
+    updates: List[Dict],
+) -> int:
+    """Batch update hotels with geocoding results. Returns count of updated hotels."""
+    if not updates:
+        return 0
+    
+    async with get_conn() as conn:
+        async with conn.transaction():
+            for update in updates:
+                await queries.update_hotel_geocoding(
+                    conn,
+                    hotel_id=update["hotel_id"],
+                    address=update.get("address"),
+                    city=update.get("city"),
+                    state=update.get("state"),
+                    country=update.get("country"),
+                    latitude=update.get("latitude"),
+                    longitude=update.get("longitude"),
+                    phone=update.get("phone"),
+                    email=update.get("email"),
+                )
+    return len(updates)

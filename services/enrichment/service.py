@@ -949,6 +949,12 @@ class Service(IService):
         """Count hotels needing geocoding (have name, missing city)."""
         return await repo.get_hotels_needing_geocoding_count(source=source)
 
+    async def get_hotels_needing_geocoding(
+        self, limit: int = 1000, source: str = None
+    ) -> List[repo.HotelGeocodingCandidate]:
+        """Get hotels needing geocoding (have name, missing city)."""
+        return await repo.get_hotels_needing_geocoding(limit=limit, source=source)
+
     async def geocode_hotels_by_name(
         self,
         limit: int = 100,
@@ -995,8 +1001,11 @@ class Service(IService):
 
         semaphore = asyncio.Semaphore(concurrency)
         enricher = WebsiteEnricher(SERPER_API_KEY)
+        
+        # Collect updates for batch processing
+        pending_updates = []
 
-        async def geocode_hotel(hotel: repo.HotelGeocodingCandidate):
+        async def geocode_hotel(hotel: repo.HotelGeocodingCandidate) -> Optional[dict]:
             async with semaphore:
                 try:
                     stats["api_calls"] += 1
@@ -1006,7 +1015,7 @@ class Service(IService):
 
                     if not result:
                         stats["not_found"] += 1
-                        return
+                        return None
 
                     # Parse location from address if available
                     city = None
@@ -1015,31 +1024,41 @@ class Service(IService):
                     
                     address = result.get("address")
                     if address:
-                        # Parse "123 Main St, City, ST 12345, USA" format
                         city, state, country = self._parse_address_components(address)
 
-                    # Update hotel with geocoding results
-                    await repo.update_hotel_geocoding(
-                        hotel_id=hotel.id,
-                        address=address,
-                        city=city,
-                        state=state,
-                        country=country,
-                        latitude=result.get("latitude"),
-                        longitude=result.get("longitude"),
-                        phone=result.get("phone"),
-                    )
-                    stats["enriched"] += 1
+                    return {
+                        "hotel_id": hotel.id,
+                        "address": address,
+                        "city": city,
+                        "state": state,
+                        "country": country,
+                        "latitude": result.get("latitude"),
+                        "longitude": result.get("longitude"),
+                        "phone": result.get("phone"),
+                        "email": result.get("email"),
+                    }
 
                 except Exception as e:
                     log(f"Error geocoding hotel {hotel.id}: {e}")
                     stats["errors"] += 1
+                    return None
 
-        # Process in batches for progress logging
+        # Process in batches with transaction-wrapped updates
         batch_size = 100
         for i in range(0, len(hotels), batch_size):
             batch = hotels[i:i + batch_size]
-            await asyncio.gather(*[geocode_hotel(h) for h in batch])
+            
+            # Geocode batch concurrently
+            results = await asyncio.gather(*[geocode_hotel(h) for h in batch])
+            
+            # Collect successful results
+            batch_updates = [r for r in results if r is not None]
+            
+            # Batch update with transaction
+            if batch_updates:
+                updated = await repo.batch_update_hotel_geocoding(batch_updates)
+                stats["enriched"] += updated
+            
             log(f"  Progress: {min(i + batch_size, len(hotels))}/{len(hotels)} "
                 f"(enriched: {stats['enriched']}, not_found: {stats['not_found']}, errors: {stats['errors']})")
 

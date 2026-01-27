@@ -1132,5 +1132,6 @@ SET
         ELSE location
     END,
     phone_google = COALESCE(CAST(:phone AS TEXT), phone_google),
+    email = COALESCE(CAST(:email AS TEXT), email),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;

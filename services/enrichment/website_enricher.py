@@ -516,6 +516,7 @@ class WebsiteEnricher:
                 "name": best.get("title"),
                 "address": best.get("address"),
                 "phone": best.get("phoneNumber"),
+                "email": best.get("email"),  # Serper Places may include email for some businesses
                 "latitude": best.get("latitude"),
                 "longitude": best.get("longitude"),
                 "website": website,
