@@ -1,7 +1,11 @@
-"""Recover hotel data from Wayback Machine for 404 booking URLs.
+"""Recover hotel data from web archives for 404 booking URLs.
 
-For Cloudbeds URLs that return 404, check if Wayback Machine has an
-archived version and extract hotel name/city/country from it.
+For Cloudbeds URLs that return 404, check Common Crawl and Wayback Machine
+for archived versions and extract hotel name/city/country from them.
+
+Uses multiple sources:
+1. Common Crawl - Fast, no rate limiting (primary)
+2. Wayback Machine - Larger archive (fallback)
 
 Usage:
     uv run python -m workflows.enrich_wayback --limit 100
@@ -16,11 +20,57 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import asyncio
 import argparse
 import httpx
+import gzip
+import json
 import re
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from loguru import logger
 
 from db.client import init_db, close_db, get_conn
+
+# Common Crawl indexes to search (older ones more likely to have dead URLs)
+COMMON_CRAWL_INDEXES = [
+    "CC-MAIN-2020-34",
+    "CC-MAIN-2021-04",
+    "CC-MAIN-2019-51",
+    "CC-MAIN-2022-05",
+    "CC-MAIN-2020-16",
+]
+
+
+async def get_common_crawl_html(url: str, client: httpx.AsyncClient) -> Optional[str]:
+    """Fetch HTML from Common Crawl archive."""
+    for crawl_id in COMMON_CRAWL_INDEXES:
+        try:
+            # Query index
+            resp = await client.get(
+                f"https://index.commoncrawl.org/{crawl_id}-index",
+                params={"url": url, "output": "json"},
+                timeout=15,
+            )
+            if resp.status_code != 200 or not resp.text.strip():
+                continue
+            
+            data = json.loads(resp.text.strip().split("\n")[0])
+            if data.get("status") != "200":
+                continue
+            
+            # Fetch WARC chunk
+            warc_url = f"https://data.commoncrawl.org/{data['filename']}"
+            offset = int(data["offset"])
+            length = int(data["length"])
+            headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
+            
+            resp2 = await client.get(warc_url, headers=headers, timeout=60)
+            if resp2.status_code == 206:
+                content = gzip.decompress(resp2.content)
+                return content.decode("utf-8", errors="ignore")
+                
+        except Exception as e:
+            logger.debug(f"Common Crawl {crawl_id} error for {url}: {e}")
+            continue
+    
+    return None
 
 
 async def get_wayback_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
@@ -42,37 +92,11 @@ async def get_wayback_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
     return None
 
 
-async def extract_from_wayback(wayback_url: str, client: httpx.AsyncClient) -> Dict[str, str]:
-    """Extract hotel data from Wayback Machine page with retry for rate limits."""
+def extract_from_html(html: str) -> Dict[str, str]:
+    """Extract hotel data from HTML content."""
     result = {}
-    resp = None
     
-    # Retry with backoff for 503 errors
-    for attempt in range(3):
-        try:
-            resp = await client.get(wayback_url, timeout=30, follow_redirects=True)
-            if resp.status_code == 503:
-                wait_time = 2 ** attempt  # 1, 2, 4 seconds
-                logger.debug(f"Rate limited, waiting {wait_time}s...")
-                await asyncio.sleep(wait_time)
-                continue
-            if resp.status_code != 200:
-                logger.debug(f"Wayback returned {resp.status_code}")
-                return result
-            break
-        except Exception as e:
-            logger.debug(f"Request error: {e}")
-            if attempt < 2:
-                await asyncio.sleep(1)
-                continue
-            return result
-    else:
-        return result  # All retries failed
-    
-    # Extract from HTML
     try:
-        html = resp.text
-        
         # Extract from title: "Hotel Name - City, Country - Best Price Guarantee"
         title_match = re.search(r'<title>([^<]+)</title>', html)
         if title_match:
@@ -99,7 +123,7 @@ async def extract_from_wayback(wayback_url: str, client: httpx.AsyncClient) -> D
             elif len(parts) == 1 and title:
                 result['name'] = title
         else:
-            logger.debug(f"No title found in HTML")
+            logger.debug("No title found in HTML")
         
         # Try to extract address from older Cloudbeds format
         # Format: "Address 1:</span> Street Address</p>"
@@ -127,13 +151,47 @@ async def extract_from_wayback(wayback_url: str, client: httpx.AsyncClient) -> D
                 result['address'] = be_texts[0]
                 
     except Exception as e:
-        logger.debug(f"Error extracting from {wayback_url}: {e}")
+        logger.debug(f"Error extracting from HTML: {e}")
     
     return result
 
 
+async def get_archived_html(url: str, client: httpx.AsyncClient) -> Tuple[Optional[str], str]:
+    """Try to get archived HTML from Common Crawl or Wayback Machine.
+    
+    Returns (html, source) where source is 'commoncrawl', 'wayback', or 'none'.
+    """
+    # Try Common Crawl first (faster, no rate limiting)
+    html = await get_common_crawl_html(url, client)
+    if html:
+        return html, "commoncrawl"
+    
+    # Fall back to Wayback Machine
+    wayback_url = await get_wayback_url(url, client)
+    if wayback_url:
+        # Fetch with retry for rate limits
+        for attempt in range(3):
+            try:
+                resp = await client.get(wayback_url, timeout=30, follow_redirects=True)
+                if resp.status_code == 503:
+                    wait_time = 2 ** attempt
+                    logger.debug(f"Wayback rate limited, waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                if resp.status_code == 200:
+                    return resp.text, "wayback"
+                break
+            except Exception as e:
+                logger.debug(f"Wayback fetch error: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                    continue
+    
+    return None, "none"
+
+
 async def run(limit: int = 100, dry_run: bool = False):
-    """Recover hotel data from Wayback Machine."""
+    """Recover hotel data from web archives (Common Crawl + Wayback)."""
     await init_db()
     
     try:
@@ -150,40 +208,46 @@ async def run(limit: int = 100, dry_run: bool = False):
             ''', limit)
             
             if not rows:
-                logger.info("No hotels need Wayback recovery")
+                logger.info("No hotels need archive recovery")
                 return 0
             
-            logger.info(f"Found {len(rows)} hotels to check in Wayback Machine")
+            logger.info(f"Found {len(rows)} hotels to check in web archives")
             
             if dry_run:
                 logger.info("Dry run - not updating database")
             
             recovered = 0
             not_archived = 0
+            from_cc = 0
+            from_wb = 0
             
             async with httpx.AsyncClient() as client:
                 for row in rows:
                     hotel_id = row['id']
                     booking_url = row['booking_url']
                     
-                    # Check Wayback
-                    wayback_url = await get_wayback_url(booking_url, client)
+                    # Try Common Crawl first, then Wayback
+                    html, source = await get_archived_html(booking_url, client)
                     
-                    if not wayback_url:
+                    if not html:
                         not_archived += 1
                         logger.debug(f"  Hotel {hotel_id}: no archive")
                         continue
                     
                     # Extract data
-                    data = await extract_from_wayback(wayback_url, client)
+                    data = extract_from_html(html)
                     
                     if not data.get('name'):
                         not_archived += 1
                         logger.debug(f"  Hotel {hotel_id}: archive found but no data")
                         continue
                     
-                    logger.info(f"  Hotel {hotel_id}: recovered name={data.get('name')}, city={data.get('city')}, address={data.get('address')}")
+                    logger.info(f"  Hotel {hotel_id} [{source}]: recovered name={data.get('name')}, city={data.get('city')}, address={data.get('address')}")
                     recovered += 1
+                    if source == "commoncrawl":
+                        from_cc += 1
+                    else:
+                        from_wb += 1
                     
                     if not dry_run:
                         await conn.execute('''
@@ -196,10 +260,11 @@ async def run(limit: int = 100, dry_run: bool = False):
                             WHERE id = $5
                         ''', data.get('name'), data.get('city'), data.get('country'), data.get('address'), hotel_id)
                     
-                    # Rate limit - be nice to Wayback (they rate limit aggressively)
-                    await asyncio.sleep(2)
+                    # Only rate limit for Wayback (Common Crawl has no limits)
+                    if source == "wayback":
+                        await asyncio.sleep(2)
             
-            logger.info(f"Done: {recovered} recovered, {not_archived} not archived")
+            logger.info(f"Done: {recovered} recovered ({from_cc} Common Crawl, {from_wb} Wayback), {not_archived} not archived")
             return recovered
             
     finally:
