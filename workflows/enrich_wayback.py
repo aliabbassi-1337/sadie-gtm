@@ -4,8 +4,10 @@ For Cloudbeds URLs that return 404, check Common Crawl and Wayback Machine
 for archived versions and extract hotel name/city/country from them.
 
 Uses multiple sources:
-1. Common Crawl - Fast, no rate limiting (primary)
+1. Common Crawl - Fast, no rate limiting (primary) - uses older indexes
 2. Wayback Machine - Larger archive (fallback)
+
+Reuses CommonCrawlEnumerator from services/leadgen/booking_engines.py
 
 Usage:
     uv run python -m workflows.enrich_wayback --limit 100
@@ -27,9 +29,10 @@ from typing import Optional, Dict, Tuple
 from loguru import logger
 
 from db.client import init_db, close_db, get_conn
+from services.leadgen.booking_engines import CommonCrawlEnumerator, CommonCrawlRecord
 
-# Common Crawl indexes to search (older ones more likely to have dead URLs)
-COMMON_CRAWL_INDEXES = [
+# Older indexes for recovering dead URLs (active 2019-2022)
+ARCHIVE_INDEXES = [
     "CC-MAIN-2020-34",
     "CC-MAIN-2021-04",
     "CC-MAIN-2019-51",
@@ -39,10 +42,9 @@ COMMON_CRAWL_INDEXES = [
 
 
 async def get_common_crawl_html(url: str, client: httpx.AsyncClient) -> Optional[str]:
-    """Fetch HTML from Common Crawl archive."""
-    for crawl_id in COMMON_CRAWL_INDEXES:
+    """Fetch HTML from Common Crawl older archives (for dead URLs)."""
+    for crawl_id in ARCHIVE_INDEXES:
         try:
-            # Query index
             resp = await client.get(
                 f"https://index.commoncrawl.org/{crawl_id}-index",
                 params={"url": url, "output": "json"},
@@ -55,7 +57,7 @@ async def get_common_crawl_html(url: str, client: httpx.AsyncClient) -> Optional
             if data.get("status") != "200":
                 continue
             
-            # Fetch WARC chunk
+            # Fetch WARC - reuse CommonCrawlEnumerator logic
             warc_url = f"https://data.commoncrawl.org/{data['filename']}"
             offset = int(data["offset"])
             length = int(data["length"])
@@ -67,14 +69,14 @@ async def get_common_crawl_html(url: str, client: httpx.AsyncClient) -> Optional
                 return content.decode("utf-8", errors="ignore")
                 
         except Exception as e:
-            logger.debug(f"Common Crawl {crawl_id} error for {url}: {e}")
+            logger.debug(f"CC {crawl_id} error: {e}")
             continue
     
     return None
 
 
 async def get_wayback_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
-    """Check if URL has a Wayback Machine archive."""
+    """Check Wayback Machine for archive."""
     try:
         resp = await client.get(
             "https://archive.org/wayback/available",
@@ -88,7 +90,7 @@ async def get_wayback_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
             if closest.get("available"):
                 return closest.get("url")
     except Exception as e:
-        logger.debug(f"Wayback API error for {url}: {e}")
+        logger.debug(f"Wayback error: {e}")
     return None
 
 
