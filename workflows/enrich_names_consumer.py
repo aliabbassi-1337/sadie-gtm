@@ -84,16 +84,16 @@ async def process_message(
             delete_message(queue_url, receipt_handle)
             return (True, result.name_updated, result.address_updated)
         else:
-            # Page loaded but no data extracted - increment attempts
-            await enrichment_repo.increment_enrichment_attempts(hotel_id)
+            # Page loaded but no data extracted - mark attempt timestamp
+            await enrichment_repo.set_last_enrichment_attempt(hotel_id)
             delete_message(queue_url, receipt_handle)
-            logger.debug(f"  Hotel {hotel_id}: no data extracted, incremented attempts")
+            logger.debug(f"  Hotel {hotel_id}: no data extracted, will retry in 7 days")
             return (True, False, False)
     else:
-        # Error - increment attempts so it stops being re-enqueued after 3 tries
-        await enrichment_repo.increment_enrichment_attempts(hotel_id)
+        # Error - mark attempt timestamp (will retry after 7 days)
+        await enrichment_repo.set_last_enrichment_attempt(hotel_id)
         delete_message(queue_url, receipt_handle)
-        logger.warning(f"  Hotel {hotel_id}: enrichment failed, incremented attempts")
+        logger.warning(f"  Hotel {hotel_id}: enrichment failed, will retry in 7 days")
         return (False, False, False)
 
 

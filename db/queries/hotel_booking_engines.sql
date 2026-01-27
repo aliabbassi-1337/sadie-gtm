@@ -109,7 +109,7 @@ LIMIT :limit;
 -- Get hotels needing either name or address enrichment
 -- type param: 'names' = missing names, 'addresses' = missing location, 'both' = either
 -- NOTE: Excludes Cloudbeds hotels - they have their own dedicated enrichment queue
--- NOTE: Excludes hotels with >= 3 failed enrichment attempts (broken URLs)
+-- NOTE: Only includes hotels not attempted in last 7 days (handles rate limits)
 SELECT 
     h.id,
     h.name,
@@ -127,7 +127,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
   AND be.name != 'Cloudbeds'  -- Cloudbeds has dedicated queue
-  AND COALESCE(hbe.enrichment_attempts, 0) < 3  -- Skip broken URLs after 3 failed attempts
+  AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
   AND (
     (:enrich_type = 'names' AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%'))
     OR (:enrich_type = 'addresses' AND (h.city IS NULL OR h.city = '' OR h.state IS NULL OR h.state = ''))
@@ -172,7 +172,7 @@ WHERE id = :hotel_id;
 
 -- name: get_cloudbeds_hotels_needing_enrichment
 -- Get hotels with Cloudbeds booking URLs that need name, city, or state enrichment
--- Excludes URLs with >= 3 failed attempts (likely permanently broken)
+-- Only includes hotels not attempted in last 7 days (handles rate limits)
 SELECT h.id, h.name, h.city, h.state, h.country, h.address,
        hbe.booking_url, hbe.engine_property_id as slug
 FROM sadie_gtm.hotels h
@@ -181,7 +181,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND COALESCE(hbe.enrichment_attempts, 0) < 3
+  AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
   AND h.status = 1
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
@@ -200,7 +200,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND COALESCE(hbe.enrichment_attempts, 0) < 3
+  AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
   AND h.status = 1
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
@@ -216,10 +216,10 @@ JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%';
 
--- name: increment_enrichment_attempts!
--- Increment failed enrichment attempts for a hotel
+-- name: set_last_enrichment_attempt!
+-- Record when enrichment was last attempted (for rate limit cooldown)
 UPDATE sadie_gtm.hotel_booking_engines
-SET enrichment_attempts = COALESCE(enrichment_attempts, 0) + 1
+SET last_enrichment_attempt = NOW()
 WHERE hotel_id = :hotel_id;
 
 

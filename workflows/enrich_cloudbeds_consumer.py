@@ -349,8 +349,8 @@ async def run_consumer(concurrency: int = 5):
                 
                 # Batch increment failed attempts
                 if len(batch_failed_ids) >= 50:
-                    marked = await repo.batch_increment_enrichment_attempts(batch_failed_ids)
-                    logger.info(f"Incremented attempts for {marked} hotels")
+                    marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                    logger.info(f"Marked {marked} hotels for retry in 7 days")
                     batch_failed_ids = []
                 
                 # Log progress
@@ -364,8 +364,8 @@ async def run_consumer(concurrency: int = 5):
                 logger.info(f"Final batch update: {updated} hotels")
             
             if batch_failed_ids:
-                marked = await repo.batch_increment_enrichment_attempts(batch_failed_ids)
-                logger.info(f"Final failed batch: {marked} attempts incremented")
+                marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                logger.info(f"Final batch: {marked} hotels marked for retry in 7 days")
             
             # Cleanup
             for page in pages:
