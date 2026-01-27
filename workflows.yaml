@@ -123,6 +123,19 @@ ec2:
     type: cron
     host: primary  # Only run on first/primary EC2 instance
 
+  # Mews enrichment (scrape hotel name from Mews booking pages)
+  mews_enrichment_consumer:
+    description: Poll SQS and scrape Mews hotels with Playwright
+    command: uv run python -m workflows.enrich_mews_consumer --concurrency 6
+    type: systemd
+
+  enqueue_mews_enrichment:
+    description: Queue Mews hotels needing enrichment
+    command: uv run python -m workflows.enrich_mews_enqueue --limit 3000
+    schedule: "*/15 * * * *"  # Every 15 min
+    type: cron
+    host: primary
+
   # Serper geocoding (for non-Cloudbeds crawl data - SiteMinder, Mews, etc.)
   geocode_crawl_data:
     description: Geocode crawl hotels by name using Serper Places API
