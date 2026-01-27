@@ -8,7 +8,7 @@ and ingests them into the hotels table.
 Uses the CrawlIngestor from services/ingestor/ which:
 - Inserts hotels with placeholder names ("Unknown (slug)")
 - Links to booking_engines table
-- Cron-scheduled enqueuer picks up new hotels for SQS name enrichment
+- Cron-scheduled enqueuer picks up new hotels for SQS booking page enrichment
 
 Usage:
     # Ingest all deduped files from S3 (recommended)
@@ -200,7 +200,7 @@ async def run_ingest(args):
     if total_stats['records_saved'] > 0:
         logger.info("\n" + "-" * 50)
         logger.info("Hotels inserted with placeholder names.")
-        logger.info("Cron enqueuer will pick them up for name enrichment.")
+        logger.info("Cron enqueuer will pick them up for booking page enrichment.")
         logger.info("  Schedule: */10 * * * * (every 10 min)")
 
 

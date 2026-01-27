@@ -1,11 +1,12 @@
-"""Hotel enrichment worker - Polls SQS and enriches hotels from booking pages.
+"""Booking page enrichment worker - Polls SQS and enriches hotels.
 
 Run continuously on EC2 instances to process enrichment jobs.
-Extracts hotel names and location data (city, state, country) from booking pages.
+Extracts hotel name, address, city, state, country from booking pages.
+Uses archive fallback (Common Crawl/Wayback) for 404 URLs.
 
 Usage:
-    uv run python -m workflows.enrich_names_consumer
-    uv run python -m workflows.enrich_names_consumer --delay 0.5
+    uv run python -m workflows.enrich_booking_pages_consumer
+    uv run python -m workflows.enrich_booking_pages_consumer --archive-fallback
 """
 
 import sys
@@ -22,9 +23,10 @@ import httpx
 
 from db.client import init_db, close_db
 from services.enrichment.service import Service as EnrichmentService
+from services.enrichment import repo as enrichment_repo
 from infra.sqs import receive_messages, delete_message, get_queue_attributes
 
-QUEUE_URL = os.getenv("SQS_NAME_ENRICHMENT_QUEUE_URL", "")
+QUEUE_URL = os.getenv("SQS_BOOKING_ENRICHMENT_QUEUE_URL", "")
 
 shutdown_requested = False
 
@@ -42,6 +44,7 @@ async def process_message(
     message: Dict[str, Any],
     queue_url: str,
     delay: float,
+    use_archive_fallback: bool = False,
 ) -> tuple:
     """Process a single SQS message.
     
@@ -62,6 +65,7 @@ async def process_message(
         hotel_id=hotel_id,
         booking_url=booking_url,
         delay=delay,
+        use_archive_fallback=use_archive_fallback,
     )
     
     if result.skipped:
@@ -70,26 +74,36 @@ async def process_message(
         return (True, False, False)
     
     if result.success:
-        parts = []
-        if result.name_updated:
-            parts.append("name")
-        if result.address_updated:
-            parts.append("address")
-        if parts:
+        if result.name_updated or result.address_updated:
+            # Actually enriched something
+            parts = []
+            if result.name_updated:
+                parts.append("name")
+            if result.address_updated:
+                parts.append("address")
             logger.info(f"  Updated hotel {hotel_id}: {', '.join(parts)}")
-        delete_message(queue_url, receipt_handle)
-        return (True, result.name_updated, result.address_updated)
+            delete_message(queue_url, receipt_handle)
+            return (True, result.name_updated, result.address_updated)
+        else:
+            # Page loaded but no data extracted - mark attempt timestamp
+            await enrichment_repo.set_last_enrichment_attempt(hotel_id)
+            delete_message(queue_url, receipt_handle)
+            logger.debug(f"  Hotel {hotel_id}: no data extracted, will retry in 7 days")
+            return (True, False, False)
     else:
-        # Error - don't delete, will retry
+        # Error - mark attempt timestamp (will retry after 7 days)
+        await enrichment_repo.set_last_enrichment_attempt(hotel_id)
+        delete_message(queue_url, receipt_handle)
+        logger.warning(f"  Hotel {hotel_id}: enrichment failed, will retry in 7 days")
         return (False, False, False)
 
 
-async def run_worker(delay: float = 0.5, poll_interval: int = 5):
+async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fallback: bool = False):
     """Main worker loop - poll SQS and process messages."""
     global shutdown_requested
     
     if not QUEUE_URL:
-        logger.error("SQS_NAME_ENRICHMENT_QUEUE_URL not set")
+        logger.error("SQS_BOOKING_ENRICHMENT_QUEUE_URL not set")
         return
     
     await init_db()
@@ -102,7 +116,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5):
     addresses_updated = 0
     errors = 0
     
-    logger.info(f"Starting enrichment worker (delay={delay}s)")
+    logger.info(f"Starting enrichment worker (delay={delay}s, archive_fallback={use_archive_fallback})")
     logger.info(f"Queue: {QUEUE_URL}")
     
     async with httpx.AsyncClient() as client:
@@ -135,7 +149,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5):
                         break
                     
                     success, name_up, addr_up = await process_message(
-                        service, client, msg, QUEUE_URL, delay
+                        service, client, msg, QUEUE_URL, delay, use_archive_fallback
                     )
                     processed += 1
                     if name_up:
@@ -163,23 +177,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    uv run python -m workflows.enrich_names_consumer
-    uv run python -m workflows.enrich_names_consumer --delay 0.2
+    uv run python -m workflows.enrich_booking_pages_consumer
+    uv run python -m workflows.enrich_booking_pages_consumer --archive-fallback
 
 Environment:
-    SQS_NAME_ENRICHMENT_QUEUE_URL - Required. The SQS queue URL.
+    SQS_BOOKING_ENRICHMENT_QUEUE_URL - Required. The SQS queue URL.
         """
     )
     
     parser.add_argument("--delay", "-d", type=float, default=0.5)
     parser.add_argument("--poll-interval", type=int, default=5)
+    parser.add_argument(
+        "--archive-fallback", 
+        action="store_true",
+        help="Try Common Crawl/Wayback if live page fails (for 404 recovery)"
+    )
     
     args = parser.parse_args()
     
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
     
-    asyncio.run(run_worker(args.delay, args.poll_interval))
+    asyncio.run(run_worker(args.delay, args.poll_interval, args.archive_fallback))
 
 
 if __name__ == "__main__":

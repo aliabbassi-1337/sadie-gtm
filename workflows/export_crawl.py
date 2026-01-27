@@ -52,8 +52,8 @@ async def main():
     parser.add_argument(
         "--source", "-s",
         type=str,
-        default="%commoncrawl%",
-        help="Source pattern to filter (default: %%commoncrawl%%)"
+        default="%crawl%",
+        help="Source pattern to filter (default: %%crawl%%)"
     )
 
     args = parser.parse_args()

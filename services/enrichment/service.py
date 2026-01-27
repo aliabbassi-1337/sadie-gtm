@@ -20,6 +20,7 @@ from services.enrichment.customer_proximity import (
     log as proximity_log,
 )
 from services.enrichment.website_enricher import WebsiteEnricher
+from services.enrichment.archive_scraper import ArchiveScraper, ExtractedBookingData
 
 load_dotenv()
 
@@ -29,19 +30,7 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 # ============================================================================
 # BOOKING PAGE ENRICHMENT (name + address extraction)
 # ============================================================================
-
-
-class ExtractedBookingData(BaseModel):
-    """Data extracted from a booking page."""
-    name: Optional[str] = None
-    address: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    country: Optional[str] = None
-    zip_code: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    contact_name: Optional[str] = None
+# ExtractedBookingData is imported from archive_scraper
 
 
 class BookingPageEnrichmentResult(BaseModel):
@@ -214,6 +203,18 @@ class BookingPageEnricher:
             
         except Exception:
             return None
+
+    async def extract_from_url_with_archive_fallback(
+        self,
+        client: httpx.AsyncClient,
+        booking_url: str,
+    ) -> Optional[ExtractedBookingData]:
+        """Extract data from booking page with archive fallback for 404s.
+        
+        Uses ArchiveScraper to try: live page -> Common Crawl -> Wayback Machine
+        """
+        scraper = ArchiveScraper(client)
+        return await scraper.extract(booking_url, use_archives=True)
 
     @staticmethod
     def extract_from_cloudbeds(html: str) -> Optional[ExtractedBookingData]:
@@ -965,6 +966,7 @@ class Service(IService):
         hotel_id: int,
         booking_url: str,
         delay: float = 0.5,
+        use_archive_fallback: bool = False,
     ) -> BookingPageEnrichmentResult:
         """Enrich a single hotel from its booking page.
         
@@ -976,6 +978,7 @@ class Service(IService):
             hotel_id: Hotel ID to enrich
             booking_url: Booking page URL to scrape
             delay: Delay before request (rate limiting)
+            use_archive_fallback: Try Common Crawl/Wayback if live page fails
             
         Returns BookingPageEnrichmentResult.
         """
@@ -991,11 +994,15 @@ class Service(IService):
         if not needs_name and not needs_address:
             return BookingPageEnrichmentResult(success=True, skipped=True)
         
-        # Rate limiting
-        await asyncio.sleep(delay)
+        # Rate limiting (skip for archive since they don't rate limit)
+        if not use_archive_fallback:
+            await asyncio.sleep(delay)
         
-        # Extract data from booking page
-        data = await enricher.extract_from_url(client, booking_url)
+        # Extract data from booking page (with optional archive fallback)
+        if use_archive_fallback:
+            data = await enricher.extract_from_url_with_archive_fallback(client, booking_url)
+        else:
+            data = await enricher.extract_from_url(client, booking_url)
         
         if not data:
             return BookingPageEnrichmentResult(success=True)

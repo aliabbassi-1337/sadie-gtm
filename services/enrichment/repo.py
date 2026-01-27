@@ -698,6 +698,34 @@ async def get_cloudbeds_hotels_total_count() -> int:
         return result or 0
 
 
+async def set_last_enrichment_attempt(hotel_id: int) -> None:
+    """Record when enrichment was last attempted (for rate limit cooldown)."""
+    async with get_conn() as conn:
+        await queries.set_last_enrichment_attempt(conn, hotel_id=hotel_id)
+
+
+async def batch_set_last_enrichment_attempt(hotel_ids: List[int]) -> int:
+    """Batch set last enrichment attempt for failed hotels.
+    
+    Note: Inline SQL required because aiosql doesn't support array parameters
+    with ANY($1::integer[]) syntax.
+    """
+    if not hotel_ids:
+        return 0
+    
+    async with get_conn() as conn:
+        sql = """
+        UPDATE sadie_gtm.hotel_booking_engines
+        SET last_enrichment_attempt = NOW()
+        WHERE hotel_id = ANY($1::integer[])
+        """
+        result = await conn.execute(sql, hotel_ids)
+        # Parse "UPDATE N" to get count
+        if result and result.startswith("UPDATE"):
+            return int(result.split()[1])
+        return 0
+
+
 async def batch_update_cloudbeds_enrichment(
     updates: List[Dict],
 ) -> int:

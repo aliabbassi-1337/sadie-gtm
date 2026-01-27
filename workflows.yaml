@@ -97,15 +97,15 @@ ec2:
     schedule: "*/2 * * * *"  # Every 2 min
     type: cron
 
-  # Name enrichment (scrape hotel names from booking pages)
-  name_enrichment_consumer:
-    description: Poll SQS and scrape hotel names from booking pages
-    command: uv run python -m workflows.enrich_names_consumer
+  # Booking page enrichment (scrape name/address from booking pages)
+  booking_enrichment_consumer:
+    description: Poll SQS and enrich hotels from booking pages (with archive fallback)
+    command: uv run python -m workflows.enrich_booking_pages_consumer --archive-fallback
     type: systemd  # Runs continuously while instance is up
 
-  enqueue_name_enrichment:
-    description: Queue hotels needing names for enrichment workers
-    command: uv run python -m workflows.enrich_names_enqueue --limit 1000
+  enqueue_booking_enrichment:
+    description: Queue hotels needing enrichment for workers
+    command: uv run python -m workflows.enrich_booking_pages_enqueue --limit 1000
     schedule: "*/10 * * * *"  # Every 10 min
     type: cron
     host: primary  # Only run on first/primary EC2 instance
@@ -144,10 +144,19 @@ ec2:
     type: cron
     host: primary  # Only run on primary (costs money)
 
-  # Export crawl data (scheduled export to S3)
-  export_crawl_data:
-    description: Export crawl data to Excel and sync to S3
-    command: uv run python -m workflows.export_crawl --all && bash scripts/sync_reports.sh
+  # -------------------------------------------------------------------------
+  # EXPORTS (scheduled export to S3)
+  # -------------------------------------------------------------------------
+  export_states:
+    description: Export all state reports to S3
+    command: uv run python workflows/export.py --all
     schedule: "0 */6 * * *"  # Every 6 hours
+    type: cron
+    host: primary
+
+  export_crawl:
+    description: Export crawl data by booking engine to S3
+    command: uv run python -m workflows.export_crawl --all
+    schedule: "30 */6 * * *"  # Every 6 hours (offset by 30 min)
     type: cron
     host: primary

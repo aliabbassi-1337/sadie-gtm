@@ -183,13 +183,22 @@ async def extract_from_page(page: Page) -> Dict[str, Any]:
 async def process_hotel(page: Page, hotel_id: int, booking_url: str) -> EnrichmentResult:
     """Process a single hotel."""
     try:
-        await page.goto(booking_url, timeout=30000, wait_until="domcontentloaded")
+        response = await page.goto(booking_url, timeout=30000, wait_until="domcontentloaded")
+        
+        # Check for 404 - hotel deleted from Cloudbeds
+        if response and response.status == 404:
+            return EnrichmentResult(hotel_id=hotel_id, success=False, error="404_not_found")
+        
         await asyncio.sleep(4)  # Wait for React and address widget to load
         
         data = await extract_from_page(page)
         
         if not data:
             return EnrichmentResult(hotel_id=hotel_id, success=False, error="no_data")
+        
+        # Check for garbage data (redirected to Cloudbeds homepage)
+        if data.get('name', '').lower() in ['cloudbeds.com', 'cloudbeds']:
+            return EnrichmentResult(hotel_id=hotel_id, success=False, error="404_not_found")
         
         return EnrichmentResult(
             hotel_id=hotel_id,
@@ -240,7 +249,9 @@ async def run_consumer(concurrency: int = 5):
             
             total_processed = 0
             total_enriched = 0
+            total_failed = 0
             batch_results = []
+            batch_failed_ids = []
             
             while not shutdown_requested:
                 # Receive messages
@@ -292,7 +303,14 @@ async def run_consumer(concurrency: int = 5):
                     if not msg:
                         continue
                     
-                    if result.success and (result.city or result.name):
+                    # Detect garbage data from broken/redirected Cloudbeds URLs
+                    is_garbage = (
+                        result.name and result.name.lower() in ['cloudbeds.com', 'cloudbeds', 'book now', 'reservation']
+                    ) or (
+                        result.city and 'soluções online' in result.city.lower()
+                    )
+                    
+                    if result.success and (result.city or result.name) and not is_garbage:
                         batch_results.append({
                             "hotel_id": result.hotel_id,
                             "name": result.name,
@@ -311,6 +329,11 @@ async def run_consumer(concurrency: int = 5):
                         if result.city:
                             parts.append(f"city={result.city}")
                         logger.info(f"  Hotel {result.hotel_id}: {', '.join(parts)}")
+                    elif is_garbage or result.error == "404_not_found":
+                        # Increment attempt count (will stop after 3 attempts)
+                        batch_failed_ids.append(result.hotel_id)
+                        total_failed += 1
+                        logger.warning(f"  Hotel {result.hotel_id}: failed - will retry")
                     elif result.error:
                         logger.warning(f"  Hotel {result.hotel_id}: {result.error}")
                     
@@ -324,15 +347,25 @@ async def run_consumer(concurrency: int = 5):
                     logger.info(f"Batch update: {updated} hotels")
                     batch_results = []
                 
+                # Batch increment failed attempts
+                if len(batch_failed_ids) >= 50:
+                    marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                    logger.info(f"Marked {marked} hotels for retry in 7 days")
+                    batch_failed_ids = []
+                
                 # Log progress
                 attrs = get_queue_attributes(QUEUE_URL)
                 remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
-                logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, ~{remaining} remaining")
+                logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, {total_failed} failed, ~{remaining} remaining")
             
             # Final batch
             if batch_results:
                 updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                 logger.info(f"Final batch update: {updated} hotels")
+            
+            if batch_failed_ids:
+                marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                logger.info(f"Final batch: {marked} hotels marked for retry in 7 days")
             
             # Cleanup
             for page in pages:
