@@ -144,10 +144,19 @@ ec2:
     type: cron
     host: primary  # Only run on primary (costs money)
 
-  # Export crawl data (scheduled export to S3)
-  export_crawl_data:
-    description: Export crawl data to Excel and sync to S3
-    command: uv run python -m workflows.export_crawl --all && bash scripts/sync_reports.sh
+  # -------------------------------------------------------------------------
+  # EXPORTS (scheduled export to S3)
+  # -------------------------------------------------------------------------
+  export_states:
+    description: Export all state reports to S3
+    command: uv run python workflows/export.py --all
     schedule: "0 */6 * * *"  # Every 6 hours
+    type: cron
+    host: primary
+
+  export_crawl:
+    description: Export crawl data by booking engine to S3
+    command: uv run python -m workflows.export_crawl --all
+    schedule: "30 */6 * * *"  # Every 6 hours (offset by 30 min)
     type: cron
     host: primary
