@@ -109,3 +109,24 @@ ec2:
     schedule: "*/10 * * * *"  # Every 10 min
     type: cron
     host: primary  # Only run on first/primary EC2 instance
+
+  # Cloudbeds enrichment (scrape name/location from Cloudbeds booking pages)
+  cloudbeds_enrichment_consumer:
+    description: Poll SQS and scrape Cloudbeds hotels with Playwright
+    command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 10
+    type: systemd  # Runs continuously while instance is up
+
+  enqueue_cloudbeds_enrichment:
+    description: Queue Cloudbeds hotels needing enrichment
+    command: uv run python -m workflows.enrich_cloudbeds_enqueue --limit 5000
+    schedule: "*/15 * * * *"  # Every 15 min
+    type: cron
+    host: primary  # Only run on first/primary EC2 instance
+
+  # Export crawl data (scheduled export to S3)
+  export_crawl_data:
+    description: Export crawl data to Excel and sync to S3
+    command: uv run python -m workflows.export_crawl --all && bash scripts/sync_reports.sh
+    schedule: "0 */6 * * *"  # Every 6 hours
+    type: cron
+    host: primary
