@@ -1194,7 +1194,7 @@ class Service(IService):
             # Collect successful results
             batch_updates = [r for r in results if r is not None]
             
-            # Batch update with transaction
+            # Bulk UPDATE (single atomic query using unnest)
             if batch_updates:
                 updated = await repo.batch_update_hotel_geocoding(batch_updates)
                 stats["enriched"] += updated

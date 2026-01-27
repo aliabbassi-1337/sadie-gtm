@@ -252,11 +252,10 @@ async def run_consumer(concurrency: int = 5):
                     logger.debug("No messages, waiting...")
                     continue
                 
-                # Process messages concurrently
-                tasks = []
-                message_map = {}  # hotel_id -> (message, page_idx)
-                
-                for i, msg in enumerate(messages):
+                # Process messages - one per page to avoid conflicts
+                # Only process up to concurrency messages at a time
+                valid_messages = []
+                for msg in messages:
                     body = msg["body"]
                     hotel_id = body.get("hotel_id")
                     booking_url = body.get("booking_url")
@@ -265,9 +264,15 @@ async def run_consumer(concurrency: int = 5):
                         delete_message(QUEUE_URL, msg["receipt_handle"])
                         continue
                     
-                    page_idx = i % len(pages)
-                    message_map[hotel_id] = (msg, page_idx)
-                    tasks.append(process_hotel(pages[page_idx], hotel_id, booking_url))
+                    valid_messages.append((msg, hotel_id, booking_url))
+                
+                # Process in batches of concurrency (one message per page)
+                tasks = []
+                message_map = {}  # hotel_id -> message
+                
+                for i, (msg, hotel_id, booking_url) in enumerate(valid_messages[:concurrency]):
+                    message_map[hotel_id] = msg
+                    tasks.append(process_hotel(pages[i], hotel_id, booking_url))
                 
                 if not tasks:
                     continue
@@ -280,7 +285,7 @@ async def run_consumer(concurrency: int = 5):
                         logger.error(f"Task error: {result}")
                         continue
                     
-                    msg, _ = message_map.get(result.hotel_id, (None, None))
+                    msg = message_map.get(result.hotel_id)
                     if not msg:
                         continue
                     

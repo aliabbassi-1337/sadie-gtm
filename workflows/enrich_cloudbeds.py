@@ -332,43 +332,60 @@ async def run_enrichment(limit: int, concurrency: int = 3):
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             
-            # Process with limited concurrency
-            semaphore = asyncio.Semaphore(concurrency)
+            # Create reusable browser contexts pool
+            contexts = []
+            pages = []
+            for _ in range(concurrency):
+                ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                )
+                page = await ctx.new_page()
+                contexts.append(ctx)
+                pages.append(page)
+            
+            logger.info(f"Created {concurrency} browser contexts")
+            
             results_buffer = []
+            processed = 0
             
-            async def process_hotel(hotel: Dict) -> CloudbedsEnrichmentResult:
-                async with semaphore:
-                    context = await browser.new_context(
-                        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-                    )
-                    page = await context.new_page()
-                    try:
-                        result = await enrich_hotel(page, hotel)
-                        return result
-                    finally:
-                        await page.close()
-                        await context.close()
-            
-            for i, hotel in enumerate(hotels):
-                result = await process_hotel(hotel)
-                results_buffer.append(result)
+            # Process in batches of concurrency
+            for batch_start in range(0, len(hotels), concurrency):
+                batch = hotels[batch_start:batch_start + concurrency]
                 
-                if result.success and (result.city or result.name):
-                    parts = []
-                    if result.name:
-                        parts.append(f"name={result.name[:25]}")
-                    if result.city:
-                        parts.append(f"loc={result.city}, {result.state}")
-                    if result.phone:
-                        parts.append("phone")
-                    if result.email:
-                        parts.append("email")
-                    logger.info(f"  [{i+1}/{len(hotels)}] Hotel {hotel['id']}: {', '.join(parts)}")
-                elif result.error:
-                    total_errors += 1
-                    logger.warning(f"  [{i+1}/{len(hotels)}] Hotel {hotel['id']}: error - {result.error}")
+                # Run batch concurrently
+                tasks = [
+                    enrich_hotel(pages[i], hotel)
+                    for i, hotel in enumerate(batch)
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                # Batch update
+                for i, result in enumerate(results):
+                    processed += 1
+                    hotel = batch[i]
+                    
+                    if isinstance(result, Exception):
+                        total_errors += 1
+                        logger.warning(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: error - {result}")
+                        continue
+                    
+                    results_buffer.append(result)
+                    
+                    if result.success and (result.city or result.name):
+                        parts = []
+                        if result.name:
+                            parts.append(f"name={result.name[:25]}")
+                        if result.city:
+                            parts.append(f"loc={result.city}, {result.state}")
+                        if result.phone:
+                            parts.append("phone")
+                        if result.email:
+                            parts.append("email")
+                        logger.info(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: {', '.join(parts)}")
+                    elif result.error:
+                        total_errors += 1
+                        logger.warning(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: error - {result.error}")
+                
+                # Batch update DB
                 if len(results_buffer) >= batch_size:
                     updated = await batch_update_hotels(results_buffer)
                     total_enriched += updated
@@ -381,6 +398,11 @@ async def run_enrichment(limit: int, concurrency: int = 3):
                 total_enriched += updated
                 logger.info(f"  Final batch update: {updated} hotels")
             
+            # Cleanup
+            for page in pages:
+                await page.close()
+            for ctx in contexts:
+                await ctx.close()
             await browser.close()
         
         print("\n" + "=" * 60)
