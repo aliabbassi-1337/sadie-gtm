@@ -156,15 +156,16 @@ WHERE id = :hotel_id;
 -- name: update_hotel_name_and_location!
 -- Update both name and location in one call
 -- Only updates fields that are provided (non-null)
+-- NOTE: Explicit ::TEXT casts required for asyncpg parameter type inference
 UPDATE sadie_gtm.hotels
 SET 
-    name = CASE WHEN :name IS NOT NULL AND :name != '' THEN :name ELSE name END,
-    address = COALESCE(:address, address),
-    city = COALESCE(:city, city),
-    state = COALESCE(:state, state),
-    country = COALESCE(:country, country),
-    phone_website = COALESCE(:phone, phone_website),
-    email = COALESCE(:email, email),
+    name = CASE WHEN CAST(:name AS TEXT) IS NOT NULL AND CAST(:name AS TEXT) != '' THEN CAST(:name AS TEXT) ELSE name END,
+    address = COALESCE(CAST(:address AS TEXT), address),
+    city = COALESCE(CAST(:city AS TEXT), city),
+    state = COALESCE(CAST(:state AS TEXT), state),
+    country = COALESCE(CAST(:country AS TEXT), country),
+    phone_website = COALESCE(CAST(:phone AS TEXT), phone_website),
+    email = COALESCE(CAST(:email AS TEXT), email),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
