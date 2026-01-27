@@ -113,7 +113,7 @@ ec2:
   # Cloudbeds enrichment (scrape name/location from Cloudbeds booking pages)
   cloudbeds_enrichment_consumer:
     description: Poll SQS and scrape Cloudbeds hotels with Playwright
-    command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 10
+    command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 3
     type: systemd
 
   enqueue_cloudbeds_enrichment:
