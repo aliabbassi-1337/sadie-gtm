@@ -446,6 +446,12 @@ class DetectionResult(BaseModel):
     room_count: str = ""
     detected_location: str = ""  # Location extracted from website content
     error: str = ""
+    # Cloudbeds-specific address fields (extracted from booking page)
+    scraped_address: str = ""
+    scraped_city: str = ""
+    scraped_state: str = ""
+    scraped_country: str = ""
+    scraped_contact_name: str = ""
 
 
 # =============================================================================
@@ -1385,6 +1391,77 @@ class HotelProcessor:
             pass
         return result
 
+    async def _extract_cloudbeds_data(self, page: Page, result: DetectionResult) -> DetectionResult:
+        """Extract address and contact info from Cloudbeds booking pages.
+        
+        Cloudbeds uses a specific structure with:
+        - div[data-testid="property-address-and-contact"]
+        - p[data-be-text="true"] for each line (address, city, state/country, zip, contact, phone, email)
+        """
+        try:
+            data = await page.evaluate("""
+                () => {
+                    const container = document.querySelector('[data-testid="property-address-and-contact"]') 
+                                   || document.querySelector('.cb-address-and-contact');
+                    if (!container) return null;
+                    
+                    // Get all text lines
+                    const lines = Array.from(container.querySelectorAll('p[data-be-text="true"]'))
+                        .map(p => p.textContent?.trim() || '');
+                    
+                    // Get email from mailto link
+                    const mailtoLink = container.querySelector('a[href^="mailto:"]');
+                    const email = mailtoLink ? mailtoLink.href.replace('mailto:', '').split('?')[0] : '';
+                    
+                    return { lines, email };
+                }
+            """)
+            
+            if not data or not data.get('lines') or len(data['lines']) < 3:
+                return result
+            
+            lines = data['lines']
+            
+            # Parse the lines
+            # Line 0: Street address
+            if len(lines) > 0:
+                result.scraped_address = lines[0]
+            
+            # Line 1: City
+            if len(lines) > 1:
+                result.scraped_city = lines[1]
+            
+            # Line 2: "State Country" e.g. "Texas US"
+            if len(lines) > 2:
+                state_country = lines[2].strip()
+                parts = state_country.rsplit(' ', 1)
+                if len(parts) == 2:
+                    result.scraped_state = parts[0].strip()
+                    country = parts[1].strip().upper()
+                    result.scraped_country = 'USA' if country in ['US', 'USA'] else country
+                else:
+                    result.scraped_state = state_country
+            
+            # Find phone (digits with common phone chars)
+            import re
+            phone_pattern = re.compile(r'^[\d\-\(\)\s\+\.]{7,20}$')
+            for line in lines[3:]:
+                if phone_pattern.match(line) and not result.phone_website:
+                    result.phone_website = line
+                elif '@' not in line and not any(c.isdigit() for c in line) and not result.scraped_contact_name:
+                    result.scraped_contact_name = line
+            
+            # Email from mailto link
+            if data.get('email') and not result.email:
+                result.email = data['email']
+            
+            self._log(f"  [CLOUDBEDS] Extracted: {result.scraped_city}, {result.scraped_state} - phone: {result.phone_website}, email: {result.email}")
+            
+        except Exception as e:
+            self._log(f"  [CLOUDBEDS] Extraction error: {e}")
+        
+        return result
+
     async def _scan_html_for_engines(self, page: Page) -> Tuple[str, str]:
         """Scan page HTML for booking engine patterns."""
         try:
@@ -1763,6 +1840,10 @@ class HotelProcessor:
                 result.booking_url = engine_url
 
             result.detection_method = f"{click_method}+{net_method}"
+            
+            # Extract Cloudbeds-specific address/contact data if detected
+            if engine_name and engine_name.lower() == "cloudbeds" and not page.is_closed():
+                result = await self._extract_cloudbeds_data(page, result)
 
         except Exception as e:
             self._log(f"  Booking page error: {e}")

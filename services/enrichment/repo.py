@@ -482,6 +482,8 @@ async def update_hotel_name_and_location(
     city: Optional[str] = None,
     state: Optional[str] = None,
     country: Optional[str] = None,
+    phone: Optional[str] = None,
+    email: Optional[str] = None,
 ) -> None:
     """Update hotel name and/or location. Uses COALESCE to preserve existing values."""
     async with get_conn() as conn:
@@ -493,6 +495,8 @@ async def update_hotel_name_and_location(
             city=city,
             state=state,
             country=country,
+            phone=phone,
+            email=email,
         )
 
 

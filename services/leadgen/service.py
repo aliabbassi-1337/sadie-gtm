@@ -610,6 +610,16 @@ class Service(IService):
                         phone_website=result.phone_website or None,
                         email=result.email or None,
                     )
+                
+                # Save scraped address data from Cloudbeds (if available)
+                if result.scraped_city or result.scraped_state:
+                    await repo.update_hotel_scraped_address(
+                        hotel_id=result.hotel_id,
+                        address=result.scraped_address or None,
+                        city=result.scraped_city or None,
+                        state=result.scraped_state or None,
+                        country=result.scraped_country or None,
+                    )
             else:
                 # No booking engine found
                 await repo.update_hotel_status(

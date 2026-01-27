@@ -157,5 +157,7 @@ SET
     city = COALESCE(:city, city),
     state = COALESCE(:state, state),
     country = COALESCE(:country, country),
+    phone_website = COALESCE(:phone, phone_website),
+    email = COALESCE(:email, email),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;

@@ -168,6 +168,17 @@ SET phone_website = COALESCE(:phone_website, phone_website),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
+-- name: update_hotel_scraped_address!
+-- Update hotel address scraped from booking page (Cloudbeds).
+-- Only updates if current value is null/empty to avoid overwriting authoritative data.
+UPDATE sadie_gtm.hotels
+SET address = CASE WHEN (address IS NULL OR address = '') THEN :address ELSE address END,
+    city = CASE WHEN (city IS NULL OR city = '') THEN :city ELSE city END,
+    state = CASE WHEN (state IS NULL OR state = '') THEN :state ELSE state END,
+    country = CASE WHEN (country IS NULL OR country = '') THEN :country ELSE country END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
 -- name: get_hotels_by_ids
 -- Get hotels by list of IDs (for worker to fetch batch)
 SELECT
