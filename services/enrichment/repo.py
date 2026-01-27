@@ -650,3 +650,129 @@ async def batch_update_hotel_geocoding(
         count = int(result.split()[-1]) if result else len(updates)
     
     return count
+
+
+# ============================================================================
+# CLOUDBEDS ENRICHMENT
+# ============================================================================
+
+
+class CloudbedsHotelCandidate(BaseModel):
+    """Hotel needing Cloudbeds enrichment."""
+    id: int
+    name: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    address: Optional[str] = None
+    booking_url: str
+    slug: Optional[str] = None
+
+
+async def get_cloudbeds_hotels_needing_enrichment(
+    limit: int = 100,
+) -> List[CloudbedsHotelCandidate]:
+    """Get hotels with Cloudbeds booking URLs that need name or location enrichment."""
+    async with get_conn() as conn:
+        rows = await queries.get_cloudbeds_hotels_needing_enrichment(conn, limit=limit)
+        return [CloudbedsHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_cloudbeds_hotels_needing_enrichment_count() -> int:
+    """Count Cloudbeds hotels needing enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_cloudbeds_hotels_needing_enrichment_count(conn)
+        # Handle both scalar and Record returns
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def get_cloudbeds_hotels_total_count() -> int:
+    """Count total Cloudbeds hotels."""
+    async with get_conn() as conn:
+        result = await queries.get_cloudbeds_hotels_total_count(conn)
+        # Handle both scalar and Record returns
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def batch_update_cloudbeds_enrichment(
+    updates: List[Dict],
+) -> int:
+    """Batch update hotels with Cloudbeds enrichment results.
+    
+    For Cloudbeds, scraped data overrides existing (crawl sources often have wrong location).
+    """
+    if not updates:
+        return 0
+    
+    hotel_ids = []
+    names = []
+    addresses = []
+    cities = []
+    states = []
+    countries = []
+    phones = []
+    emails = []
+    
+    for u in updates:
+        hotel_ids.append(u["hotel_id"])
+        names.append(u.get("name"))
+        addresses.append(u.get("address"))
+        cities.append(u.get("city"))
+        states.append(u.get("state"))
+        countries.append(u.get("country"))
+        phones.append(u.get("phone"))
+        emails.append(u.get("email"))
+    
+    # Scraped data overrides existing (Cloudbeds page is authoritative)
+    sql = """
+    UPDATE sadie_gtm.hotels h
+    SET 
+        name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
+                    THEN v.name ELSE h.name END,
+        address = CASE WHEN v.address IS NOT NULL AND v.address != '' 
+                       THEN v.address ELSE h.address END,
+        city = CASE WHEN v.city IS NOT NULL AND v.city != '' 
+                    THEN v.city ELSE h.city END,
+        state = CASE WHEN v.state IS NOT NULL AND v.state != '' 
+                     THEN v.state ELSE h.state END,
+        country = CASE WHEN v.country IS NOT NULL AND v.country != '' 
+                       THEN v.country ELSE h.country END,
+        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' 
+                             THEN v.phone ELSE h.phone_website END,
+        email = CASE WHEN v.email IS NOT NULL AND v.email != '' 
+                     THEN v.email ELSE h.email END,
+        updated_at = CURRENT_TIMESTAMP
+    FROM (
+        SELECT * FROM unnest(
+            $1::integer[],
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[],
+            $6::text[],
+            $7::text[],
+            $8::text[]
+        ) AS t(hotel_id, name, address, city, state, country, phone, email)
+    ) v
+    WHERE h.id = v.hotel_id
+    """
+    
+    async with get_conn() as conn:
+        result = await conn.execute(
+            sql,
+            hotel_ids,
+            names,
+            addresses,
+            cities,
+            states,
+            countries,
+            phones,
+            emails,
+        )
+        count = int(result.split()[-1]) if result else len(updates)
+    
+    return count

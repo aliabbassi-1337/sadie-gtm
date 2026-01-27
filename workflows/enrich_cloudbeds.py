@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from loguru import logger
 from playwright.async_api import async_playwright, Page
 
-from db.client import init_db, close_db, get_conn
-from db import queries
+from db.client import init_db, close_db
+from services.enrichment import repo
 
 
 @dataclass
@@ -47,48 +47,6 @@ class CloudbedsEnrichmentResult:
     phone: Optional[str] = None
     email: Optional[str] = None
     error: Optional[str] = None
-
-
-async def get_cloudbeds_hotels_needing_enrichment(limit: int = 100) -> List[Dict]:
-    """Get hotels with Cloudbeds booking URLs that need name or location enrichment."""
-    async with get_conn() as conn:
-        # Hotels with Cloudbeds booking engine that are missing name or city
-        rows = await conn.fetch("""
-            SELECT h.id, h.name, h.city, h.state, h.country, h.address,
-                   hbe.booking_url, hbe.engine_property_id as slug
-            FROM sadie_gtm.hotels h
-            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-            JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-            WHERE be.name ILIKE '%cloudbeds%'
-              AND hbe.booking_url IS NOT NULL
-              AND hbe.booking_url != ''
-              AND (
-                  (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
-                  OR (h.city IS NULL OR h.city = '')
-              )
-            ORDER BY h.id
-            LIMIT $1
-        """, limit)
-        return [dict(r) for r in rows]
-
-
-async def get_cloudbeds_hotels_count() -> int:
-    """Count Cloudbeds hotels needing enrichment."""
-    async with get_conn() as conn:
-        result = await conn.fetchval("""
-            SELECT COUNT(*)
-            FROM sadie_gtm.hotels h
-            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-            JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-            WHERE be.name ILIKE '%cloudbeds%'
-              AND hbe.booking_url IS NOT NULL
-              AND hbe.booking_url != ''
-              AND (
-                  (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
-                  OR (h.city IS NULL OR h.city = '')
-              )
-        """)
-        return result or 0
 
 
 async def extract_from_cloudbeds_page(page: Page) -> Dict[str, Any]:
@@ -282,83 +240,27 @@ async def enrich_hotel(
 
 
 async def batch_update_hotels(results: List[CloudbedsEnrichmentResult]) -> int:
-    """Batch update hotels with enrichment results using bulk UPDATE."""
+    """Batch update hotels with enrichment results."""
     successful = [r for r in results if r.success and (r.city or r.name)]
     
     if not successful:
         return 0
     
-    # Prepare arrays for unnest
-    hotel_ids = []
-    names = []
-    addresses = []
-    cities = []
-    states = []
-    countries = []
-    phones = []
-    emails = []
+    updates = [
+        {
+            "hotel_id": r.hotel_id,
+            "name": r.name,
+            "address": r.address,
+            "city": r.city,
+            "state": r.state,
+            "country": r.country,
+            "phone": r.phone,
+            "email": r.email,
+        }
+        for r in successful
+    ]
     
-    for r in successful:
-        hotel_ids.append(r.hotel_id)
-        names.append(r.name)
-        addresses.append(r.address)
-        cities.append(r.city)
-        states.append(r.state)
-        countries.append(r.country)
-        phones.append(r.phone)
-        emails.append(r.email)
-    
-    # Bulk UPDATE using unnest
-    # For Cloudbeds, the page title/widget is authoritative - scraped data overrides existing
-    # This is correct because crawl data sources often have wrong location info
-    sql = """
-    UPDATE sadie_gtm.hotels h
-    SET 
-        name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
-                    THEN v.name ELSE h.name END,
-        address = CASE WHEN v.address IS NOT NULL AND v.address != '' 
-                       THEN v.address ELSE h.address END,
-        city = CASE WHEN v.city IS NOT NULL AND v.city != '' 
-                    THEN v.city ELSE h.city END,
-        state = CASE WHEN v.state IS NOT NULL AND v.state != '' 
-                     THEN v.state ELSE h.state END,
-        country = CASE WHEN v.country IS NOT NULL AND v.country != '' 
-                       THEN v.country ELSE h.country END,
-        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' 
-                             THEN v.phone ELSE h.phone_website END,
-        email = CASE WHEN v.email IS NOT NULL AND v.email != '' 
-                     THEN v.email ELSE h.email END,
-        updated_at = CURRENT_TIMESTAMP
-    FROM (
-        SELECT * FROM unnest(
-            $1::integer[],
-            $2::text[],
-            $3::text[],
-            $4::text[],
-            $5::text[],
-            $6::text[],
-            $7::text[],
-            $8::text[]
-        ) AS t(hotel_id, name, address, city, state, country, phone, email)
-    ) v
-    WHERE h.id = v.hotel_id
-    """
-    
-    async with get_conn() as conn:
-        result = await conn.execute(
-            sql,
-            hotel_ids,
-            names,
-            addresses,
-            cities,
-            states,
-            countries,
-            phones,
-            emails,
-        )
-        count = int(result.split()[-1]) if result else len(successful)
-    
-    return count
+    return await repo.batch_update_cloudbeds_enrichment(updates)
 
 
 async def run_status():
@@ -366,24 +268,15 @@ async def run_status():
     await init_db()
     
     try:
-        count = await get_cloudbeds_hotels_count()
-        
-        # Get total Cloudbeds hotels
-        async with get_conn() as conn:
-            total = await conn.fetchval("""
-                SELECT COUNT(*)
-                FROM sadie_gtm.hotels h
-                JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-                JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-                WHERE be.name ILIKE '%cloudbeds%'
-            """)
+        count = await repo.get_cloudbeds_hotels_needing_enrichment_count()
+        total = await repo.get_cloudbeds_hotels_total_count()
         
         print("\n" + "=" * 60)
         print("CLOUDBEDS ENRICHMENT STATUS")
         print("=" * 60)
         print(f"  Total Cloudbeds hotels:     {total:,}")
         print(f"  Needing enrichment:         {count:,}")
-        print(f"  Already enriched:           {(total or 0) - count:,}")
+        print(f"  Already enriched:           {total - count:,}")
         print("=" * 60 + "\n")
         
     finally:
@@ -395,24 +288,24 @@ async def run_dry_run(limit: int):
     await init_db()
     
     try:
-        hotels = await get_cloudbeds_hotels_needing_enrichment(limit=limit)
+        candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
         
-        print(f"\n=== DRY RUN: Would enrich {len(hotels)} hotels ===\n")
+        print(f"\n=== DRY RUN: Would enrich {len(candidates)} hotels ===\n")
         
-        for h in hotels[:20]:  # Show first 20
+        for h in candidates[:20]:  # Show first 20
             needs = []
-            if not h['name'] or h['name'].startswith('Unknown'):
+            if not h.name or h.name.startswith('Unknown'):
                 needs.append('name')
-            if not h['city']:
+            if not h.city:
                 needs.append('location')
             
-            print(f"  ID={h['id']}: {h['name'] or 'NO NAME'}")
-            print(f"    URL: {h['booking_url'][:60]}...")
+            print(f"  ID={h.id}: {h.name or 'NO NAME'}")
+            print(f"    URL: {h.booking_url[:60]}...")
             print(f"    Needs: {', '.join(needs)}")
             print()
         
-        if len(hotels) > 20:
-            print(f"  ... and {len(hotels) - 20} more\n")
+        if len(candidates) > 20:
+            print(f"  ... and {len(candidates) - 20} more\n")
             
     finally:
         await close_db()
@@ -423,7 +316,8 @@ async def run_enrichment(limit: int, concurrency: int = 3):
     await init_db()
     
     try:
-        hotels = await get_cloudbeds_hotels_needing_enrichment(limit=limit)
+        candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
+        hotels = [{"id": c.id, "booking_url": c.booking_url} for c in candidates]
         
         if not hotels:
             logger.info("No Cloudbeds hotels need enrichment")
