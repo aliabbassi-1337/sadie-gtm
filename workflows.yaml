@@ -113,7 +113,7 @@ ec2:
   # Cloudbeds enrichment (scrape name/location from Cloudbeds booking pages)
   cloudbeds_enrichment_consumer:
     description: Poll SQS and scrape Cloudbeds hotels with Playwright
-    command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 3
+    command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 6
     type: systemd
 
   enqueue_cloudbeds_enrichment:
@@ -122,6 +122,14 @@ ec2:
     schedule: "*/15 * * * *"  # Every 15 min
     type: cron
     host: primary  # Only run on first/primary EC2 instance
+
+  # Serper geocoding (for non-Cloudbeds crawl data - SiteMinder, Mews, etc.)
+  geocode_crawl_data:
+    description: Geocode crawl hotels by name using Serper Places API
+    command: uv run python -m workflows.geocode_by_name --source '%crawl%' --limit 500
+    schedule: "0 * * * *"  # Every hour
+    type: cron
+    host: primary  # Only run on primary (costs money)
 
   # Export crawl data (scheduled export to S3)
   export_crawl_data:

@@ -22,10 +22,11 @@ jobs:
           DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KEY_PUB: ${{ secrets.DEPLOY_SSH_KEY_PUB }}
         run: |
-          IPS="13.61.104.62 13.60.58.185 51.20.9.238 13.60.83.14 13.51.168.43 13.53.197.203 51.20.191.25"
+          IPS="13.61.104.62 13.60.58.185 51.20.9.238 13.60.236.93 13.51.168.43 13.53.197.203 51.20.191.25"
 
           deploy_server() {
             local ip=$1
+            local is_primary=$2
             echo "=== Deploying to $ip ==="
             if ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip "
               mkdir -p ~/.ssh
@@ -40,7 +41,22 @@ jobs:
               git fetch origin main
               git reset --hard origin/main
               git clean -fd
-              sudo systemctl restart detection
+              
+              # Regenerate and deploy systemd/cron from workflows.yaml
+              source ~/.local/bin/env 2>/dev/null || export PATH=\$HOME/.local/bin:\$PATH
+              uv run python scripts/deploy_ec2.py generate
+              sudo cp infra/ec2/generated/*.service /etc/systemd/system/
+              sudo systemctl daemon-reload
+              
+              # Only deploy cron on primary server
+              if [ '$is_primary' = 'true' ]; then
+                sudo cp infra/ec2/generated/sadie-cron /etc/cron.d/sadie-gtm
+              fi
+              
+              # Restart all managed services
+              sudo systemctl restart detection-consumer || true
+              sudo systemctl restart name-enrichment-consumer || true
+              sudo systemctl restart cloudbeds-enrichment-consumer || true
             "; then
               echo "SUCCESS: $ip"
               return 0
@@ -54,9 +70,15 @@ jobs:
           export DEPLOY_KEY DEPLOY_KEY_PUB
 
           # Run all deployments in parallel
+          # First IP is primary (runs cron jobs)
+          PRIMARY_IP=$(echo $IPS | cut -d' ' -f1)
           FAILED=""
           for ip in $IPS; do
-            deploy_server $ip &
+            if [ "$ip" = "$PRIMARY_IP" ]; then
+              deploy_server $ip true &
+            else
+              deploy_server $ip false &
+            fi
           done
 
           # Wait for all and collect failures
