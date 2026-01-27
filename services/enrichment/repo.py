@@ -698,21 +698,21 @@ async def get_cloudbeds_hotels_total_count() -> int:
         return result or 0
 
 
-async def mark_booking_url_status(hotel_id: int, status: str) -> None:
-    """Mark a booking URL with a status (ok, 404, etc)."""
+async def increment_enrichment_attempts(hotel_id: int) -> None:
+    """Increment failed enrichment attempts for a hotel."""
     async with get_conn() as conn:
-        await queries.mark_booking_url_status(conn, hotel_id=hotel_id, status=status)
+        await queries.increment_enrichment_attempts(conn, hotel_id=hotel_id)
 
 
-async def batch_mark_booking_urls_404(hotel_ids: List[int]) -> int:
-    """Batch mark booking URLs as 404."""
+async def batch_increment_enrichment_attempts(hotel_ids: List[int]) -> int:
+    """Batch increment enrichment attempts for failed hotels."""
     if not hotel_ids:
         return 0
     
     async with get_conn() as conn:
         sql = """
         UPDATE sadie_gtm.hotel_booking_engines
-        SET url_status = '404'
+        SET enrichment_attempts = COALESCE(enrichment_attempts, 0) + 1
         WHERE hotel_id = ANY($1::integer[])
         """
         result = await conn.execute(sql, hotel_ids)

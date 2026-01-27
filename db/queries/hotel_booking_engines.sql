@@ -170,7 +170,7 @@ WHERE id = :hotel_id;
 
 -- name: get_cloudbeds_hotels_needing_enrichment
 -- Get hotels with Cloudbeds booking URLs that need name, city, or state enrichment
--- Excludes URLs that returned 404 (hotel deleted from Cloudbeds)
+-- Excludes URLs with >= 3 failed attempts (likely permanently broken)
 SELECT h.id, h.name, h.city, h.state, h.country, h.address,
        hbe.booking_url, hbe.engine_property_id as slug
 FROM sadie_gtm.hotels h
@@ -179,7 +179,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND (hbe.url_status IS NULL OR hbe.url_status != '404')
+  AND COALESCE(hbe.enrichment_attempts, 0) < 3
   AND h.status = 1
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
@@ -198,7 +198,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND (hbe.url_status IS NULL OR hbe.url_status != '404')
+  AND COALESCE(hbe.enrichment_attempts, 0) < 3
   AND h.status = 1
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
@@ -214,10 +214,10 @@ JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%';
 
--- name: mark_booking_url_status!
--- Mark a booking URL with a status (ok, 404, etc)
+-- name: increment_enrichment_attempts!
+-- Increment failed enrichment attempts for a hotel
 UPDATE sadie_gtm.hotel_booking_engines
-SET url_status = :status
+SET enrichment_attempts = COALESCE(enrichment_attempts, 0) + 1
 WHERE hotel_id = :hotel_id;
 
 

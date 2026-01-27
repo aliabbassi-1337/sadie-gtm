@@ -249,9 +249,9 @@ async def run_consumer(concurrency: int = 5):
             
             total_processed = 0
             total_enriched = 0
-            total_404 = 0
+            total_failed = 0
             batch_results = []
-            batch_404_ids = []
+            batch_failed_ids = []
             
             while not shutdown_requested:
                 # Receive messages
@@ -330,10 +330,10 @@ async def run_consumer(concurrency: int = 5):
                             parts.append(f"city={result.city}")
                         logger.info(f"  Hotel {result.hotel_id}: {', '.join(parts)}")
                     elif is_garbage or result.error == "404_not_found":
-                        # Mark broken URLs so we don't re-enqueue them
-                        batch_404_ids.append(result.hotel_id)
-                        total_404 += 1
-                        logger.warning(f"  Hotel {result.hotel_id}: 404 - URL no longer valid")
+                        # Increment attempt count (will stop after 3 attempts)
+                        batch_failed_ids.append(result.hotel_id)
+                        total_failed += 1
+                        logger.warning(f"  Hotel {result.hotel_id}: failed - will retry")
                     elif result.error:
                         logger.warning(f"  Hotel {result.hotel_id}: {result.error}")
                     
@@ -347,25 +347,25 @@ async def run_consumer(concurrency: int = 5):
                     logger.info(f"Batch update: {updated} hotels")
                     batch_results = []
                 
-                # Batch mark 404s
-                if len(batch_404_ids) >= 50:
-                    marked = await repo.batch_mark_booking_urls_404(batch_404_ids)
-                    logger.info(f"Marked {marked} URLs as 404")
-                    batch_404_ids = []
+                # Batch increment failed attempts
+                if len(batch_failed_ids) >= 50:
+                    marked = await repo.batch_increment_enrichment_attempts(batch_failed_ids)
+                    logger.info(f"Incremented attempts for {marked} hotels")
+                    batch_failed_ids = []
                 
                 # Log progress
                 attrs = get_queue_attributes(QUEUE_URL)
                 remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
-                logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, {total_404} 404s, ~{remaining} remaining")
+                logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, {total_failed} failed, ~{remaining} remaining")
             
             # Final batch
             if batch_results:
                 updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                 logger.info(f"Final batch update: {updated} hotels")
             
-            if batch_404_ids:
-                marked = await repo.batch_mark_booking_urls_404(batch_404_ids)
-                logger.info(f"Final 404 batch: {marked} URLs marked")
+            if batch_failed_ids:
+                marked = await repo.batch_increment_enrichment_attempts(batch_failed_ids)
+                logger.info(f"Final failed batch: {marked} attempts incremented")
             
             # Cleanup
             for page in pages:
