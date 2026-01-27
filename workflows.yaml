@@ -110,7 +110,12 @@ ec2:
     type: cron
     host: primary  # Only run on first/primary EC2 instance
 
-  # Cloudbeds enrichment enqueue (consumer is systemd: infra/cloudbeds-enrichment.service)
+  # Cloudbeds enrichment (scrape name/location from Cloudbeds booking pages)
+  cloudbeds_enrichment_consumer:
+    description: Poll SQS and scrape Cloudbeds hotels with Playwright
+    command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 10
+    type: systemd
+
   enqueue_cloudbeds_enrichment:
     description: Queue Cloudbeds hotels needing enrichment
     command: uv run python -m workflows.enrich_cloudbeds_enqueue --limit 5000
