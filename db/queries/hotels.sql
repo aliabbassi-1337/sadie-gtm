@@ -1075,3 +1075,62 @@ SELECT DISTINCT state
 FROM sadie_gtm.hotels
 WHERE state IS NOT NULL AND state != ''
 ORDER BY state;
+
+
+-- ============================================================================
+-- GEOCODING QUERIES (Serper Places enrichment for crawl data)
+-- ============================================================================
+
+-- name: get_hotels_needing_geocoding
+-- Get hotels with names but missing location data (for Serper Places geocoding)
+-- Targets crawl data hotels that have been name-enriched but need location
+SELECT 
+    h.id,
+    h.name,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.source,
+    hbe.booking_url,
+    be.name as engine_name
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.name IS NOT NULL 
+  AND h.name != ''
+  AND h.name NOT LIKE 'Unknown%'
+  AND (h.city IS NULL OR h.city = '')
+  AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source)
+ORDER BY h.id
+LIMIT :limit;
+
+
+-- name: get_hotels_needing_geocoding_count^
+-- Count hotels needing geocoding
+SELECT COUNT(*) as count
+FROM sadie_gtm.hotels h
+WHERE h.name IS NOT NULL 
+  AND h.name != ''
+  AND h.name NOT LIKE 'Unknown%'
+  AND (h.city IS NULL OR h.city = '')
+  AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source);
+
+
+-- name: update_hotel_geocoding!
+-- Update hotel with geocoding results from Serper Places
+-- Updates location, contact info, and coordinates
+UPDATE sadie_gtm.hotels
+SET 
+    address = COALESCE(:address, address),
+    city = COALESCE(:city, city),
+    state = COALESCE(:state, state),
+    country = COALESCE(:country, country),
+    location = CASE 
+        WHEN :latitude IS NOT NULL AND :longitude IS NOT NULL 
+        THEN ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography
+        ELSE location
+    END,
+    phone_google = COALESCE(:phone, phone_google),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;

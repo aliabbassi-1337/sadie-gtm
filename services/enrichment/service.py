@@ -290,6 +290,33 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def geocode_hotels_by_name(
+        self,
+        limit: int = 100,
+        source: str = None,
+        concurrency: int = 10,
+    ) -> dict:
+        """
+        Geocode hotels using Serper Places API by hotel name.
+
+        For crawl data hotels with names but no location, search Google Places
+        to find their address, city, state, country, coordinates, and phone.
+
+        Args:
+            limit: Max hotels to process
+            source: Optional source filter (e.g., 'cloudbeds_crawl')
+            concurrency: Max concurrent API requests
+
+        Returns dict with enriched/not_found/errors/api_calls counts.
+        """
+        pass
+
+    @abstractmethod
+    async def get_hotels_needing_geocoding_count(self, source: str = None) -> int:
+        """Count hotels needing geocoding (have name, missing city)."""
+        pass
+
 
 class Service(IService):
     def __init__(self) -> None:
@@ -913,3 +940,162 @@ class Service(IService):
             await asyncio.gather(*[process(client, h) for h in hotels])
         
         return stats
+
+    # =========================================================================
+    # GEOCODING BY NAME (Serper Places API)
+    # =========================================================================
+
+    async def get_hotels_needing_geocoding_count(self, source: str = None) -> int:
+        """Count hotels needing geocoding (have name, missing city)."""
+        return await repo.get_hotels_needing_geocoding_count(source=source)
+
+    async def geocode_hotels_by_name(
+        self,
+        limit: int = 100,
+        source: str = None,
+        concurrency: int = 10,
+    ) -> dict:
+        """
+        Geocode hotels using Serper Places API by hotel name.
+
+        For crawl data hotels with names but no location, search Google Places
+        to find their address, city, state, country, coordinates, and phone.
+
+        Args:
+            limit: Max hotels to process
+            source: Optional source filter (e.g., 'cloudbeds_crawl')
+            concurrency: Max concurrent API requests
+
+        Returns dict with enriched/not_found/errors/api_calls counts.
+        """
+        from services.enrichment.website_enricher import WebsiteEnricher
+
+        if not SERPER_API_KEY:
+            log("Error: SERPER_API_KEY not found in environment")
+            return {"total": 0, "enriched": 0, "not_found": 0, "errors": 0, "api_calls": 0}
+
+        # Get hotels needing geocoding
+        hotels = await repo.get_hotels_needing_geocoding(limit=limit, source=source)
+
+        if not hotels:
+            log("No hotels found needing geocoding")
+            return {"total": 0, "enriched": 0, "not_found": 0, "errors": 0, "api_calls": 0}
+
+        log(f"Found {len(hotels)} hotels needing geocoding")
+        if source:
+            log(f"  Filtered by source: {source}")
+
+        stats = {
+            "total": len(hotels),
+            "enriched": 0,
+            "not_found": 0,
+            "errors": 0,
+            "api_calls": 0,
+        }
+
+        semaphore = asyncio.Semaphore(concurrency)
+        enricher = WebsiteEnricher(SERPER_API_KEY)
+
+        async def geocode_hotel(hotel: repo.HotelGeocodingCandidate):
+            async with semaphore:
+                try:
+                    stats["api_calls"] += 1
+
+                    # Search Serper Places by hotel name
+                    result = await enricher.find_by_name(hotel.name)
+
+                    if not result:
+                        stats["not_found"] += 1
+                        return
+
+                    # Parse location from address if available
+                    city = None
+                    state = None
+                    country = None
+                    
+                    address = result.get("address")
+                    if address:
+                        # Parse "123 Main St, City, ST 12345, USA" format
+                        city, state, country = self._parse_address_components(address)
+
+                    # Update hotel with geocoding results
+                    await repo.update_hotel_geocoding(
+                        hotel_id=hotel.id,
+                        address=address,
+                        city=city,
+                        state=state,
+                        country=country,
+                        latitude=result.get("latitude"),
+                        longitude=result.get("longitude"),
+                        phone=result.get("phone"),
+                    )
+                    stats["enriched"] += 1
+
+                except Exception as e:
+                    log(f"Error geocoding hotel {hotel.id}: {e}")
+                    stats["errors"] += 1
+
+        # Process in batches for progress logging
+        batch_size = 100
+        for i in range(0, len(hotels), batch_size):
+            batch = hotels[i:i + batch_size]
+            await asyncio.gather(*[geocode_hotel(h) for h in batch])
+            log(f"  Progress: {min(i + batch_size, len(hotels))}/{len(hotels)} "
+                f"(enriched: {stats['enriched']}, not_found: {stats['not_found']}, errors: {stats['errors']})")
+
+        log(f"Geocoding complete: {stats['enriched']} enriched, {stats['not_found']} not found, "
+            f"{stats['errors']} errors, {stats['api_calls']} API calls")
+
+        return stats
+
+    def _parse_address_components(self, address: str) -> tuple:
+        """Parse city, state, country from an address string.
+        
+        Examples:
+            "123 Main St, Miami, FL 33101, USA" -> ("Miami", "FL", "USA")
+            "456 Beach Rd, Sydney NSW 2000, Australia" -> ("Sydney", "NSW", "Australia")
+        """
+        if not address:
+            return None, None, None
+
+        # Split by comma
+        parts = [p.strip() for p in address.split(",")]
+        
+        if len(parts) < 2:
+            return None, None, None
+
+        city = None
+        state = None
+        country = None
+
+        # Last part is usually country or state+zip
+        last = parts[-1].strip()
+        
+        # Check if last part is a known country
+        if last.upper() in ["USA", "US", "UNITED STATES", "CANADA", "AUSTRALIA", "UK", "UNITED KINGDOM"]:
+            country = last
+            # Second to last should be state/province + zip
+            if len(parts) >= 3:
+                state_zip = parts[-2].strip()
+                # Extract state code (usually 2 letters before zip)
+                state_match = re.match(r"([A-Z]{2,3})\s*\d*", state_zip.upper())
+                if state_match:
+                    state = state_match.group(1)
+                # City is the part before state
+                if len(parts) >= 4:
+                    city = parts[-3].strip()
+                else:
+                    city = parts[-2].strip()
+        else:
+            # Last part might be state+zip with no country
+            state_match = re.match(r"([A-Z]{2,3})\s*\d*", last.upper())
+            if state_match:
+                state = state_match.group(1)
+                if len(parts) >= 3:
+                    city = parts[-2].strip()
+            else:
+                # Just try to get city from second to last
+                if len(parts) >= 2:
+                    city = parts[-2].strip()
+
+        return city, state, country

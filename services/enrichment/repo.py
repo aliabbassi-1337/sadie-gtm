@@ -2,6 +2,7 @@
 
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
+from pydantic import BaseModel
 from db.client import queries, get_conn
 from db.models.hotel import Hotel
 from db.models.hotel_room_count import HotelRoomCount
@@ -492,4 +493,70 @@ async def update_hotel_name_and_location(
             city=city,
             state=state,
             country=country,
+        )
+
+
+# ============================================================================
+# GEOCODING FUNCTIONS (Serper Places enrichment)
+# ============================================================================
+
+
+class HotelGeocodingCandidate(BaseModel):
+    """Hotel needing geocoding via Serper Places."""
+    id: int
+    name: str
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    source: Optional[str] = None
+    booking_url: Optional[str] = None
+    engine_name: Optional[str] = None
+
+
+async def get_hotels_needing_geocoding(
+    limit: int = 1000,
+    source: Optional[str] = None,
+) -> List[HotelGeocodingCandidate]:
+    """Get hotels with names but missing location data for Serper Places geocoding."""
+    async with get_conn() as conn:
+        source_pattern = f"%{source}%" if source else None
+        results = await queries.get_hotels_needing_geocoding(
+            conn, limit=limit, source=source_pattern
+        )
+        return [HotelGeocodingCandidate.model_validate(dict(row)) for row in results]
+
+
+async def get_hotels_needing_geocoding_count(source: Optional[str] = None) -> int:
+    """Count hotels needing geocoding."""
+    async with get_conn() as conn:
+        source_pattern = f"%{source}%" if source else None
+        result = await queries.get_hotels_needing_geocoding_count(
+            conn, source=source_pattern
+        )
+        return result["count"] if result else 0
+
+
+async def update_hotel_geocoding(
+    hotel_id: int,
+    address: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    phone: Optional[str] = None,
+) -> None:
+    """Update hotel with geocoding results from Serper Places."""
+    async with get_conn() as conn:
+        await queries.update_hotel_geocoding(
+            conn,
+            hotel_id=hotel_id,
+            address=address,
+            city=city,
+            state=state,
+            country=country,
+            latitude=latitude,
+            longitude=longitude,
+            phone=phone,
         )

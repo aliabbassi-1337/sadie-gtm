@@ -450,6 +450,83 @@ class WebsiteEnricher:
             logger.debug(f"Error searching coordinates ({lat}, {lon}): {e}")
             return None
 
+    async def find_by_name(
+        self,
+        name: str,
+    ) -> Optional[Dict]:
+        """
+        Search for hotel details using Serper Places API by name only.
+
+        Used for geocoding crawl data hotels that have names but no location.
+        Returns coordinates, address, phone, and other details.
+
+        Args:
+            name: Hotel name to search for
+
+        Returns:
+            Dict with name, address, phone, latitude, longitude, website, rating or None
+        """
+        cleaned_name = clean_hotel_name(name)
+        query = f"{cleaned_name} hotel"
+
+        try:
+            resp = await self._request_with_retry(
+                "POST",
+                SERPER_PLACES_URL,
+                headers={
+                    "X-API-KEY": self.api_key,
+                    "Content-Type": "application/json",
+                },
+                json={"q": query, "num": 5},
+            )
+
+            if not resp or resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            places = data.get("places", [])
+
+            if not places:
+                return None
+
+            # Get the best match - first result or one with matching name
+            best = None
+            cleaned_lower = cleaned_name.lower()
+            
+            for place in places:
+                title = place.get("title", "").lower()
+                # Prefer exact or close name match
+                if cleaned_lower in title or title in cleaned_lower:
+                    best = place
+                    break
+            
+            if not best:
+                best = places[0]
+
+            # Filter website
+            website = best.get("website")
+            if website:
+                domain = self._extract_domain(website)
+                if domain and domain in SKIP_DOMAINS:
+                    website = None
+                elif any(pattern in website.lower() for pattern in BAD_URL_PATTERNS):
+                    website = None
+
+            return {
+                "name": best.get("title"),
+                "address": best.get("address"),
+                "phone": best.get("phoneNumber"),
+                "latitude": best.get("latitude"),
+                "longitude": best.get("longitude"),
+                "website": website,
+                "rating": best.get("rating"),
+                "cid": best.get("cid"),
+            }
+
+        except Exception as e:
+            logger.debug(f"Error searching by name '{name}': {e}")
+            return None
+
     async def find_website(
         self,
         name: str,
