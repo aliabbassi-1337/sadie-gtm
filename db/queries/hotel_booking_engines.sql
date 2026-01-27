@@ -108,6 +108,7 @@ LIMIT :limit;
 -- name: get_hotels_needing_enrichment
 -- Get hotels needing either name or address enrichment
 -- type param: 'names' = missing names, 'addresses' = missing location, 'both' = either
+-- NOTE: Only Cloudbeds for now (other engines' booking pages don't have hotel data)
 -- NOTE: Only includes hotels not attempted in last 7 days (handles rate limits)
 SELECT 
     h.id,
@@ -125,6 +126,7 @@ JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
+  AND be.name = 'Cloudbeds'  -- Only Cloudbeds (archive fallback works)
   AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
   AND (
     (:enrich_type = 'names' AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%'))
