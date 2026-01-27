@@ -41,7 +41,7 @@ class IService(ABC):
     async def export_by_booking_engine(
         self,
         booking_engine: str,
-        source_pattern: str = "%commoncrawl%",
+        source_pattern: str = "%crawl%",
     ) -> tuple[str, int]:
         """Generate Excel report for hotels with a specific booking engine from crawl data.
 
@@ -256,7 +256,7 @@ class Service(IService):
     async def export_by_booking_engine(
         self,
         booking_engine: str,
-        source_pattern: str = "%commoncrawl%",
+        source_pattern: str = "%crawl%",
     ) -> tuple[str, int]:
         """Generate Excel report for hotels with a specific booking engine from crawl data.
 
