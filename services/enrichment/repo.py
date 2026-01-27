@@ -698,6 +698,30 @@ async def get_cloudbeds_hotels_total_count() -> int:
         return result or 0
 
 
+async def mark_booking_url_status(hotel_id: int, status: str) -> None:
+    """Mark a booking URL with a status (ok, 404, etc)."""
+    async with get_conn() as conn:
+        await queries.mark_booking_url_status(conn, hotel_id=hotel_id, status=status)
+
+
+async def batch_mark_booking_urls_404(hotel_ids: List[int]) -> int:
+    """Batch mark booking URLs as 404."""
+    if not hotel_ids:
+        return 0
+    
+    async with get_conn() as conn:
+        sql = """
+        UPDATE sadie_gtm.hotel_booking_engines
+        SET url_status = '404'
+        WHERE hotel_id = ANY($1::integer[])
+        """
+        result = await conn.execute(sql, hotel_ids)
+        # Parse "UPDATE N" to get count
+        if result and result.startswith("UPDATE"):
+            return int(result.split()[1])
+        return 0
+
+
 async def batch_update_cloudbeds_enrichment(
     updates: List[Dict],
 ) -> int:
