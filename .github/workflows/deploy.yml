@@ -55,7 +55,7 @@ jobs:
               
               # Restart all managed services
               sudo systemctl restart detection-consumer || true
-              sudo systemctl restart name-enrichment-consumer || true
+              sudo systemctl restart booking-enrichment-consumer || true
               sudo systemctl restart cloudbeds-enrichment-consumer || true
             "; then
               echo "SUCCESS: $ip"

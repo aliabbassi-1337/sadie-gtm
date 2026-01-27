@@ -1,11 +1,10 @@
-"""Enqueue hotels for enrichment via SQS.
+"""Enqueue hotels for booking page enrichment via SQS.
 
-Finds hotels needing name and/or address enrichment, queues them for workers
-to scrape from booking pages.
+Finds hotels needing name/address enrichment, queues them for workers.
 
 Usage:
-    uv run python -m workflows.enrich_names_enqueue --limit 1000
-    uv run python -m workflows.enrich_names_enqueue --limit 5000 --engine cloudbeds
+    uv run python -m workflows.enrich_booking_pages_enqueue --limit 1000
+    uv run python -m workflows.enrich_booking_pages_enqueue --engine mews
 """
 
 import sys
@@ -22,7 +21,7 @@ from db.client import init_db, close_db
 from services.enrichment.service import Service as EnrichmentService
 from infra.sqs import send_messages_batch, get_queue_attributes
 
-QUEUE_URL = os.getenv("SQS_NAME_ENRICHMENT_QUEUE_URL", "")
+QUEUE_URL = os.getenv("SQS_BOOKING_ENRICHMENT_QUEUE_URL", "")
 
 
 async def run(
@@ -32,7 +31,7 @@ async def run(
 ):
     """Enqueue hotels for enrichment."""
     if not QUEUE_URL:
-        logger.error("SQS_NAME_ENRICHMENT_QUEUE_URL not set")
+        logger.error("SQS_BOOKING_ENRICHMENT_QUEUE_URL not set")
         return 0
     
     await init_db()
@@ -103,9 +102,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    uv run python -m workflows.enrich_names_enqueue --limit 1000
-    uv run python -m workflows.enrich_names_enqueue --engine cloudbeds --limit 5000
-    uv run python -m workflows.enrich_names_enqueue --limit 1000 --dry-run
+    uv run python -m workflows.enrich_booking_pages_enqueue --limit 1000
+    uv run python -m workflows.enrich_booking_pages_enqueue --engine mews --limit 5000
+    uv run python -m workflows.enrich_booking_pages_enqueue --limit 1000 --dry-run
 
 The consumer automatically detects what each hotel needs:
 - Missing name (null/empty/Unknown) -> extracts from booking page
@@ -113,7 +112,7 @@ The consumer automatically detects what each hotel needs:
 - Already has data -> preserves existing values
 
 Environment:
-    SQS_NAME_ENRICHMENT_QUEUE_URL - Required. The SQS queue URL.
+    SQS_BOOKING_ENRICHMENT_QUEUE_URL - Required. The SQS queue URL.
         """
     )
     

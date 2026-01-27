@@ -58,8 +58,8 @@ case "$1" in
         run_on_all "cd ~/sadie-gtm && \
             sudo cp infra/ec2/generated/*.service /etc/systemd/system/ 2>/dev/null || true && \
             sudo systemctl daemon-reload && \
-            sudo systemctl enable name-enrichment-consumer 2>/dev/null || true && \
-            sudo systemctl restart name-enrichment-consumer 2>/dev/null || true"
+            sudo systemctl enable booking-enrichment-consumer 2>/dev/null || true && \
+            sudo systemctl restart booking-enrichment-consumer 2>/dev/null || true"
         
         echo ""
         echo "[4/4] Installing cron on PRIMARY server only..."
@@ -81,17 +81,17 @@ case "$1" in
     
     status)
         echo "Checking systemd status on all servers..."
-        run_on_all "systemctl status name-enrichment-consumer --no-pager 2>/dev/null | head -5 || echo 'Service not installed'"
+        run_on_all "systemctl status booking-enrichment-consumer --no-pager 2>/dev/null | head -5 || echo 'Service not installed'"
         ;;
     
     logs)
         echo "Tailing enrichment logs on first server (Ctrl+C to stop)..."
-        ssh -i "$KEY" ubuntu@$PRIMARY_HOST "sudo journalctl -u name-enrichment-consumer -f"
+        ssh -i "$KEY" ubuntu@$PRIMARY_HOST "sudo journalctl -u booking-enrichment-consumer -f"
         ;;
     
     enqueue)
         echo "Manually enqueueing hotels (from primary server)..."
-        run_on_primary "cd ~/sadie-gtm && uv run python -m workflows.enrich_names_enqueue --limit 10000"
+        run_on_primary "cd ~/sadie-gtm && uv run python -m workflows.enrich_booking_pages_enqueue --limit 10000"
         ;;
     
     *)

@@ -1,11 +1,12 @@
-"""Hotel enrichment worker - Polls SQS and enriches hotels from booking pages.
+"""Booking page enrichment worker - Polls SQS and enriches hotels.
 
 Run continuously on EC2 instances to process enrichment jobs.
-Extracts hotel names and location data (city, state, country) from booking pages.
+Extracts hotel name, address, city, state, country from booking pages.
+Uses archive fallback (Common Crawl/Wayback) for 404 URLs.
 
 Usage:
-    uv run python -m workflows.enrich_names_consumer
-    uv run python -m workflows.enrich_names_consumer --delay 0.5
+    uv run python -m workflows.enrich_booking_pages_consumer
+    uv run python -m workflows.enrich_booking_pages_consumer --archive-fallback
 """
 
 import sys
@@ -25,7 +26,7 @@ from services.enrichment.service import Service as EnrichmentService
 from services.enrichment import repo as enrichment_repo
 from infra.sqs import receive_messages, delete_message, get_queue_attributes
 
-QUEUE_URL = os.getenv("SQS_NAME_ENRICHMENT_QUEUE_URL", "")
+QUEUE_URL = os.getenv("SQS_BOOKING_ENRICHMENT_QUEUE_URL", "")
 
 shutdown_requested = False
 
@@ -102,7 +103,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
     global shutdown_requested
     
     if not QUEUE_URL:
-        logger.error("SQS_NAME_ENRICHMENT_QUEUE_URL not set")
+        logger.error("SQS_BOOKING_ENRICHMENT_QUEUE_URL not set")
         return
     
     await init_db()
@@ -176,11 +177,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    uv run python -m workflows.enrich_names_consumer
-    uv run python -m workflows.enrich_names_consumer --delay 0.2
+    uv run python -m workflows.enrich_booking_pages_consumer
+    uv run python -m workflows.enrich_booking_pages_consumer --archive-fallback
 
 Environment:
-    SQS_NAME_ENRICHMENT_QUEUE_URL - Required. The SQS queue URL.
+    SQS_BOOKING_ENRICHMENT_QUEUE_URL - Required. The SQS queue URL.
         """
     )
     
