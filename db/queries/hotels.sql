@@ -1095,6 +1095,7 @@ ORDER BY state;
 -- name: get_hotels_needing_geocoding
 -- Get hotels with names but missing location data (for Serper Places geocoding)
 -- Targets crawl data hotels that have been name-enriched but need location
+-- NOTE: Excludes Cloudbeds (handled by booking page enrichment with archive fallback)
 SELECT 
     h.id,
     h.name,
@@ -1112,6 +1113,7 @@ WHERE h.name IS NOT NULL
   AND h.name != ''
   AND h.name NOT LIKE 'Unknown%'
   AND (h.city IS NULL OR h.city = '')
+  AND (be.name IS NULL OR be.name != 'Cloudbeds')  -- Exclude Cloudbeds
   AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source)
 ORDER BY h.id
 LIMIT :limit;
@@ -1121,10 +1123,13 @@ LIMIT :limit;
 -- Count hotels needing geocoding
 SELECT COUNT(*) as count
 FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.name IS NOT NULL 
   AND h.name != ''
   AND h.name NOT LIKE 'Unknown%'
   AND (h.city IS NULL OR h.city = '')
+  AND (be.name IS NULL OR be.name != 'Cloudbeds')  -- Exclude Cloudbeds
   AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source);
 
 
