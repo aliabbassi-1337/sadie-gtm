@@ -20,6 +20,7 @@ from services.enrichment.customer_proximity import (
     log as proximity_log,
 )
 from services.enrichment.website_enricher import WebsiteEnricher
+from services.enrichment.archive_scraper import ArchiveScraper, ExtractedBookingData
 
 load_dotenv()
 
@@ -27,137 +28,9 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 
 # ============================================================================
-# ARCHIVE SCRAPER - Fetch HTML from live pages or web archives
-# ============================================================================
-
-class ArchiveScraper:
-    """Fetches HTML from live pages with archive fallback for 404s.
-    
-    Sources (in order):
-    1. Live page - fastest if available
-    2. Common Crawl - fast, no rate limits, good for 2019-2022 data
-    3. Wayback Machine - largest archive, rate limited
-    """
-    
-    # Older indexes have dead URLs that are now 404
-    ARCHIVE_INDEXES = [
-        "CC-MAIN-2020-34",
-        "CC-MAIN-2021-04", 
-        "CC-MAIN-2019-51",
-        "CC-MAIN-2022-05",
-        "CC-MAIN-2020-16",
-    ]
-    
-    GARBAGE_INDICATORS = [
-        "soluções online",
-        "oops! something went wrong",
-        "page not found",
-        "404",
-    ]
-    
-    def __init__(self, client: httpx.AsyncClient):
-        self.client = client
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-    
-    async def fetch(self, url: str, use_archives: bool = True) -> Optional[str]:
-        """Fetch HTML from URL, with optional archive fallback.
-        
-        Returns HTML content or None if not found.
-        """
-        html = await self._fetch_live(url)
-        
-        if not html and use_archives:
-            html = await self._fetch_common_crawl(url)
-        
-        if not html and use_archives:
-            html = await self._fetch_wayback(url)
-        
-        return html
-    
-    async def _fetch_live(self, url: str) -> Optional[str]:
-        """Try to fetch from live URL."""
-        try:
-            resp = await self.client.get(url, headers=self.headers, follow_redirects=True, timeout=30.0)
-            if resp.status_code == 200:
-                html = resp.text
-                # Check for garbage (redirected to error page)
-                if any(ind in html.lower() for ind in self.GARBAGE_INDICATORS):
-                    return None
-                return html
-        except Exception:
-            pass
-        return None
-    
-    async def _fetch_common_crawl(self, url: str) -> Optional[str]:
-        """Try to fetch from Common Crawl archives."""
-        import gzip
-        
-        for crawl_id in self.ARCHIVE_INDEXES:
-            try:
-                resp = await self.client.get(
-                    f"https://index.commoncrawl.org/{crawl_id}-index",
-                    params={"url": url, "output": "json"},
-                    timeout=15,
-                )
-                if resp.status_code != 200 or not resp.text.strip():
-                    continue
-                
-                data = json.loads(resp.text.strip().split("\n")[0])
-                if data.get("status") != "200":
-                    continue
-                
-                warc_url = f"https://data.commoncrawl.org/{data['filename']}"
-                offset = int(data["offset"])
-                length = int(data["length"])
-                warc_headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
-                
-                resp2 = await self.client.get(warc_url, headers=warc_headers, timeout=60)
-                if resp2.status_code == 206:
-                    content = gzip.decompress(resp2.content)
-                    return content.decode("utf-8", errors="ignore")
-            except Exception:
-                continue
-        return None
-    
-    async def _fetch_wayback(self, url: str) -> Optional[str]:
-        """Try to fetch from Wayback Machine."""
-        try:
-            resp = await self.client.get(
-                "https://archive.org/wayback/available",
-                params={"url": url},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                wayback_url = data.get("archived_snapshots", {}).get("closest", {}).get("url")
-                if wayback_url:
-                    resp2 = await self.client.get(wayback_url, timeout=30, follow_redirects=True)
-                    if resp2.status_code == 200:
-                        return resp2.text
-        except Exception:
-            pass
-        return None
-
-
-# ============================================================================
 # BOOKING PAGE ENRICHMENT (name + address extraction)
 # ============================================================================
-
-
-class ExtractedBookingData(BaseModel):
-    """Data extracted from a booking page."""
-    name: Optional[str] = None
-    address: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    country: Optional[str] = None
-    zip_code: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    contact_name: Optional[str] = None
+# ExtractedBookingData is imported from archive_scraper
 
 
 class BookingPageEnrichmentResult(BaseModel):
@@ -341,92 +214,7 @@ class BookingPageEnricher:
         Uses ArchiveScraper to try: live page -> Common Crawl -> Wayback Machine
         """
         scraper = ArchiveScraper(client)
-        html = await scraper.fetch(booking_url, use_archives=True)
-        
-        if not html:
-            return None
-        
-        return self.extract_from_html(html)
-
-    def extract_from_html(self, html: str) -> Optional[ExtractedBookingData]:
-        """Extract hotel data from HTML (live or archived)."""
-        # Try Cloudbeds-specific extraction first (modern format)
-        cloudbeds_data = self.extract_from_cloudbeds(html)
-        if cloudbeds_data and (cloudbeds_data.city or cloudbeds_data.address):
-            # Get name from other sources
-            name = None
-            json_ld = self.extract_json_ld(html)
-            if json_ld and json_ld.get("name"):
-                name = json_ld["name"].strip()
-            if not name:
-                meta_data = self.extract_from_meta_tags(html)
-                name = meta_data.name
-            cloudbeds_data.name = name
-            return cloudbeds_data
-        
-        # Try older Cloudbeds format (archives from 2019-2022)
-        older_data = self.extract_from_older_cloudbeds(html)
-        if older_data and (older_data.city or older_data.address):
-            return older_data
-        
-        # Try JSON-LD
-        json_ld = self.extract_json_ld(html)
-        if json_ld:
-            data = self.parse_address_from_json_ld(json_ld)
-            if data.city or data.address:  # Need location, not just name
-                return data
-        
-        # Fall back to meta tags
-        data = self.extract_from_meta_tags(html)
-        if data.city or data.address:  # Need location, not just name
-            return data
-        
-        # Return whatever we have (even just name)
-        return older_data or data
-
-    @staticmethod
-    def extract_from_older_cloudbeds(html: str) -> Optional[ExtractedBookingData]:
-        """Extract from older Cloudbeds HTML format (pre-2022 archives)."""
-        name = None
-        city = None
-        country = None
-        address = None
-        
-        # Title: "Hotel Name - City, Country - Best Price Guarantee"
-        title_match = re.search(r'<title>([^<]+)</title>', html)
-        if title_match:
-            title = title_match.group(1).strip()
-            if 'cloudbeds' not in title.lower() and 'soluções' not in title.lower():
-                title = re.sub(r'\s*-\s*Best Price Guarantee.*$', '', title, flags=re.I)
-                parts = title.split(' - ')
-                if len(parts) >= 2:
-                    name = parts[0].strip()
-                    loc = parts[1].strip()
-                    loc_parts = loc.split(',')
-                    if len(loc_parts) >= 2:
-                        city = loc_parts[0].strip()
-                        country = loc_parts[-1].strip()
-                    else:
-                        city = loc
-        
-        # Address: "Address 1:</span> Street Address</p>"
-        addr_match = re.search(r'Address\s*\d?:</span>\s*([^<]+)</p>', html)
-        if addr_match:
-            address = addr_match.group(1).strip()
-        
-        # City from older format
-        city_match = re.search(r'City\s*:</span>\s*([^<]+)</p>', html)
-        if city_match and not city:
-            city = city_match.group(1).strip().split(' - ')[0].strip()
-        
-        if name or city or address:
-            return ExtractedBookingData(
-                name=name,
-                address=address,
-                city=city,
-                country=country,
-            )
-        return None
+        return await scraper.extract(booking_url, use_archives=True)
 
     @staticmethod
     def extract_from_cloudbeds(html: str) -> Optional[ExtractedBookingData]:
