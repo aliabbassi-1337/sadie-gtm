@@ -178,9 +178,11 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
+  AND h.status = 1
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
       OR (h.city IS NULL OR h.city = '')
+      OR (h.state IS NULL OR h.state = '')
   )
 ORDER BY h.id
 LIMIT :limit;
@@ -194,9 +196,11 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
+  AND h.status = 1
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
       OR (h.city IS NULL OR h.city = '')
+      OR (h.state IS NULL OR h.state = '')
   );
 
 -- name: get_cloudbeds_hotels_total_count^
