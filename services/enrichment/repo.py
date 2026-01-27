@@ -567,23 +567,82 @@ async def update_hotel_geocoding(
 async def batch_update_hotel_geocoding(
     updates: List[Dict],
 ) -> int:
-    """Batch update hotels with geocoding results. Returns count of updated hotels."""
+    """Batch update hotels with geocoding results using bulk UPDATE.
+    
+    Uses PostgreSQL unnest for efficient single-query batch update.
+    Returns count of updated hotels.
+    """
     if not updates:
         return 0
     
+    # Prepare arrays for unnest
+    hotel_ids = []
+    addresses = []
+    cities = []
+    states = []
+    countries = []
+    latitudes = []
+    longitudes = []
+    phones = []
+    emails = []
+    
+    for u in updates:
+        hotel_ids.append(u["hotel_id"])
+        addresses.append(u.get("address"))
+        cities.append(u.get("city"))
+        states.append(u.get("state"))
+        countries.append(u.get("country"))
+        latitudes.append(u.get("latitude"))
+        longitudes.append(u.get("longitude"))
+        phones.append(u.get("phone"))
+        emails.append(u.get("email"))
+    
+    # Bulk UPDATE using unnest - single query for all updates
+    sql = """
+    UPDATE sadie_gtm.hotels h
+    SET 
+        address = COALESCE(v.address, h.address),
+        city = COALESCE(v.city, h.city),
+        state = COALESCE(v.state, h.state),
+        country = COALESCE(v.country, h.country),
+        location = CASE 
+            WHEN v.latitude IS NOT NULL AND v.longitude IS NOT NULL 
+            THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
+            ELSE h.location
+        END,
+        phone_google = COALESCE(v.phone, h.phone_google),
+        email = COALESCE(v.email, h.email),
+        updated_at = CURRENT_TIMESTAMP
+    FROM (
+        SELECT * FROM unnest(
+            $1::integer[],
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[],
+            $6::float[],
+            $7::float[],
+            $8::text[],
+            $9::text[]
+        ) AS t(hotel_id, address, city, state, country, latitude, longitude, phone, email)
+    ) v
+    WHERE h.id = v.hotel_id
+    """
+    
     async with get_conn() as conn:
-        async with conn.transaction():
-            for update in updates:
-                await queries.update_hotel_geocoding(
-                    conn,
-                    hotel_id=update["hotel_id"],
-                    address=update.get("address"),
-                    city=update.get("city"),
-                    state=update.get("state"),
-                    country=update.get("country"),
-                    latitude=update.get("latitude"),
-                    longitude=update.get("longitude"),
-                    phone=update.get("phone"),
-                    email=update.get("email"),
-                )
-    return len(updates)
+        result = await conn.execute(
+            sql,
+            hotel_ids,
+            addresses,
+            cities,
+            states,
+            countries,
+            latitudes,
+            longitudes,
+            phones,
+            emails,
+        )
+        # Parse "UPDATE N" to get count
+        count = int(result.split()[-1]) if result else len(updates)
+    
+    return count
