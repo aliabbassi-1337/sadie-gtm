@@ -705,7 +705,11 @@ async def set_last_enrichment_attempt(hotel_id: int) -> None:
 
 
 async def batch_set_last_enrichment_attempt(hotel_ids: List[int]) -> int:
-    """Batch set last enrichment attempt for failed hotels."""
+    """Batch set last enrichment attempt for failed hotels.
+    
+    Note: Inline SQL required because aiosql doesn't support array parameters
+    with ANY($1::integer[]) syntax.
+    """
     if not hotel_ids:
         return 0
     
