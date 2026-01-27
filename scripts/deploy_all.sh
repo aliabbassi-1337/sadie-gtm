@@ -94,8 +94,19 @@ case "$1" in
         run_on_primary "cd ~/sadie-gtm && uv run python -m workflows.enrich_booking_pages_enqueue --limit 10000"
         ;;
     
+    push-env)
+        if [ -z "$2" ]; then
+            echo "Usage: $0 push-env 'VAR_NAME=value'"
+            echo "Example: $0 push-env 'SQS_BOOKING_ENRICHMENT_QUEUE_URL=https://...'"
+            exit 1
+        fi
+        echo "Pushing env var to all servers..."
+        VAR_NAME=$(echo "$2" | cut -d= -f1)
+        run_on_all "grep -q $VAR_NAME ~/sadie-gtm/.env || echo '$2' >> ~/sadie-gtm/.env && grep $VAR_NAME ~/sadie-gtm/.env"
+        ;;
+    
     *)
-        echo "Usage: $0 {deploy|pull|status|logs|enqueue}"
+        echo "Usage: $0 {deploy|pull|status|logs|enqueue|push-env}"
         echo ""
         echo "Commands:"
         echo "  deploy   - Full deploy: pull, generate, install systemd/cron"
