@@ -30,6 +30,12 @@ class ExtractedBookingData(BaseModel):
     contact_name: Optional[str] = None
 
 
+class ExtractionResult(BaseModel):
+    """Result of extraction attempt with status."""
+    status: str  # 'success', 'no_data', 'dead' (404)
+    data: Optional[ExtractedBookingData] = None
+
+
 class ArchiveScraper:
     """Fetches HTML from live pages with archive fallback for 404s.
     
@@ -90,6 +96,56 @@ class ArchiveScraper:
         if not html:
             return None
         return self.extract_from_html(html)
+    
+    async def extract_with_status(self, url: str, use_archives: bool = True) -> ExtractionResult:
+        """Fetch and extract hotel data, returning status for 404 detection.
+        
+        Returns ExtractionResult with status:
+        - 'success': extracted data successfully
+        - 'no_data': page exists but couldn't extract data
+        - 'dead': 404 or permanently unavailable (don't retry)
+        """
+        # First check if live URL is 404
+        is_dead = await self._is_dead_url(url)
+        
+        if is_dead:
+            # Try archives as last resort
+            if use_archives:
+                html = await self._fetch_common_crawl(url)
+                if not html:
+                    html = await self._fetch_wayback(url)
+                
+                if html:
+                    data = self.extract_from_html(html)
+                    if data and data.name:
+                        return ExtractionResult(status='success', data=data)
+            
+            # URL is dead and not in archives
+            return ExtractionResult(status='dead')
+        
+        # Live URL exists, try to extract
+        data = await self.extract(url, use_archives=use_archives)
+        if data and data.name:
+            return ExtractionResult(status='success', data=data)
+        
+        # Page exists but no data (retry later)
+        return ExtractionResult(status='no_data')
+    
+    async def _is_dead_url(self, url: str) -> bool:
+        """Check if URL is 404/dead."""
+        try:
+            resp = await self.client.head(url, headers=self.headers, follow_redirects=True, timeout=10.0)
+            if resp.status_code == 404:
+                return True
+            if resp.status_code == 200:
+                # Check if it redirected to error page
+                final_url = str(resp.url)
+                if 'error' in final_url.lower() or '404' in final_url:
+                    return True
+            return False
+        except Exception:
+            # Can't determine, assume not dead
+            return False
     
     # =========================================================================
     # FETCHING

@@ -704,6 +704,39 @@ async def set_last_enrichment_attempt(hotel_id: int) -> None:
         await queries.set_last_enrichment_attempt(conn, hotel_id=hotel_id)
 
 
+async def set_enrichment_status(hotel_id: int, status: str) -> None:
+    """Set enrichment status (success, no_data, dead)."""
+    async with get_conn() as conn:
+        await queries.set_enrichment_status(conn, hotel_id=hotel_id, status=status)
+
+
+async def mark_enrichment_dead(hotel_id: int) -> None:
+    """Mark a booking URL as permanently dead (404)."""
+    async with get_conn() as conn:
+        await queries.mark_enrichment_dead(conn, hotel_id=hotel_id)
+
+
+async def batch_mark_enrichment_dead(hotel_ids: List[int]) -> int:
+    """Batch mark booking URLs as permanently dead (404).
+    
+    These will not be re-queued for enrichment.
+    """
+    if not hotel_ids:
+        return 0
+    
+    async with get_conn() as conn:
+        sql = """
+        UPDATE sadie_gtm.hotel_booking_engines
+        SET enrichment_status = 'dead',
+            last_enrichment_attempt = NOW()
+        WHERE hotel_id = ANY($1::integer[])
+        """
+        result = await conn.execute(sql, hotel_ids)
+        if result and result.startswith("UPDATE"):
+            return int(result.split()[1])
+        return 0
+
+
 async def batch_set_last_enrichment_attempt(hotel_ids: List[int]) -> int:
     """Batch set last enrichment attempt for failed hotels.
     

@@ -39,6 +39,7 @@ class BookingPageEnrichmentResult(BaseModel):
     name_updated: bool = False
     address_updated: bool = False
     skipped: bool = False
+    is_dead: bool = False  # True if URL is 404 (don't retry)
 
 
 class HotelEnrichmentCandidate(BaseModel):
@@ -215,6 +216,22 @@ class BookingPageEnricher:
         """
         scraper = ArchiveScraper(client)
         return await scraper.extract(booking_url, use_archives=True)
+    
+    async def extract_from_url_with_status(
+        self,
+        client: httpx.AsyncClient,
+        booking_url: str,
+    ) -> "ExtractionResult":
+        """Extract data from booking page with status (for 404 detection).
+        
+        Returns ExtractionResult with status:
+        - 'success': extracted data successfully
+        - 'no_data': page exists but couldn't extract data
+        - 'dead': 404 or permanently unavailable (don't retry)
+        """
+        from services.enrichment.archive_scraper import ExtractionResult
+        scraper = ArchiveScraper(client)
+        return await scraper.extract_with_status(booking_url, use_archives=True)
 
     @staticmethod
     def extract_from_cloudbeds(html: str) -> Optional[ExtractedBookingData]:
@@ -998,9 +1015,13 @@ class Service(IService):
         if not use_archive_fallback:
             await asyncio.sleep(delay)
         
-        # Extract data from booking page (with optional archive fallback)
+        # Extract data from booking page (with optional archive fallback and 404 detection)
         if use_archive_fallback:
-            data = await enricher.extract_from_url_with_archive_fallback(client, booking_url)
+            extraction = await enricher.extract_from_url_with_status(client, booking_url)
+            if extraction.status == 'dead':
+                # URL is 404 and not in archives - mark as permanently failed
+                return BookingPageEnrichmentResult(success=False, is_dead=True)
+            data = extraction.data
         else:
             data = await enricher.extract_from_url(client, booking_url)
         
