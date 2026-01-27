@@ -168,6 +168,17 @@ SET phone_website = COALESCE(:phone_website, phone_website),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
+-- name: update_hotel_scraped_address!
+-- Update hotel address scraped from booking page (Cloudbeds).
+-- Only updates if current value is null/empty to avoid overwriting authoritative data.
+UPDATE sadie_gtm.hotels
+SET address = CASE WHEN (address IS NULL OR address = '') THEN :address ELSE address END,
+    city = CASE WHEN (city IS NULL OR city = '') THEN :city ELSE city END,
+    state = CASE WHEN (state IS NULL OR state = '') THEN :state ELSE state END,
+    country = CASE WHEN (country IS NULL OR country = '') THEN :country ELSE country END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
 -- name: get_hotels_by_ids
 -- Get hotels by list of IDs (for worker to fetch batch)
 SELECT
@@ -1075,3 +1086,63 @@ SELECT DISTINCT state
 FROM sadie_gtm.hotels
 WHERE state IS NOT NULL AND state != ''
 ORDER BY state;
+
+
+-- ============================================================================
+-- GEOCODING QUERIES (Serper Places enrichment for crawl data)
+-- ============================================================================
+
+-- name: get_hotels_needing_geocoding
+-- Get hotels with names but missing location data (for Serper Places geocoding)
+-- Targets crawl data hotels that have been name-enriched but need location
+SELECT 
+    h.id,
+    h.name,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.source,
+    hbe.booking_url,
+    be.name as engine_name
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.name IS NOT NULL 
+  AND h.name != ''
+  AND h.name NOT LIKE 'Unknown%'
+  AND (h.city IS NULL OR h.city = '')
+  AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source)
+ORDER BY h.id
+LIMIT :limit;
+
+
+-- name: get_hotels_needing_geocoding_count^
+-- Count hotels needing geocoding
+SELECT COUNT(*) as count
+FROM sadie_gtm.hotels h
+WHERE h.name IS NOT NULL 
+  AND h.name != ''
+  AND h.name NOT LIKE 'Unknown%'
+  AND (h.city IS NULL OR h.city = '')
+  AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source);
+
+
+-- name: update_hotel_geocoding!
+-- Update hotel with geocoding results from Serper Places
+-- Updates location, contact info, and coordinates
+UPDATE sadie_gtm.hotels
+SET 
+    address = COALESCE(CAST(:address AS TEXT), address),
+    city = COALESCE(CAST(:city AS TEXT), city),
+    state = COALESCE(CAST(:state AS TEXT), state),
+    country = COALESCE(CAST(:country AS TEXT), country),
+    location = CASE 
+        WHEN CAST(:latitude AS FLOAT) IS NOT NULL AND CAST(:longitude AS FLOAT) IS NOT NULL 
+        THEN ST_SetSRID(ST_MakePoint(CAST(:longitude AS FLOAT), CAST(:latitude AS FLOAT)), 4326)::geography
+        ELSE location
+    END,
+    phone_google = COALESCE(CAST(:phone AS TEXT), phone_google),
+    email = COALESCE(CAST(:email AS TEXT), email),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;

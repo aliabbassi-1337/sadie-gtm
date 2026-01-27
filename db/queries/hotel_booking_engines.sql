@@ -157,5 +157,50 @@ SET
     city = COALESCE(:city, city),
     state = COALESCE(:state, state),
     country = COALESCE(:country, country),
+    phone_website = COALESCE(:phone, phone_website),
+    email = COALESCE(:email, email),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
+
+-- ============================================================================
+-- CLOUDBEDS ENRICHMENT QUERIES
+-- ============================================================================
+
+-- name: get_cloudbeds_hotels_needing_enrichment
+-- Get hotels with Cloudbeds booking URLs that need name or location enrichment
+SELECT h.id, h.name, h.city, h.state, h.country, h.address,
+       hbe.booking_url, hbe.engine_property_id as slug
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE be.name ILIKE '%cloudbeds%'
+  AND hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
+  AND (
+      (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
+      OR (h.city IS NULL OR h.city = '')
+  )
+ORDER BY h.id
+LIMIT :limit;
+
+-- name: get_cloudbeds_hotels_needing_enrichment_count^
+-- Count Cloudbeds hotels needing enrichment
+SELECT COUNT(*)
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE be.name ILIKE '%cloudbeds%'
+  AND hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
+  AND (
+      (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
+      OR (h.city IS NULL OR h.city = '')
+  );
+
+-- name: get_cloudbeds_hotels_total_count^
+-- Count total Cloudbeds hotels
+SELECT COUNT(*)
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE be.name ILIKE '%cloudbeds%';

@@ -2,6 +2,7 @@
 
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
+from pydantic import BaseModel
 from db.client import queries, get_conn
 from db.models.hotel import Hotel
 from db.models.hotel_room_count import HotelRoomCount
@@ -481,6 +482,8 @@ async def update_hotel_name_and_location(
     city: Optional[str] = None,
     state: Optional[str] = None,
     country: Optional[str] = None,
+    phone: Optional[str] = None,
+    email: Optional[str] = None,
 ) -> None:
     """Update hotel name and/or location. Uses COALESCE to preserve existing values."""
     async with get_conn() as conn:
@@ -492,4 +495,284 @@ async def update_hotel_name_and_location(
             city=city,
             state=state,
             country=country,
+            phone=phone,
+            email=email,
         )
+
+
+# ============================================================================
+# GEOCODING FUNCTIONS (Serper Places enrichment)
+# ============================================================================
+
+
+class HotelGeocodingCandidate(BaseModel):
+    """Hotel needing geocoding via Serper Places."""
+    id: int
+    name: str
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    source: Optional[str] = None
+    booking_url: Optional[str] = None
+    engine_name: Optional[str] = None
+
+
+async def get_hotels_needing_geocoding(
+    limit: int = 1000,
+    source: Optional[str] = None,
+) -> List[HotelGeocodingCandidate]:
+    """Get hotels with names but missing location data for Serper Places geocoding."""
+    async with get_conn() as conn:
+        source_pattern = f"%{source}%" if source else None
+        results = await queries.get_hotels_needing_geocoding(
+            conn, limit=limit, source=source_pattern
+        )
+        return [HotelGeocodingCandidate.model_validate(dict(row)) for row in results]
+
+
+async def get_hotels_needing_geocoding_count(source: Optional[str] = None) -> int:
+    """Count hotels needing geocoding."""
+    async with get_conn() as conn:
+        source_pattern = f"%{source}%" if source else None
+        result = await queries.get_hotels_needing_geocoding_count(
+            conn, source=source_pattern
+        )
+        return result["count"] if result else 0
+
+
+async def update_hotel_geocoding(
+    hotel_id: int,
+    address: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    phone: Optional[str] = None,
+    email: Optional[str] = None,
+) -> None:
+    """Update hotel with geocoding results from Serper Places."""
+    async with get_conn() as conn:
+        await queries.update_hotel_geocoding(
+            conn,
+            hotel_id=hotel_id,
+            address=address,
+            city=city,
+            state=state,
+            country=country,
+            latitude=latitude,
+            longitude=longitude,
+            phone=phone,
+            email=email,
+        )
+
+
+async def batch_update_hotel_geocoding(
+    updates: List[Dict],
+) -> int:
+    """Batch update hotels with geocoding results using bulk UPDATE.
+    
+    Uses PostgreSQL unnest for efficient single-query batch update.
+    Returns count of updated hotels.
+    """
+    if not updates:
+        return 0
+    
+    # Prepare arrays for unnest
+    hotel_ids = []
+    addresses = []
+    cities = []
+    states = []
+    countries = []
+    latitudes = []
+    longitudes = []
+    phones = []
+    emails = []
+    
+    for u in updates:
+        hotel_ids.append(u["hotel_id"])
+        addresses.append(u.get("address"))
+        cities.append(u.get("city"))
+        states.append(u.get("state"))
+        countries.append(u.get("country"))
+        latitudes.append(u.get("latitude"))
+        longitudes.append(u.get("longitude"))
+        phones.append(u.get("phone"))
+        emails.append(u.get("email"))
+    
+    # Bulk UPDATE using unnest - single query for all updates
+    sql = """
+    UPDATE sadie_gtm.hotels h
+    SET 
+        address = COALESCE(v.address, h.address),
+        city = COALESCE(v.city, h.city),
+        state = COALESCE(v.state, h.state),
+        country = COALESCE(v.country, h.country),
+        location = CASE 
+            WHEN v.latitude IS NOT NULL AND v.longitude IS NOT NULL 
+            THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
+            ELSE h.location
+        END,
+        phone_google = COALESCE(v.phone, h.phone_google),
+        email = COALESCE(v.email, h.email),
+        updated_at = CURRENT_TIMESTAMP
+    FROM (
+        SELECT * FROM unnest(
+            $1::integer[],
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[],
+            $6::float[],
+            $7::float[],
+            $8::text[],
+            $9::text[]
+        ) AS t(hotel_id, address, city, state, country, latitude, longitude, phone, email)
+    ) v
+    WHERE h.id = v.hotel_id
+    """
+    
+    async with get_conn() as conn:
+        result = await conn.execute(
+            sql,
+            hotel_ids,
+            addresses,
+            cities,
+            states,
+            countries,
+            latitudes,
+            longitudes,
+            phones,
+            emails,
+        )
+        # Parse "UPDATE N" to get count
+        count = int(result.split()[-1]) if result else len(updates)
+    
+    return count
+
+
+# ============================================================================
+# CLOUDBEDS ENRICHMENT
+# ============================================================================
+
+
+class CloudbedsHotelCandidate(BaseModel):
+    """Hotel needing Cloudbeds enrichment."""
+    id: int
+    name: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    address: Optional[str] = None
+    booking_url: str
+    slug: Optional[str] = None
+
+
+async def get_cloudbeds_hotels_needing_enrichment(
+    limit: int = 100,
+) -> List[CloudbedsHotelCandidate]:
+    """Get hotels with Cloudbeds booking URLs that need name or location enrichment."""
+    async with get_conn() as conn:
+        rows = await queries.get_cloudbeds_hotels_needing_enrichment(conn, limit=limit)
+        return [CloudbedsHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_cloudbeds_hotels_needing_enrichment_count() -> int:
+    """Count Cloudbeds hotels needing enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_cloudbeds_hotels_needing_enrichment_count(conn)
+        # Handle both scalar and Record returns
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def get_cloudbeds_hotels_total_count() -> int:
+    """Count total Cloudbeds hotels."""
+    async with get_conn() as conn:
+        result = await queries.get_cloudbeds_hotels_total_count(conn)
+        # Handle both scalar and Record returns
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def batch_update_cloudbeds_enrichment(
+    updates: List[Dict],
+) -> int:
+    """Batch update hotels with Cloudbeds enrichment results.
+    
+    For Cloudbeds, scraped data overrides existing (crawl sources often have wrong location).
+    """
+    if not updates:
+        return 0
+    
+    hotel_ids = []
+    names = []
+    addresses = []
+    cities = []
+    states = []
+    countries = []
+    phones = []
+    emails = []
+    
+    for u in updates:
+        hotel_ids.append(u["hotel_id"])
+        names.append(u.get("name"))
+        addresses.append(u.get("address"))
+        cities.append(u.get("city"))
+        states.append(u.get("state"))
+        countries.append(u.get("country"))
+        phones.append(u.get("phone"))
+        emails.append(u.get("email"))
+    
+    # Scraped data overrides existing (Cloudbeds page is authoritative)
+    sql = """
+    UPDATE sadie_gtm.hotels h
+    SET 
+        name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
+                    THEN v.name ELSE h.name END,
+        address = CASE WHEN v.address IS NOT NULL AND v.address != '' 
+                       THEN v.address ELSE h.address END,
+        city = CASE WHEN v.city IS NOT NULL AND v.city != '' 
+                    THEN v.city ELSE h.city END,
+        state = CASE WHEN v.state IS NOT NULL AND v.state != '' 
+                     THEN v.state ELSE h.state END,
+        country = CASE WHEN v.country IS NOT NULL AND v.country != '' 
+                       THEN v.country ELSE h.country END,
+        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' 
+                             THEN v.phone ELSE h.phone_website END,
+        email = CASE WHEN v.email IS NOT NULL AND v.email != '' 
+                     THEN v.email ELSE h.email END,
+        updated_at = CURRENT_TIMESTAMP
+    FROM (
+        SELECT * FROM unnest(
+            $1::integer[],
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[],
+            $6::text[],
+            $7::text[],
+            $8::text[]
+        ) AS t(hotel_id, name, address, city, state, country, phone, email)
+    ) v
+    WHERE h.id = v.hotel_id
+    """
+    
+    async with get_conn() as conn:
+        result = await conn.execute(
+            sql,
+            hotel_ids,
+            names,
+            addresses,
+            cities,
+            states,
+            countries,
+            phones,
+            emails,
+        )
+        count = int(result.split()[-1]) if result else len(updates)
+    
+    return count

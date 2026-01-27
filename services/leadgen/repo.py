@@ -126,6 +126,29 @@ async def update_hotel_contact_info(
         )
 
 
+async def update_hotel_scraped_address(
+    hotel_id: int,
+    address: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> None:
+    """Update hotel address scraped from booking page (Cloudbeds).
+    
+    Only updates fields that are currently empty/null to avoid overwriting
+    existing data from authoritative sources.
+    """
+    async with get_conn() as conn:
+        await queries.update_hotel_scraped_address(
+            conn,
+            hotel_id=hotel_id,
+            address=address,
+            city=city,
+            state=state,
+            country=country,
+        )
+
+
 def _normalize_engine_name(name: str) -> str:
     """Normalize booking engine name for consistency.
 
