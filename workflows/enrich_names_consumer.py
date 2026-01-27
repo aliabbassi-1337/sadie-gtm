@@ -22,6 +22,7 @@ import httpx
 
 from db.client import init_db, close_db
 from services.enrichment.service import Service as EnrichmentService
+from services.enrichment import repo as enrichment_repo
 from infra.sqs import receive_messages, delete_message, get_queue_attributes
 
 QUEUE_URL = os.getenv("SQS_NAME_ENRICHMENT_QUEUE_URL", "")
@@ -72,17 +73,27 @@ async def process_message(
         return (True, False, False)
     
     if result.success:
-        parts = []
-        if result.name_updated:
-            parts.append("name")
-        if result.address_updated:
-            parts.append("address")
-        if parts:
+        if result.name_updated or result.address_updated:
+            # Actually enriched something
+            parts = []
+            if result.name_updated:
+                parts.append("name")
+            if result.address_updated:
+                parts.append("address")
             logger.info(f"  Updated hotel {hotel_id}: {', '.join(parts)}")
-        delete_message(queue_url, receipt_handle)
-        return (True, result.name_updated, result.address_updated)
+            delete_message(queue_url, receipt_handle)
+            return (True, result.name_updated, result.address_updated)
+        else:
+            # Page loaded but no data extracted - increment attempts
+            await enrichment_repo.increment_enrichment_attempts(hotel_id)
+            delete_message(queue_url, receipt_handle)
+            logger.debug(f"  Hotel {hotel_id}: no data extracted, incremented attempts")
+            return (True, False, False)
     else:
-        # Error - don't delete, will retry
+        # Error - increment attempts so it stops being re-enqueued after 3 tries
+        await enrichment_repo.increment_enrichment_attempts(hotel_id)
+        delete_message(queue_url, receipt_handle)
+        logger.warning(f"  Hotel {hotel_id}: enrichment failed, incremented attempts")
         return (False, False, False)
 
 

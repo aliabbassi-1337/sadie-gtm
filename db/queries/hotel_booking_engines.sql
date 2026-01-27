@@ -109,6 +109,7 @@ LIMIT :limit;
 -- Get hotels needing either name or address enrichment
 -- type param: 'names' = missing names, 'addresses' = missing location, 'both' = either
 -- NOTE: Excludes Cloudbeds hotels - they have their own dedicated enrichment queue
+-- NOTE: Excludes hotels with >= 3 failed enrichment attempts (broken URLs)
 SELECT 
     h.id,
     h.name,
@@ -126,6 +127,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
   AND be.name != 'Cloudbeds'  -- Cloudbeds has dedicated queue
+  AND COALESCE(hbe.enrichment_attempts, 0) < 3  -- Skip broken URLs after 3 failed attempts
   AND (
     (:enrich_type = 'names' AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%'))
     OR (:enrich_type = 'addresses' AND (h.city IS NULL OR h.city = '' OR h.state IS NULL OR h.state = ''))
