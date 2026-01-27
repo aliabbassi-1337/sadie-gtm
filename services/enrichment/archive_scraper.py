@@ -36,6 +36,59 @@ class ExtractionResult(BaseModel):
     data: Optional[ExtractedBookingData] = None
 
 
+# Map full country names to ISO 2-letter codes (USA is special case -> "USA")
+COUNTRY_TO_CODE = {
+    # USA special case
+    'US': 'USA', 'United States': 'USA', 'United States of America': 'USA',
+    # Common full names to ISO codes
+    'Germany': 'DE', 'Taiwan': 'TW', 'New Zealand': 'NZ', 'Italy': 'IT',
+    'Malta': 'MT', 'Sri Lanka': 'LK', 'France': 'FR', 'India': 'IN',
+    'Greece': 'GR', 'Belize': 'BZ', 'Tanzania': 'TZ', 'Denmark': 'DK',
+    'Switzerland': 'CH', 'Laos': 'LA', 'El Salvador': 'SV', 'Norway': 'NO',
+    'Finland': 'FI', 'Nicaragua': 'NI', 'Spain': 'ES', 'Thailand': 'TH',
+    'Australia': 'AU', 'United Kingdom': 'GB', 'Philippines': 'PH',
+    'Argentina': 'AR', 'Colombia': 'CO', 'Portugal': 'PT', 'Indonesia': 'ID',
+    'Costa Rica': 'CR', 'Chile': 'CL', 'Peru': 'PE', 'Singapore': 'SG',
+    'Guatemala': 'GT', 'Ireland': 'IE', 'Puerto Rico': 'PR', 'Ecuador': 'EC',
+    'Malaysia': 'MY', 'Morocco': 'MA', 'Panama': 'PA', 'Cambodia': 'KH',
+    'Uruguay': 'UY', 'Japan': 'JP', 'Dominican Republic': 'DO', 'Vietnam': 'VN',
+    'South Africa': 'ZA', 'Honduras': 'HN', 'Netherlands': 'NL', 'Romania': 'RO',
+    'Kenya': 'KE', 'Sweden': 'SE', 'Seychelles': 'SC', 'Aruba': 'AW',
+    'Mauritius': 'MU', 'Austria': 'AT', 'Mexico': 'MX', 'Canada': 'CA',
+    'Brazil': 'BR', 'Belgium': 'BE', 'Czech Republic': 'CZ', 'Hungary': 'HU',
+    'Poland': 'PL', 'Croatia': 'HR', 'Slovenia': 'SI', 'Slovakia': 'SK',
+    'Bulgaria': 'BG', 'Serbia': 'RS', 'Montenegro': 'ME', 'Albania': 'AL',
+    'Bosnia and Herzegovina': 'BA', 'North Macedonia': 'MK', 'Moldova': 'MD',
+    'Ukraine': 'UA', 'Belarus': 'BY', 'Russia': 'RU', 'Turkey': 'TR',
+    'Israel': 'IL', 'Egypt': 'EG', 'Saudi Arabia': 'SA', 'UAE': 'AE',
+    'United Arab Emirates': 'AE', 'Qatar': 'QA', 'Kuwait': 'KW', 'Bahrain': 'BH',
+    'Oman': 'OM', 'Jordan': 'JO', 'Lebanon': 'LB', 'Cyprus': 'CY',
+    'China': 'CN', 'South Korea': 'KR', 'Korea': 'KR', 'Hong Kong': 'HK',
+    'Nepal': 'NP', 'Bangladesh': 'BD', 'Pakistan': 'PK', 'Myanmar': 'MM',
+    'Maldives': 'MV', 'Fiji': 'FJ', 'Papua New Guinea': 'PG', 'Samoa': 'WS',
+    'Vanuatu': 'VU', 'Bolivia': 'BO', 'Paraguay': 'PY', 'Venezuela': 'VE',
+    'Suriname': 'SR', 'Guyana': 'GY', 'Jamaica': 'JM', 'Trinidad and Tobago': 'TT',
+    'Barbados': 'BB', 'Bahamas': 'BS', 'Cuba': 'CU', 'Haiti': 'HT',
+    'Luxembourg': 'LU', 'Liechtenstein': 'LI', 'Monaco': 'MC', 'Andorra': 'AD',
+    'Iceland': 'IS', 'Estonia': 'EE', 'Latvia': 'LV', 'Lithuania': 'LT',
+    'Ghana': 'GH', 'Nigeria': 'NG', 'Ethiopia': 'ET', 'Uganda': 'UG',
+    'Rwanda': 'RW', 'Zambia': 'ZM', 'Zimbabwe': 'ZW', 'Botswana': 'BW',
+    'Namibia': 'NA', 'Mozambique': 'MZ', 'Madagascar': 'MG', 'Senegal': 'SN',
+    'Tunisia': 'TN', 'Algeria': 'DZ', 'Libya': 'LY',
+}
+
+def normalize_country(country: Optional[str]) -> Optional[str]:
+    """Normalize country names to ISO 2-letter codes (USA stays as 'USA')."""
+    if not country:
+        return None
+    country = country.strip()
+    # Check if it's a full name we know
+    if country in COUNTRY_TO_CODE:
+        return COUNTRY_TO_CODE[country]
+    # Already a code, return as-is
+    return country
+
+
 class ArchiveScraper:
     """Fetches HTML from live pages with archive fallback for 404s.
     
