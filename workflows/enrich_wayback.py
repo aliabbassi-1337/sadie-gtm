@@ -100,6 +100,31 @@ async def extract_from_wayback(wayback_url: str, client: httpx.AsyncClient) -> D
                 result['name'] = title
         else:
             logger.debug(f"No title found in HTML")
+        
+        # Try to extract address from older Cloudbeds format
+        # Format: "Address 1:</span> Street Address</p>"
+        addr_match = re.search(r'Address\s*\d?:</span>\s*([^<]+)</p>', html)
+        if addr_match:
+            addr = addr_match.group(1).strip()
+            if addr and len(addr) > 3:
+                result['address'] = addr
+        
+        # Extract city from older format: "City:</span> Milan - Milano</p>"  
+        city_match = re.search(r'City\s*:</span>\s*([^<]+)</p>', html)
+        if city_match and not result.get('city'):
+            city_text = city_match.group(1).strip()
+            # Handle "Milan - Milano" format, take first part
+            city_text = city_text.split(' - ')[0].strip()
+            if city_text:
+                result['city'] = city_text
+        
+        # Fallback: Try data-be-text for newer archives
+        if not result.get('address') and 'data-be-text="true"' in html:
+            be_texts = re.findall(r'data-be-text="true"[^>]*>([^<]+)<', html)
+            be_texts = [t.strip() for t in be_texts if t.strip() and len(t.strip()) > 3 
+                       and t.strip() not in ['*', 'Address', 'Contact', 'Phone', 'Email']]
+            if be_texts:
+                result['address'] = be_texts[0]
                 
     except Exception as e:
         logger.debug(f"Error extracting from {wayback_url}: {e}")
@@ -157,7 +182,7 @@ async def run(limit: int = 100, dry_run: bool = False):
                         logger.debug(f"  Hotel {hotel_id}: archive found but no data")
                         continue
                     
-                    logger.info(f"  Hotel {hotel_id}: recovered name={data.get('name')}, city={data.get('city')}")
+                    logger.info(f"  Hotel {hotel_id}: recovered name={data.get('name')}, city={data.get('city')}, address={data.get('address')}")
                     recovered += 1
                     
                     if not dry_run:
@@ -166,9 +191,10 @@ async def run(limit: int = 100, dry_run: bool = False):
                             SET name = $1,
                                 city = COALESCE($2, city),
                                 country = COALESCE($3, country),
+                                address = COALESCE($4, address),
                                 updated_at = CURRENT_TIMESTAMP
-                            WHERE id = $4
-                        ''', data.get('name'), data.get('city'), data.get('country'), hotel_id)
+                            WHERE id = $5
+                        ''', data.get('name'), data.get('city'), data.get('country'), data.get('address'), hotel_id)
                     
                     # Rate limit - be nice to Wayback (they rate limit aggressively)
                     await asyncio.sleep(2)
