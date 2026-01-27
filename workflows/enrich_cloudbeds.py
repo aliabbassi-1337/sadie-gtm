@@ -29,6 +29,7 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from loguru import logger
 from playwright.async_api import async_playwright, Page
+from playwright_stealth import Stealth
 
 from db.client import init_db, close_db
 from services.enrichment import repo
@@ -207,7 +208,7 @@ async def enrich_hotel(
     try:
         # Navigate to booking page
         await page.goto(booking_url, timeout=30000, wait_until="domcontentloaded")
-        await asyncio.sleep(1.5)  # Wait for React to render
+        await asyncio.sleep(4)  # Wait for React and address widget to load
         
         # Extract data
         data = await extract_from_cloudbeds_page(page)
@@ -329,7 +330,8 @@ async def run_enrichment(limit: int, concurrency: int = 3):
         total_errors = 0
         batch_size = 50  # Update DB every 50 hotels
         
-        async with async_playwright() as p:
+        async with Stealth().use_async(async_playwright()) as p:
+            # playwright-stealth bypasses headless detection
             browser = await p.chromium.launch(headless=True)
             
             # Create reusable browser contexts pool
@@ -337,7 +339,8 @@ async def run_enrichment(limit: int, concurrency: int = 3):
             pages = []
             for _ in range(concurrency):
                 ctx = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800},
                 )
                 page = await ctx.new_page()
                 contexts.append(ctx)
