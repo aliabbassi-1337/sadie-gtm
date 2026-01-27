@@ -776,3 +776,83 @@ async def batch_update_cloudbeds_enrichment(
         count = int(result.split()[-1]) if result else len(updates)
     
     return count
+
+
+# ============================================================================
+# MEWS ENRICHMENT
+# ============================================================================
+
+
+class MewsHotelCandidate(BaseModel):
+    """Hotel needing Mews enrichment."""
+    id: int
+    name: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    address: Optional[str] = None
+    booking_url: str
+    slug: Optional[str] = None
+
+
+async def get_mews_hotels_needing_enrichment(
+    limit: int = 100,
+) -> List[MewsHotelCandidate]:
+    """Get hotels with Mews booking URLs that need name enrichment."""
+    async with get_conn() as conn:
+        rows = await queries.get_mews_hotels_needing_enrichment(conn, limit=limit)
+        return [MewsHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_mews_hotels_needing_enrichment_count() -> int:
+    """Count Mews hotels needing enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_mews_hotels_needing_enrichment_count(conn)
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def get_mews_hotels_total_count() -> int:
+    """Count total Mews hotels."""
+    async with get_conn() as conn:
+        result = await queries.get_mews_hotels_total_count(conn)
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def batch_update_mews_enrichment(
+    updates: List[Dict],
+) -> int:
+    """Batch update hotels with Mews enrichment results (name only)."""
+    if not updates:
+        return 0
+    
+    hotel_ids = []
+    names = []
+    
+    for u in updates:
+        hotel_ids.append(u["hotel_id"])
+        names.append(u.get("name"))
+    
+    sql = """
+    UPDATE sadie_gtm.hotels h
+    SET 
+        name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
+                    THEN v.name ELSE h.name END,
+        updated_at = CURRENT_TIMESTAMP
+    FROM (
+        SELECT * FROM unnest(
+            $1::integer[],
+            $2::text[]
+        ) AS t(hotel_id, name)
+    ) v
+    WHERE h.id = v.hotel_id
+    """
+    
+    async with get_conn() as conn:
+        result = await conn.execute(sql, hotel_ids, names)
+        count = int(result.split()[-1]) if result else len(updates)
+    
+    return count

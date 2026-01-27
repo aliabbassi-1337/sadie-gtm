@@ -206,3 +206,41 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%';
+
+
+-- ============================================================================
+-- MEWS ENRICHMENT QUERIES
+-- ============================================================================
+
+-- name: get_mews_hotels_needing_enrichment
+-- Get hotels with Mews booking URLs that need name enrichment
+SELECT h.id, h.name, h.city, h.state, h.country, h.address,
+       hbe.booking_url, hbe.engine_property_id as slug
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE be.name ILIKE '%mews%'
+  AND hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
+  AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
+ORDER BY h.id
+LIMIT :limit;
+
+-- name: get_mews_hotels_needing_enrichment_count^
+-- Count Mews hotels needing enrichment
+SELECT COUNT(*)
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE be.name ILIKE '%mews%'
+  AND hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
+  AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%');
+
+-- name: get_mews_hotels_total_count^
+-- Count total Mews hotels
+SELECT COUNT(*)
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE be.name ILIKE '%mews%';
