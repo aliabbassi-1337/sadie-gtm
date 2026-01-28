@@ -3,7 +3,7 @@
 import pytest
 
 from services.ingestor.ingestors.rms import RMSIngestor, RMSIngestResult
-from services.enrichment.rms_repo import RMSRepo
+from services.rms import RMSRepo, ExtractedRMSData
 
 
 @pytest.fixture
@@ -46,7 +46,6 @@ class TestRMSIngestorSaveBatch:
     async def test_saves_hotels_to_db(self, ingestor):
         """Should save hotels to database."""
         import uuid
-        from services.enrichment.rms_scraper import ExtractedRMSData
         
         unique_id = str(uuid.uuid4())[:8]
         

@@ -19,9 +19,7 @@ from playwright.async_api import async_playwright, BrowserContext
 from playwright_stealth import Stealth
 
 from services.ingestor.registry import register
-from services.enrichment.rms_scanner import RMSScanner, ScannedURL
-from services.enrichment.rms_scraper import RMSScraper, ExtractedRMSData
-from services.enrichment.rms_repo import RMSRepo, IRMSRepo
+from services.rms import RMSScanner, RMSScraper, ExtractedRMSData, RMSRepo, IRMSRepo
 
 
 # Configuration

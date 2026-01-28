@@ -21,9 +21,7 @@ from services.enrichment.customer_proximity import (
     log as proximity_log,
 )
 from services.enrichment.website_enricher import WebsiteEnricher
-from services.enrichment.rms_repo import IRMSRepo, RMSRepo, RMSHotelRecord
-from services.enrichment.rms_scraper import RMSScraper
-from services.enrichment.rms_queue import IRMSQueue, RMSQueue, QueueStats
+from services.rms import IRMSRepo, RMSRepo, RMSHotelRecord, RMSScraper, IRMSQueue, RMSQueue, QueueStats
 
 load_dotenv()
 

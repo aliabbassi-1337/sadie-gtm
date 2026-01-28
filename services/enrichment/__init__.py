@@ -14,24 +14,20 @@ from services.enrichment.service import (
     EnqueueResult,
     ConsumeResult,
 )
-from services.enrichment.rms_repo import (
+
+# Re-export from services.rms for backward compatibility
+from services.rms import (
     RMSRepo,
     IRMSRepo,
     RMSHotelRecord,
-)
-from services.enrichment.rms_scanner import (
     RMSScanner,
     IRMSScanner,
     MockScanner,
     ScannedURL,
-)
-from services.enrichment.rms_scraper import (
     RMSScraper,
     IRMSScraper,
     MockScraper,
     ExtractedRMSData,
-)
-from services.enrichment.rms_queue import (
     RMSQueue,
     IRMSQueue,
     MockQueue,
@@ -46,21 +42,18 @@ __all__ = [
     "EnrichResult",
     "EnqueueResult",
     "ConsumeResult",
-    # Repo
+    # RMS (re-exported from services.rms)
     "RMSRepo",
     "IRMSRepo",
     "RMSHotelRecord",
-    # Scanner
     "RMSScanner",
     "IRMSScanner",
     "MockScanner",
     "ScannedURL",
-    # Scraper
     "RMSScraper",
     "IRMSScraper",
     "MockScraper",
     "ExtractedRMSData",
-    # Queue
     "RMSQueue",
     "IRMSQueue",
     "MockQueue",

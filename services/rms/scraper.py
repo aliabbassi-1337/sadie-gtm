@@ -6,9 +6,9 @@ Assumes the URL is already known to be valid (use Scanner first).
 
 import asyncio
 import re
-from dataclasses import dataclass
 from typing import Optional, List, Protocol, runtime_checkable
 
+from pydantic import BaseModel
 from loguru import logger
 from playwright.async_api import Page
 
@@ -16,8 +16,7 @@ from playwright.async_api import Page
 PAGE_TIMEOUT = 20000  # 20 seconds
 
 
-@dataclass
-class ExtractedRMSData:
+class ExtractedRMSData(BaseModel):
     """Data extracted from RMS booking page."""
     slug: str
     booking_url: str

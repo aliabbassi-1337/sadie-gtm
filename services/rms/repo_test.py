@@ -2,7 +2,7 @@
 
 import pytest
 
-from services.enrichment.rms_repo import RMSRepo, RMSHotelRecord
+from services.rms.repo import RMSRepo, RMSHotelRecord
 
 
 @pytest.fixture

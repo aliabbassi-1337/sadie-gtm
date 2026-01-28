@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from services.enrichment.rms_scraper import (
+from services.rms.scraper import (
     RMSScraper,
     MockScraper,
     ExtractedRMSData,

@@ -15,7 +15,7 @@ from infra.sqs import (
     get_queue_url,
     get_queue_attributes,
 )
-from services.enrichment.rms_repo import RMSHotelRecord
+from services.rms.repo import RMSHotelRecord
 
 
 QUEUE_NAME = "sadie-gtm-rms-enrichment"

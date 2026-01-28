@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from services.enrichment.rms_scanner import (
+from services.rms.scanner import (
     RMSScanner,
     MockScanner,
     ScannedURL,

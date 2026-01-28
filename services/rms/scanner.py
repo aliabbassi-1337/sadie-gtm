@@ -5,9 +5,9 @@ Tries different subdomains and slug formats.
 """
 
 import asyncio
-from dataclasses import dataclass
 from typing import Optional, List, Protocol, runtime_checkable
 
+from pydantic import BaseModel
 from playwright.async_api import Page
 
 # RMS subdomain variations
@@ -17,8 +17,7 @@ RMS_SUBDOMAINS = ["ibe12", "ibe"]
 PAGE_TIMEOUT = 15000  # 15 seconds
 
 
-@dataclass
-class ScannedURL:
+class ScannedURL(BaseModel):
     """Result of a successful URL scan."""
     id_num: int
     url: str
