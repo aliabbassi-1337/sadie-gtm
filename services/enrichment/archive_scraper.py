@@ -378,6 +378,10 @@ class ArchiveScraper:
             if inferred:
                 data.country = inferred
         
+        # Normalize country to ISO code before returning
+        if data and data.country:
+            data.country = normalize_country(data.country)
+        
         return data
     
     def _extract_cloudbeds_modern(self, html: str) -> Optional[ExtractedBookingData]:
