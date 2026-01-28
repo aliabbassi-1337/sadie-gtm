@@ -4,6 +4,11 @@ Run continuously on EC2 instances to process enrichment jobs.
 Extracts hotel name, address, city, state, country from booking pages.
 Uses archive fallback (Common Crawl/Wayback) for 404 URLs.
 
+Features:
+- Archive fallback: tries Common Crawl/Wayback for 404 URLs
+- 404 detection: marks dead URLs so they're not re-queued
+- Retry logic: failed extractions retry after 7 days
+
 Usage:
     uv run python -m workflows.enrich_booking_pages_consumer
     uv run python -m workflows.enrich_booking_pages_consumer --archive-fallback
@@ -48,7 +53,7 @@ async def process_message(
 ) -> tuple:
     """Process a single SQS message.
     
-    Returns (success, name_updated, address_updated).
+    Returns (success, name_updated, address_updated, is_dead).
     """
     receipt_handle = message["receipt_handle"]
     body = message["body"]
@@ -58,7 +63,7 @@ async def process_message(
     
     if not hotel_id or not booking_url:
         delete_message(queue_url, receipt_handle)
-        return (False, False, False)
+        return (False, False, False, False)
     
     result = await service.enrich_hotel_from_booking_page(
         client=client,
@@ -71,11 +76,19 @@ async def process_message(
     if result.skipped:
         # Already enriched
         delete_message(queue_url, receipt_handle)
-        return (True, False, False)
+        return (True, False, False, False)
+    
+    if result.is_dead:
+        # URL is 404 - mark as permanently dead (won't be re-queued)
+        await enrichment_repo.mark_enrichment_dead(hotel_id)
+        delete_message(queue_url, receipt_handle)
+        logger.warning(f"  Hotel {hotel_id}: 404 - marked as dead (won't retry)")
+        return (False, False, False, True)
     
     if result.success:
         if result.name_updated or result.address_updated:
-            # Actually enriched something
+            # Actually enriched something - mark as success
+            await enrichment_repo.set_enrichment_status(hotel_id, 'success')
             parts = []
             if result.name_updated:
                 parts.append("name")
@@ -83,19 +96,19 @@ async def process_message(
                 parts.append("address")
             logger.info(f"  Updated hotel {hotel_id}: {', '.join(parts)}")
             delete_message(queue_url, receipt_handle)
-            return (True, result.name_updated, result.address_updated)
+            return (True, result.name_updated, result.address_updated, False)
         else:
-            # Page loaded but no data extracted - mark attempt timestamp
-            await enrichment_repo.set_last_enrichment_attempt(hotel_id)
+            # Page loaded but no data extracted - mark as no_data (retry later)
+            await enrichment_repo.set_enrichment_status(hotel_id, 'no_data')
             delete_message(queue_url, receipt_handle)
             logger.debug(f"  Hotel {hotel_id}: no data extracted, will retry in 7 days")
-            return (True, False, False)
+            return (True, False, False, False)
     else:
         # Error - mark attempt timestamp (will retry after 7 days)
         await enrichment_repo.set_last_enrichment_attempt(hotel_id)
         delete_message(queue_url, receipt_handle)
         logger.warning(f"  Hotel {hotel_id}: enrichment failed, will retry in 7 days")
-        return (False, False, False)
+        return (False, False, False, False)
 
 
 async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fallback: bool = False):
@@ -115,6 +128,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
     names_updated = 0
     addresses_updated = 0
     errors = 0
+    dead_urls = 0
     
     logger.info(f"Starting enrichment worker (delay={delay}s, archive_fallback={use_archive_fallback})")
     logger.info(f"Queue: {QUEUE_URL}")
@@ -127,7 +141,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
                 in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
                 
                 if pending == 0 and in_flight == 0:
-                    logger.info(f"Queue empty. Processed: {processed}, Names: {names_updated}, Addresses: {addresses_updated}, Errors: {errors}")
+                    logger.info(f"Queue empty. Processed: {processed}, Names: {names_updated}, Addresses: {addresses_updated}, Dead: {dead_urls}, Errors: {errors}")
                     logger.info(f"Waiting {poll_interval}s...")
                     await asyncio.sleep(poll_interval)
                     continue
@@ -148,7 +162,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
                     if shutdown_requested:
                         break
                     
-                    success, name_up, addr_up = await process_message(
+                    success, name_up, addr_up, is_dead = await process_message(
                         service, client, msg, QUEUE_URL, delay, use_archive_fallback
                     )
                     processed += 1
@@ -156,17 +170,19 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
                         names_updated += 1
                     if addr_up:
                         addresses_updated += 1
-                    if not success:
+                    if is_dead:
+                        dead_urls += 1
+                    elif not success:
                         errors += 1
                 
                 if processed % 100 == 0:
-                    logger.info(f"Progress: {processed} processed, {names_updated} names, {addresses_updated} addresses, {errors} errors")
+                    logger.info(f"Progress: {processed} processed, {names_updated} names, {addresses_updated} addresses, {dead_urls} dead, {errors} errors")
                     
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
         finally:
             await close_db()
-            logger.info(f"Final stats: {processed} processed, {names_updated} names, {addresses_updated} addresses, {errors} errors")
+            logger.info(f"Final stats: {processed} processed, {names_updated} names, {addresses_updated} addresses, {dead_urls} dead, {errors} errors")
 
 
 def main():

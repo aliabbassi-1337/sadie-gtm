@@ -110,6 +110,7 @@ LIMIT :limit;
 -- type param: 'names' = missing names, 'addresses' = missing location, 'both' = either
 -- NOTE: Only Cloudbeds for now (other engines' booking pages don't have hotel data)
 -- NOTE: Only includes hotels not attempted in last 7 days (handles rate limits)
+-- NOTE: Excludes 'dead' hotels (404 URLs that will never succeed)
 SELECT 
     h.id,
     h.name,
@@ -127,6 +128,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
   AND be.name = 'Cloudbeds'  -- Only Cloudbeds (archive fallback works)
+  AND (hbe.enrichment_status IS NULL OR hbe.enrichment_status NOT IN ('success', 'dead'))
   AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
   AND (
     (:enrich_type = 'names' AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%'))
@@ -154,15 +156,16 @@ WHERE id = :hotel_id;
 -- name: update_hotel_name_and_location!
 -- Update both name and location in one call
 -- Only updates fields that are provided (non-null)
+-- NOTE: Explicit ::TEXT casts required for asyncpg parameter type inference
 UPDATE sadie_gtm.hotels
 SET 
-    name = CASE WHEN :name IS NOT NULL AND :name != '' THEN :name ELSE name END,
-    address = COALESCE(:address, address),
-    city = COALESCE(:city, city),
-    state = COALESCE(:state, state),
-    country = COALESCE(:country, country),
-    phone_website = COALESCE(:phone, phone_website),
-    email = COALESCE(:email, email),
+    name = CASE WHEN CAST(:name AS TEXT) IS NOT NULL AND CAST(:name AS TEXT) != '' THEN CAST(:name AS TEXT) ELSE name END,
+    address = COALESCE(CAST(:address AS TEXT), address),
+    city = COALESCE(CAST(:city AS TEXT), city),
+    state = COALESCE(CAST(:state AS TEXT), state),
+    country = COALESCE(CAST(:country AS TEXT), country),
+    phone_website = COALESCE(CAST(:phone AS TEXT), phone_website),
+    email = COALESCE(CAST(:email AS TEXT), email),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
@@ -220,6 +223,20 @@ WHERE be.name ILIKE '%cloudbeds%';
 -- Record when enrichment was last attempted (for rate limit cooldown)
 UPDATE sadie_gtm.hotel_booking_engines
 SET last_enrichment_attempt = NOW()
+WHERE hotel_id = :hotel_id;
+
+-- name: set_enrichment_status!
+-- Set enrichment status (success, no_data, dead)
+UPDATE sadie_gtm.hotel_booking_engines
+SET enrichment_status = :status,
+    last_enrichment_attempt = NOW()
+WHERE hotel_id = :hotel_id;
+
+-- name: mark_enrichment_dead!
+-- Mark a booking URL as permanently dead (404)
+UPDATE sadie_gtm.hotel_booking_engines
+SET enrichment_status = 'dead',
+    last_enrichment_attempt = NOW()
 WHERE hotel_id = :hotel_id;
 
 
