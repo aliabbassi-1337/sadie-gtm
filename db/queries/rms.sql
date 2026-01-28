@@ -74,16 +74,22 @@ DO UPDATE SET
 
 -- name: update_rms_hotel!
 -- Update hotel with enriched data
+-- Only fill NULL/empty fields, or replace garbage names (Unknown, URLs)
+-- Preserves real existing data
 UPDATE sadie_gtm.hotels 
 SET 
-    name = COALESCE(:name, name),
-    address = COALESCE(:address, address),
-    city = COALESCE(:city, city),
-    state = COALESCE(:state, state),
-    country = COALESCE(:country, country),
-    phone_website = COALESCE(:phone, phone_website),
-    email = COALESCE(:email, email),
-    website = COALESCE(:website, website),
+    name = CASE 
+        WHEN name IS NULL OR name = '' OR name LIKE 'Unknown%' OR name LIKE '%rmscloud.com%' 
+        THEN COALESCE(:name, name)
+        ELSE name 
+    END,
+    address = CASE WHEN address IS NULL OR address = '' THEN :address ELSE address END,
+    city = CASE WHEN city IS NULL OR city = '' THEN :city ELSE city END,
+    state = CASE WHEN state IS NULL OR state = '' THEN :state ELSE state END,
+    country = CASE WHEN country IS NULL OR country = '' THEN :country ELSE country END,
+    phone_website = CASE WHEN phone_website IS NULL OR phone_website = '' THEN :phone ELSE phone_website END,
+    email = CASE WHEN email IS NULL OR email = '' THEN :email ELSE email END,
+    website = CASE WHEN website IS NULL OR website = '' THEN :website ELSE website END,
     updated_at = NOW()
 WHERE id = :hotel_id;
 

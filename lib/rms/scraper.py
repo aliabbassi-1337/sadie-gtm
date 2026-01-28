@@ -62,19 +62,23 @@ class RMSScraper(IRMSScraper):
         return bool(body_text and len(body_text) >= 100)
     
     async def _extract_name(self) -> Optional[str]:
+        # Garbage names to reject
+        garbage = ['online bookings', 'search', 'book now', 'unknown', 'error', 'loading']
+        
         for selector in ['h1', '.property-name', '.header-title']:
             try:
                 el = await self._page.query_selector(selector)
                 if el:
                     text = (await el.inner_text()).strip()
-                    if text and 2 < len(text) < 100 and text.lower() not in ['online bookings', 'search', 'book now']:
-                        return text
+                    if text and 2 < len(text) < 100:
+                        if text.lower() not in garbage and 'rmscloud.com' not in text.lower():
+                            return text
             except Exception:
                 pass
         title = await self._page.title()
-        if title and title.lower() not in ['online bookings', 'search', '']:
+        if title and title.lower() not in garbage and title.strip():
             title = re.sub(r'\s*[-|]\s*RMS.*$', '', title, flags=re.IGNORECASE)
-            if title and len(title) > 2:
+            if title and len(title) > 2 and 'rmscloud.com' not in title.lower():
                 return title.strip()
         return None
     
