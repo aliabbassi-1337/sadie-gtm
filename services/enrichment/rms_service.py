@@ -269,6 +269,7 @@ class RMSService(IRMSService):
                     phone=hotel.phone,
                     email=hotel.email,
                     website=hotel.website,
+                    external_id=hotel.slug,  # Use slug as external_id
                     source="rms_scan",
                     status=1,
                 )

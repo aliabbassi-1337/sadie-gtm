@@ -1,190 +1,185 @@
-"""Unit tests for RMS Repository."""
+"""Tests for RMS Repository against local database."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.enrichment.rms_repo import RMSRepo, RMSHotelRecord
 
 
-pytestmark = pytest.mark.no_db  # All tests in this file use mocks, no real DB
+@pytest.fixture
+async def repo():
+    """Create repo instance."""
+    return RMSRepo()
 
 
 class TestRMSRepoGetBookingEngineId:
     """Tests for get_booking_engine_id."""
     
     @pytest.mark.asyncio
-    async def test_returns_id_when_found(self):
-        """Should return booking engine ID from database."""
-        with patch("services.enrichment.rms_repo.get_conn") as mock_conn:
-            mock_context = AsyncMock()
-            mock_context.__aenter__.return_value = MagicMock()
-            mock_conn.return_value = mock_context
-            
-            with patch("services.enrichment.rms_repo.queries") as mock_queries:
-                mock_queries.get_rms_booking_engine_id = AsyncMock(return_value={"id": 4})
-                
-                repo = RMSRepo()
-                result = await repo.get_booking_engine_id()
-                
-                assert result == 4
-    
-    @pytest.mark.asyncio
-    async def test_raises_when_not_found(self):
-        """Should raise ValueError when booking engine not found."""
-        with patch("services.enrichment.rms_repo.get_conn") as mock_conn:
-            mock_context = AsyncMock()
-            mock_context.__aenter__.return_value = MagicMock()
-            mock_conn.return_value = mock_context
-            
-            with patch("services.enrichment.rms_repo.queries") as mock_queries:
-                mock_queries.get_rms_booking_engine_id = AsyncMock(return_value=None)
-                
-                repo = RMSRepo()
-                
-                with pytest.raises(ValueError, match="not found"):
-                    await repo.get_booking_engine_id()
+    async def test_returns_rms_cloud_id(self, repo):
+        """Should return RMS Cloud booking engine ID from database."""
+        result = await repo.get_booking_engine_id()
+        
+        assert isinstance(result, int)
+        assert result > 0
 
 
 class TestRMSRepoGetHotelsNeedingEnrichment:
     """Tests for get_hotels_needing_enrichment."""
     
     @pytest.mark.asyncio
-    async def test_returns_hotel_records(self):
-        """Should return list of RMSHotelRecord."""
-        with patch("services.enrichment.rms_repo.get_conn") as mock_conn:
-            mock_context = AsyncMock()
-            mock_context.__aenter__.return_value = MagicMock()
-            mock_conn.return_value = mock_context
-            
-            with patch("services.enrichment.rms_repo.queries") as mock_queries:
-                mock_queries.get_rms_hotels_needing_enrichment = AsyncMock(return_value=[
-                    {"hotel_id": 1, "booking_url": "https://ibe.rmscloud.com/123"},
-                    {"hotel_id": 2, "booking_url": "https://ibe.rmscloud.com/456"},
-                ])
-                
-                repo = RMSRepo()
-                result = await repo.get_hotels_needing_enrichment(limit=100)
-                
-                assert len(result) == 2
-                assert isinstance(result[0], RMSHotelRecord)
-                assert result[0].hotel_id == 1
-                assert result[0].booking_url == "https://ibe.rmscloud.com/123"
-    
-    @pytest.mark.asyncio
-    async def test_returns_empty_list_when_none(self):
-        """Should return empty list when no hotels need enrichment."""
-        with patch("services.enrichment.rms_repo.get_conn") as mock_conn:
-            mock_context = AsyncMock()
-            mock_context.__aenter__.return_value = MagicMock()
-            mock_conn.return_value = mock_context
-            
-            with patch("services.enrichment.rms_repo.queries") as mock_queries:
-                mock_queries.get_rms_hotels_needing_enrichment = AsyncMock(return_value=[])
-                
-                repo = RMSRepo()
-                result = await repo.get_hotels_needing_enrichment(limit=100)
-                
-                assert result == []
-
-
-class TestRMSRepoInsertHotel:
-    """Tests for insert_hotel."""
-    
-    @pytest.mark.asyncio
-    async def test_inserts_and_returns_id(self):
-        """Should insert hotel and return the new ID."""
-        with patch("services.enrichment.rms_repo.get_conn") as mock_conn:
-            mock_context = AsyncMock()
-            mock_context.__aenter__.return_value = MagicMock()
-            mock_conn.return_value = mock_context
-            
-            with patch("services.enrichment.rms_repo.queries") as mock_queries:
-                mock_queries.insert_rms_hotel = AsyncMock(return_value=42)
-                
-                repo = RMSRepo()
-                result = await repo.insert_hotel(
-                    name="Test Hotel",
-                    address="123 Main St",
-                    city="Test City",
-                    state="TS",
-                    country="USA",
-                    phone="555-1234",
-                    email="test@hotel.com",
-                    website="https://testhotel.com",
-                )
-                
-                assert result == 42
-                mock_queries.insert_rms_hotel.assert_called_once()
-
-
-class TestRMSRepoUpdateHotel:
-    """Tests for update_hotel."""
-    
-    @pytest.mark.asyncio
-    async def test_updates_hotel(self):
-        """Should call update query with correct params."""
-        with patch("services.enrichment.rms_repo.get_conn") as mock_conn:
-            mock_context = AsyncMock()
-            mock_context.__aenter__.return_value = MagicMock()
-            mock_conn.return_value = mock_context
-            
-            with patch("services.enrichment.rms_repo.queries") as mock_queries:
-                mock_queries.update_rms_hotel = AsyncMock()
-                
-                repo = RMSRepo()
-                await repo.update_hotel(
-                    hotel_id=1,
-                    name="Updated Name",
-                    email="new@email.com",
-                )
-                
-                mock_queries.update_rms_hotel.assert_called_once()
-                call_kwargs = mock_queries.update_rms_hotel.call_args[1]
-                assert call_kwargs["hotel_id"] == 1
-                assert call_kwargs["name"] == "Updated Name"
-                assert call_kwargs["email"] == "new@email.com"
+    async def test_returns_list(self, repo):
+        """Should return a list of RMSHotelRecord."""
+        result = await repo.get_hotels_needing_enrichment(limit=10)
+        
+        assert isinstance(result, list)
+        for record in result:
+            assert isinstance(record, RMSHotelRecord)
+            assert record.hotel_id > 0
+            assert record.booking_url
 
 
 class TestRMSRepoGetStats:
     """Tests for get_stats."""
     
     @pytest.mark.asyncio
-    async def test_returns_stats_dict(self):
+    async def test_returns_stats_dict(self, repo):
         """Should return statistics dictionary."""
-        with patch("services.enrichment.rms_repo.get_conn") as mock_conn:
-            mock_context = AsyncMock()
-            mock_context.__aenter__.return_value = MagicMock()
-            mock_conn.return_value = mock_context
-            
-            with patch("services.enrichment.rms_repo.queries") as mock_queries:
-                mock_queries.get_rms_stats = AsyncMock(return_value={
-                    "total": 100,
-                    "with_name": 80,
-                    "with_email": 50,
-                })
-                
-                repo = RMSRepo()
-                result = await repo.get_stats()
-                
-                assert result["total"] == 100
-                assert result["with_name"] == 80
-                assert result["with_email"] == 50
+        result = await repo.get_stats()
+        
+        assert isinstance(result, dict)
+        assert "total" in result
+        assert isinstance(result["total"], int)
+
+
+class TestRMSRepoCountNeedingEnrichment:
+    """Tests for count_needing_enrichment."""
     
     @pytest.mark.asyncio
-    async def test_returns_defaults_when_none(self):
-        """Should return default stats when query returns None."""
-        with patch("services.enrichment.rms_repo.get_conn") as mock_conn:
-            mock_context = AsyncMock()
-            mock_context.__aenter__.return_value = MagicMock()
-            mock_conn.return_value = mock_context
-            
-            with patch("services.enrichment.rms_repo.queries") as mock_queries:
-                mock_queries.get_rms_stats = AsyncMock(return_value=None)
-                
-                repo = RMSRepo()
-                result = await repo.get_stats()
-                
-                assert result["total"] == 0
+    async def test_returns_count(self, repo):
+        """Should return count of hotels needing enrichment."""
+        result = await repo.count_needing_enrichment()
+        
+        assert isinstance(result, int)
+        assert result >= 0
+
+
+class TestRMSRepoInsertAndUpdate:
+    """Tests for insert and update operations."""
+    
+    @pytest.mark.asyncio
+    async def test_insert_hotel_returns_id(self, repo):
+        """Should insert hotel and return ID."""
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        
+        result = await repo.insert_hotel(
+            name=f"Test Hotel RMS {unique_id}",
+            address="123 Test St",
+            city="Test City",
+            state="TS",
+            country="USA",
+            phone="555-1234",
+            email="test@rmstest.com",
+            website="https://testhotel.com",
+            external_id=f"test_{unique_id}",
+            source="rms_test",
+            status=1,
+        )
+        
+        assert result is not None
+        assert isinstance(result, int)
+        assert result > 0
+    
+    @pytest.mark.asyncio
+    async def test_insert_booking_engine_relation(self, repo):
+        """Should insert hotel booking engine relation."""
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        
+        hotel_id = await repo.insert_hotel(
+            name=f"Test Hotel BE {unique_id}",
+            address=None,
+            city=None,
+            state=None,
+            country=None,
+            phone=None,
+            email=None,
+            website=None,
+            external_id=f"be_{unique_id}",
+            source="rms_test",
+            status=1,
+        )
+        
+        booking_engine_id = await repo.get_booking_engine_id()
+        
+        await repo.insert_hotel_booking_engine(
+            hotel_id=hotel_id,
+            booking_engine_id=booking_engine_id,
+            booking_url=f"https://ibe.rmscloud.com/test{unique_id}",
+            enrichment_status="enriched",
+        )
+    
+    @pytest.mark.asyncio
+    async def test_update_hotel(self, repo):
+        """Should update hotel fields."""
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        
+        hotel_id = await repo.insert_hotel(
+            name=f"Test Hotel Update {unique_id}",
+            address=None,
+            city=None,
+            state=None,
+            country=None,
+            phone=None,
+            email=None,
+            website=None,
+            external_id=f"update_{unique_id}",
+            source="rms_test",
+            status=1,
+        )
+        
+        await repo.update_hotel(
+            hotel_id=hotel_id,
+            name=f"Updated Hotel {unique_id}",
+            email="updated@test.com",
+            phone="555-9999",
+        )
+    
+    @pytest.mark.asyncio
+    async def test_update_enrichment_status(self, repo):
+        """Should update enrichment status."""
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        
+        hotel_id = await repo.insert_hotel(
+            name=f"Test Hotel Status {unique_id}",
+            address=None,
+            city=None,
+            state=None,
+            country=None,
+            phone=None,
+            email=None,
+            website=None,
+            external_id=f"status_{unique_id}",
+            source="rms_test",
+            status=1,
+        )
+        
+        booking_engine_id = await repo.get_booking_engine_id()
+        booking_url = f"https://ibe.rmscloud.com/status{unique_id}"
+        
+        await repo.insert_hotel_booking_engine(
+            hotel_id=hotel_id,
+            booking_engine_id=booking_engine_id,
+            booking_url=booking_url,
+            enrichment_status="pending",
+        )
+        
+        await repo.update_enrichment_status(
+            booking_url=booking_url,
+            status="enriched",
+        )
 
 
 if __name__ == "__main__":

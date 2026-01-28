@@ -34,17 +34,22 @@ LIMIT :limit;
 
 -- name: insert_rms_hotel<!
 -- Insert a new RMS hotel and return the ID
+-- Uses external_id for upsert (RMS slug as external_id)
 INSERT INTO sadie_gtm.hotels (
-    name, address, city, state, country, phone, email, website,
-    source, status, created_at, updated_at
+    name, address, city, state, country, phone_website, email, website,
+    source, status, external_id, external_id_type, created_at, updated_at
 ) VALUES (
     :name, :address, :city, :state, :country, :phone, :email, :website,
-    :source, :status, NOW(), NOW()
+    :source, :status, :external_id, 'rms_slug', NOW(), NOW()
 )
-ON CONFLICT (name, COALESCE(city, ''), COALESCE(state, '')) 
+ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL
 DO UPDATE SET
+    name = COALESCE(EXCLUDED.name, sadie_gtm.hotels.name),
     address = COALESCE(EXCLUDED.address, sadie_gtm.hotels.address),
-    phone = COALESCE(EXCLUDED.phone, sadie_gtm.hotels.phone),
+    city = COALESCE(EXCLUDED.city, sadie_gtm.hotels.city),
+    state = COALESCE(EXCLUDED.state, sadie_gtm.hotels.state),
+    country = COALESCE(EXCLUDED.country, sadie_gtm.hotels.country),
+    phone_website = COALESCE(EXCLUDED.phone_website, sadie_gtm.hotels.phone_website),
     email = COALESCE(EXCLUDED.email, sadie_gtm.hotels.email),
     website = COALESCE(EXCLUDED.website, sadie_gtm.hotels.website),
     updated_at = NOW()
@@ -52,17 +57,20 @@ RETURNING id;
 
 -- name: insert_rms_hotel_booking_engine!
 -- Insert or update hotel booking engine relation
+-- Primary key is hotel_id only (one booking engine per hotel)
 INSERT INTO sadie_gtm.hotel_booking_engines (
     hotel_id, booking_engine_id, booking_url, enrichment_status,
-    last_enrichment_attempt, created_at
+    last_enrichment_attempt, detected_at, updated_at
 ) VALUES (
-    :hotel_id, :booking_engine_id, :booking_url, :enrichment_status, NOW(), NOW()
+    :hotel_id, :booking_engine_id, :booking_url, :enrichment_status, NOW(), NOW(), NOW()
 )
-ON CONFLICT (hotel_id, booking_engine_id) 
+ON CONFLICT (hotel_id) 
 DO UPDATE SET
+    booking_engine_id = EXCLUDED.booking_engine_id,
     booking_url = EXCLUDED.booking_url,
     enrichment_status = EXCLUDED.enrichment_status,
-    last_enrichment_attempt = NOW();
+    last_enrichment_attempt = NOW(),
+    updated_at = NOW();
 
 -- name: update_rms_hotel!
 -- Update hotel with enriched data
@@ -73,7 +81,7 @@ SET
     city = COALESCE(:city, city),
     state = COALESCE(:state, state),
     country = COALESCE(:country, country),
-    phone = COALESCE(:phone, phone),
+    phone_website = COALESCE(:phone, phone_website),
     email = COALESCE(:email, email),
     website = COALESCE(:website, website),
     updated_at = NOW()
@@ -94,7 +102,7 @@ SELECT
     COUNT(CASE WHEN h.name IS NOT NULL AND h.name != '' THEN 1 END) AS with_name,
     COUNT(CASE WHEN h.city IS NOT NULL AND h.city != '' THEN 1 END) AS with_city,
     COUNT(CASE WHEN h.email IS NOT NULL AND h.email != '' THEN 1 END) AS with_email,
-    COUNT(CASE WHEN h.phone IS NOT NULL AND h.phone != '' THEN 1 END) AS with_phone,
+    COUNT(CASE WHEN h.phone_website IS NOT NULL AND h.phone_website != '' THEN 1 END) AS with_phone,
     COUNT(CASE WHEN hbe.enrichment_status = 'enriched' THEN 1 END) AS enriched,
     COUNT(CASE WHEN hbe.enrichment_status = 'no_data' THEN 1 END) AS no_data,
     COUNT(CASE WHEN hbe.enrichment_status = 'dead' THEN 1 END) AS dead

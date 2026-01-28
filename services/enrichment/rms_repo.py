@@ -35,6 +35,7 @@ class IRMSRepo(Protocol):
         phone: Optional[str],
         email: Optional[str],
         website: Optional[str],
+        external_id: Optional[str] = None,
         source: str = "rms_scan",
         status: int = 1,
     ) -> Optional[int]:
@@ -106,6 +107,7 @@ class RMSRepo(IRMSRepo):
         phone: Optional[str],
         email: Optional[str],
         website: Optional[str],
+        external_id: Optional[str] = None,
         source: str = "rms_scan",
         status: int = 1,
     ) -> Optional[int]:
@@ -121,6 +123,7 @@ class RMSRepo(IRMSRepo):
                 phone=phone,
                 email=email,
                 website=website,
+                external_id=external_id,
                 source=source,
                 status=status,
             )

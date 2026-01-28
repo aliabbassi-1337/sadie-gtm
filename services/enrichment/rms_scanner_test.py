@@ -1,4 +1,4 @@
-"""Unit tests for RMS Scanner."""
+"""Tests for RMS Scanner."""
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -11,7 +11,7 @@ from services.enrichment.rms_scanner import (
 )
 
 
-pytestmark = pytest.mark.no_db  # All tests in this file use mocks
+# These tests mock Playwright pages, not the database
 
 
 class TestMockScanner:

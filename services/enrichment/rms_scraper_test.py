@@ -1,4 +1,4 @@
-"""Unit tests for RMS Scraper."""
+"""Tests for RMS Scraper."""
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -12,7 +12,7 @@ from services.enrichment.rms_scraper import (
 )
 
 
-pytestmark = pytest.mark.no_db  # All tests in this file use mocks
+# These tests mock Playwright pages, not the database
 
 
 class TestExtractedRMSData:
