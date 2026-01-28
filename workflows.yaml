@@ -50,6 +50,13 @@ local:
     description: Check pipeline status (pending, processing, launched counts)
     command: uv run python workflows/launcher.py status
 
+  # RMS Ingestion (scan IDs to discover hotels)
+  ingest_rms:
+    description: Scan RMS booking engine IDs to discover and ingest hotels
+    command: uv run python workflows/ingest_rms.py --start 0 --end 10000
+    # Can be run distributed across servers with different --start/--end ranges
+    # Use --dry-run to preview without saving
+
 # =============================================================================
 # EC2 WORKFLOWS (auto-start on instance boot via systemd/cron)
 # =============================================================================
