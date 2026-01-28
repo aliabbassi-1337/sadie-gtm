@@ -1,5 +1,6 @@
 """RMS Queue - SQS operations for RMS enrichment."""
 
+import os
 from typing import Optional, List
 
 from lib.rms import RMSHotelRecord, QueueStats, QueueMessage
@@ -7,12 +8,8 @@ from infra.sqs import (
     send_message,
     receive_messages,
     delete_message,
-    get_queue_url,
     get_queue_attributes,
 )
-
-
-RMS_QUEUE_NAME = "sadie-gtm-rms-enrichment"
 
 
 class RMSQueue:
@@ -24,7 +21,9 @@ class RMSQueue:
     @property
     def queue_url(self) -> str:
         if not self._queue_url:
-            self._queue_url = get_queue_url(RMS_QUEUE_NAME)
+            self._queue_url = os.getenv("SQS_RMS_ENRICHMENT_QUEUE_URL")
+            if not self._queue_url:
+                raise ValueError("SQS_RMS_ENRICHMENT_QUEUE_URL environment variable not set")
         return self._queue_url
     
     def get_stats(self) -> QueueStats:
