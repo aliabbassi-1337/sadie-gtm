@@ -84,3 +84,15 @@ ec2:
     command: uv run python workflows/launcher.py launch-all
     schedule: "*/2 * * * *"  # Every 2 min
     type: cron
+
+  # RMS Enrichment
+  enrich_rms_enqueue:
+    description: Enqueue RMS hotels needing enrichment
+    command: uv run python workflows/enrich_rms_enqueue.py --limit 1000
+    schedule: "0 */4 * * *"  # Every 4 hours
+    type: cron
+
+  enrich_rms_consumer:
+    description: Scrape RMS booking pages for hotel data (name, email, phone, etc.)
+    command: uv run python workflows/enrich_rms_consumer.py --concurrency 6
+    type: systemd  # Runs continuously

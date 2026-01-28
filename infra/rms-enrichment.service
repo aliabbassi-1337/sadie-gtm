@@ -1,0 +1,24 @@
+[Unit]
+Description=RMS Booking Engine Enrichment Consumer
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/sadie-gtm
+Environment=PATH=/home/ubuntu/sadie-gtm/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/sadie-gtm/.venv/bin/python workflows/enrich_rms_consumer.py --concurrency 6
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rms-enrichment
+
+# Resource limits
+MemoryMax=4G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target
