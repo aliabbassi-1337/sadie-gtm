@@ -5,12 +5,13 @@ For ingestion (discovering new hotels), use services.ingestor.ingestors.rms.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Optional, List, Dict, Callable
 import asyncio
 
+from pydantic import BaseModel
 from loguru import logger
 from playwright.async_api import async_playwright, BrowserContext
+from playwright_stealth import Stealth
 
 from services.enrichment.rms_repo import IRMSRepo, RMSRepo, RMSHotelRecord
 from services.enrichment.rms_scraper import RMSScraper, ExtractedRMSData
@@ -21,16 +22,14 @@ from services.enrichment.rms_queue import IRMSQueue, RMSQueue, QueueStats
 MAX_QUEUE_DEPTH = 1000
 
 
-@dataclass
-class EnrichResult:
+class EnrichResult(BaseModel):
     """Result of RMS enrichment."""
     processed: int
     enriched: int
     failed: int
 
 
-@dataclass
-class EnqueueResult:
+class EnqueueResult(BaseModel):
     """Result of enqueueing hotels."""
     total_found: int
     enqueued: int
@@ -38,8 +37,7 @@ class EnqueueResult:
     reason: Optional[str] = None
 
 
-@dataclass
-class ConsumeResult:
+class ConsumeResult(BaseModel):
     """Result of consuming from queue."""
     messages_processed: int
     hotels_processed: int
@@ -142,6 +140,9 @@ class RMSEnrichmentService(IRMSEnrichmentService):
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
                 )
                 page = await ctx.new_page()
+                # Apply stealth mode to avoid detection
+                stealth = Stealth()
+                await stealth.apply_stealth_async(page)
                 contexts.append(ctx)
                 scrapers.append(RMSScraper(page))
             

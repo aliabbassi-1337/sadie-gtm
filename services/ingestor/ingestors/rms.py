@@ -2,7 +2,7 @@
 RMS Cloud Booking Engine Ingestor
 
 Scans RMS booking engine IDs to discover valid hotels.
-Uses Playwright to handle the React SPA.
+Uses Playwright with stealth mode to handle the React SPA.
 
 Unlike file-based ingestors (DBPR, Texas), RMS requires:
 - Scanning numeric ID ranges to find valid hotels
@@ -11,11 +11,12 @@ Unlike file-based ingestors (DBPR, Texas), RMS requires:
 """
 
 import asyncio
-from dataclasses import dataclass
-from typing import Optional, List, Callable
+from typing import Optional, List
 
+from pydantic import BaseModel
 from loguru import logger
 from playwright.async_api import async_playwright, BrowserContext
+from playwright_stealth import Stealth
 
 from services.ingestor.registry import register
 from services.enrichment.rms_scanner import RMSScanner, ScannedURL
@@ -28,8 +29,7 @@ BATCH_SAVE_SIZE = 50
 MAX_CONSECUTIVE_FAILURES = 30
 
 
-@dataclass
-class RMSIngestResult:
+class RMSIngestResult(BaseModel):
     """Result of RMS ingestion."""
     total_scanned: int
     hotels_found: int
@@ -42,7 +42,7 @@ class RMSIngestor:
     Scan RMS booking engine IDs to discover and ingest hotels.
     
     Unlike file-based ingestors, RMS requires scanning URL patterns
-    to find valid hotels. Uses Playwright for JavaScript rendering.
+    to find valid hotels. Uses Playwright with stealth mode for JavaScript rendering.
     
     Usage:
         ingestor = RMSIngestor()
@@ -95,7 +95,7 @@ class RMSIngestor:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             
-            # Create scanner/scraper pairs
+            # Create scanner/scraper pairs with stealth mode
             contexts: List[BrowserContext] = []
             scanners: List[RMSScanner] = []
             scrapers: List[RMSScraper] = []
@@ -105,6 +105,9 @@ class RMSIngestor:
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
                 )
                 page = await ctx.new_page()
+                # Apply stealth mode to avoid detection
+                stealth = Stealth()
+                await stealth.apply_stealth_async(page)
                 contexts.append(ctx)
                 scanners.append(RMSScanner(page))
                 scrapers.append(RMSScraper(page))

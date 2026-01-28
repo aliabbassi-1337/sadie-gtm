@@ -4,7 +4,7 @@ Abstracts SQS queue operations for RMS enrichment.
 """
 
 from typing import Optional, List, Dict, Any, Protocol, runtime_checkable, Callable
-from dataclasses import dataclass
+from pydantic import BaseModel
 
 from loguru import logger
 
@@ -23,15 +23,13 @@ DEFAULT_VISIBILITY_TIMEOUT = 3600  # 1 hour
 DEFAULT_WAIT_TIME = 20
 
 
-@dataclass
-class QueueStats:
+class QueueStats(BaseModel):
     """Queue statistics."""
     pending: int
     in_flight: int
 
 
-@dataclass
-class QueueMessage:
+class QueueMessage(BaseModel):
     """Message from queue."""
     receipt_handle: str
     hotels: List[RMSHotelRecord]

@@ -7,13 +7,13 @@ SELECT id FROM sadie_gtm.booking_engines WHERE name = 'RMS Cloud';
 
 -- name: get_rms_hotels_needing_enrichment
 -- Get RMS hotels that need enrichment (missing name, address, etc.)
+-- Uses booking_engine_id for filtering (more efficient than name)
 SELECT 
     h.id AS hotel_id,
     hbe.booking_url
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
-JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-WHERE be.name = 'RMS Cloud'
+WHERE hbe.booking_engine_id = :booking_engine_id
   AND h.status = 1
   AND (
       h.name IS NULL 
@@ -97,6 +97,7 @@ WHERE booking_url = :booking_url;
 
 -- name: get_rms_stats^
 -- Get RMS hotel statistics
+-- Uses booking_engine_id for filtering
 SELECT 
     COUNT(*) AS total,
     COUNT(CASE WHEN h.name IS NOT NULL AND h.name != '' THEN 1 END) AS with_name,
@@ -108,16 +109,15 @@ SELECT
     COUNT(CASE WHEN hbe.enrichment_status = 'dead' THEN 1 END) AS dead
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
-JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-WHERE be.name = 'RMS Cloud';
+WHERE hbe.booking_engine_id = :booking_engine_id;
 
 -- name: count_rms_needing_enrichment^
 -- Count RMS hotels needing enrichment
+-- Uses booking_engine_id for filtering
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
-JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-WHERE be.name = 'RMS Cloud'
+WHERE hbe.booking_engine_id = :booking_engine_id
   AND h.status = 1
   AND (
       h.name IS NULL 

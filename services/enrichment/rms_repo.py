@@ -1,13 +1,12 @@
 """Repository for RMS booking engine database operations."""
 
 from typing import Optional, List, Dict, Any, Protocol, runtime_checkable
-from dataclasses import dataclass
+from pydantic import BaseModel
 
 from db.client import queries, get_conn
 
 
-@dataclass
-class RMSHotelRecord:
+class RMSHotelRecord(BaseModel):
     """RMS hotel record from database."""
     hotel_id: int
     booking_url: str
@@ -83,18 +82,29 @@ class IRMSRepo(Protocol):
 class RMSRepo(IRMSRepo):
     """Implementation of RMS repository."""
     
+    def __init__(self):
+        self._booking_engine_id: Optional[int] = None
+    
     async def get_booking_engine_id(self) -> int:
-        """Get RMS Cloud booking engine ID from database."""
-        async with get_conn() as conn:
-            result = await queries.get_rms_booking_engine_id(conn)
-            if result:
-                return result["id"]
-            raise ValueError("RMS Cloud booking engine not found in database")
+        """Get RMS Cloud booking engine ID from database (cached)."""
+        if self._booking_engine_id is None:
+            async with get_conn() as conn:
+                result = await queries.get_rms_booking_engine_id(conn)
+                if result:
+                    self._booking_engine_id = result["id"]
+                else:
+                    raise ValueError("RMS Cloud booking engine not found in database")
+        return self._booking_engine_id
 
     async def get_hotels_needing_enrichment(self, limit: int = 1000) -> List[RMSHotelRecord]:
         """Get RMS hotels that need enrichment."""
+        booking_engine_id = await self.get_booking_engine_id()
         async with get_conn() as conn:
-            results = await queries.get_rms_hotels_needing_enrichment(conn, limit=limit)
+            results = await queries.get_rms_hotels_needing_enrichment(
+                conn, 
+                booking_engine_id=booking_engine_id,
+                limit=limit,
+            )
             return [RMSHotelRecord(hotel_id=r["hotel_id"], booking_url=r["booking_url"]) for r in results]
 
     async def insert_hotel(
@@ -188,8 +198,9 @@ class RMSRepo(IRMSRepo):
 
     async def get_stats(self) -> Dict[str, int]:
         """Get RMS hotel statistics."""
+        booking_engine_id = await self.get_booking_engine_id()
         async with get_conn() as conn:
-            result = await queries.get_rms_stats(conn)
+            result = await queries.get_rms_stats(conn, booking_engine_id=booking_engine_id)
             if result:
                 return dict(result)
             return {
@@ -205,6 +216,10 @@ class RMSRepo(IRMSRepo):
 
     async def count_needing_enrichment(self) -> int:
         """Count RMS hotels needing enrichment."""
+        booking_engine_id = await self.get_booking_engine_id()
         async with get_conn() as conn:
-            result = await queries.count_rms_needing_enrichment(conn)
+            result = await queries.count_rms_needing_enrichment(
+                conn, 
+                booking_engine_id=booking_engine_id,
+            )
             return result["count"] if result else 0
