@@ -16,6 +16,8 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
 WHERE hbe.booking_engine_id = :booking_engine_id
   AND h.status = 1
+  AND hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
   AND (
       -- Missing or garbage name
       h.name IS NULL 
