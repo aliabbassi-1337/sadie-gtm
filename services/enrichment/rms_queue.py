@@ -50,7 +50,7 @@ class RMSQueue:
             self.queue_url,
             max_messages=min(max_messages, 10),
             visibility_timeout=3600,
-            wait_time=20,
+            wait_time_seconds=20,
         )
         messages = []
         for msg in raw_messages:
