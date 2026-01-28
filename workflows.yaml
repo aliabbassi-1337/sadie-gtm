@@ -136,6 +136,19 @@ ec2:
     type: cron
     host: primary
 
+  # RMS enrichment (scrape hotel data from RMS booking pages)
+  enrich_rms_enqueue:
+    description: Enqueue RMS hotels needing enrichment
+    command: uv run python workflows/enrich_rms_enqueue.py --limit 1000
+    schedule: "0 */4 * * *"  # Every 4 hours
+    type: cron
+    host: primary
+
+  enrich_rms_consumer:
+    description: Scrape RMS booking pages for hotel data (name, email, phone, etc.)
+    command: uv run python workflows/enrich_rms_consumer.py --concurrency 6
+    type: systemd  # Runs continuously
+
   # Serper geocoding (for non-Cloudbeds crawl data - SiteMinder, Mews, etc.)
   geocode_crawl_data:
     description: Geocode crawl hotels by name using Serper Places API

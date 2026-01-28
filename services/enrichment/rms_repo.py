@@ -1,0 +1,79 @@
+"""RMS Repository - Database operations for RMS enrichment."""
+
+from typing import Optional, List, Dict
+
+from db.client import queries, get_conn
+from lib.rms import RMSHotelRecord
+
+
+class RMSRepo:
+    """Database operations for RMS enrichment."""
+    
+    def __init__(self):
+        self._booking_engine_id: Optional[int] = None
+    
+    async def get_booking_engine_id(self) -> int:
+        """Get RMS Cloud booking engine ID from database."""
+        if self._booking_engine_id is None:
+            async with get_conn() as conn:
+                result = await queries.get_rms_booking_engine_id(conn)
+                if result:
+                    self._booking_engine_id = result["id"]
+                else:
+                    raise ValueError("RMS Cloud booking engine not found")
+        return self._booking_engine_id
+    
+    async def get_hotels_needing_enrichment(self, limit: int = 1000) -> List[RMSHotelRecord]:
+        """Get RMS hotels that need enrichment."""
+        booking_engine_id = await self.get_booking_engine_id()
+        async with get_conn() as conn:
+            results = await queries.get_rms_hotels_needing_enrichment(
+                conn, booking_engine_id=booking_engine_id, limit=limit
+            )
+            return [
+                RMSHotelRecord(hotel_id=r["hotel_id"], booking_url=r["booking_url"])
+                for r in results
+            ]
+    
+    async def update_hotel(
+        self,
+        hotel_id: int,
+        name: Optional[str] = None,
+        address: Optional[str] = None,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        country: Optional[str] = None,
+        phone: Optional[str] = None,
+        email: Optional[str] = None,
+        website: Optional[str] = None,
+    ) -> None:
+        """Update hotel with enriched data."""
+        async with get_conn() as conn:
+            await queries.update_rms_hotel(
+                conn, hotel_id=hotel_id, name=name, address=address, city=city,
+                state=state, country=country, phone=phone, email=email, website=website,
+            )
+    
+    async def update_enrichment_status(self, booking_url: str, status: str) -> None:
+        """Update enrichment status for a hotel."""
+        async with get_conn() as conn:
+            await queries.update_rms_enrichment_status(conn, booking_url=booking_url, status=status)
+    
+    async def get_stats(self) -> Dict[str, int]:
+        """Get RMS hotel statistics."""
+        booking_engine_id = await self.get_booking_engine_id()
+        async with get_conn() as conn:
+            result = await queries.get_rms_stats(conn, booking_engine_id=booking_engine_id)
+            if result:
+                return dict(result)
+            return {
+                "total": 0, "with_name": 0, "with_city": 0, "with_email": 0,
+                "with_phone": 0, "enriched": 0, "no_data": 0, "dead": 0,
+            }
+    
+    async def count_needing_enrichment(self) -> int:
+        """Count RMS hotels needing enrichment."""
+        booking_engine_id = await self.get_booking_engine_id()
+        async with get_conn() as conn:
+            result = await queries.count_rms_needing_enrichment(conn, booking_engine_id=booking_engine_id)
+            return result["count"] if result else 0
