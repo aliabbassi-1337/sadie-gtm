@@ -20,7 +20,7 @@ import asyncio
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment.rms_service import RMSEnrichmentService
+from services.enrichment.service import Service
 
 
 def main():
@@ -34,10 +34,10 @@ def main():
 
 async def run(args):
     await init_db()
-    service = RMSEnrichmentService()
+    service = Service()
     
     try:
-        result = await service.enqueue_for_enrichment(
+        result = await service.enqueue_rms_for_enrichment(
             limit=args.limit,
             batch_size=args.batch_size,
         )

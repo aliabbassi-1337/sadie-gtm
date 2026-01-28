@@ -1,18 +1,18 @@
-"""RMS Enrichment service.
+"""Enrichment service.
 
-Enriches existing RMS hotels by scraping booking pages.
-For ingestion (discovering new hotels), use services.ingestor.ingestors.rms.
+Single service for all hotel enrichment operations:
+- Room count enrichment
+- Customer proximity calculation
+- Website enrichment
+- RMS booking page enrichment
 """
 
-from services.enrichment.rms_service import (
-    RMSEnrichmentService,
-    IRMSEnrichmentService,
+from services.enrichment.service import (
+    Service,
+    IService,
     EnrichResult,
     EnqueueResult,
     ConsumeResult,
-    # Backward compatibility
-    RMSService,
-    IRMSService,
 )
 from services.enrichment.rms_repo import (
     RMSRepo,
@@ -40,15 +40,12 @@ from services.enrichment.rms_queue import (
 )
 
 __all__ = [
-    # Enrichment Service
-    "RMSEnrichmentService",
-    "IRMSEnrichmentService",
+    # Service
+    "Service",
+    "IService",
     "EnrichResult",
     "EnqueueResult",
     "ConsumeResult",
-    # Backward compatibility
-    "RMSService",
-    "IRMSService",
     # Repo
     "RMSRepo",
     "IRMSRepo",

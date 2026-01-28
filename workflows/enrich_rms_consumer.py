@@ -20,7 +20,7 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment.rms_service import RMSEnrichmentService
+from services.enrichment.service import Service
 
 
 def main():
@@ -34,7 +34,7 @@ def main():
 
 async def run(args):
     await init_db()
-    service = RMSEnrichmentService()
+    service = Service()
     
     # Handle shutdown
     signal.signal(signal.SIGTERM, lambda s, f: service.request_shutdown())
@@ -43,7 +43,7 @@ async def run(args):
     logger.info(f"Starting RMS consumer (concurrency={args.concurrency})")
     
     try:
-        result = await service.consume_enrichment_queue(
+        result = await service.consume_rms_enrichment_queue(
             concurrency=args.concurrency,
             max_messages=args.max_messages,
         )

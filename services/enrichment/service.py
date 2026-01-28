@@ -1,10 +1,15 @@
 from abc import ABC, abstractmethod
 from decimal import Decimal
+from typing import Optional, List, Dict, Callable
 import asyncio
 import os
 
 import httpx
+from pydantic import BaseModel
+from loguru import logger
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright, BrowserContext
+from playwright_stealth import Stealth
 
 from services.enrichment import repo
 from services.enrichment.room_count_enricher import (
@@ -16,14 +21,49 @@ from services.enrichment.customer_proximity import (
     log as proximity_log,
 )
 from services.enrichment.website_enricher import WebsiteEnricher
+from services.enrichment.rms_repo import IRMSRepo, RMSRepo, RMSHotelRecord
+from services.enrichment.rms_scraper import RMSScraper
+from services.enrichment.rms_queue import IRMSQueue, RMSQueue, QueueStats
 
 load_dotenv()
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+MAX_QUEUE_DEPTH = 1000
 
+
+# =============================================================================
+# Result Models
+# =============================================================================
+
+class EnrichResult(BaseModel):
+    """Result of RMS enrichment."""
+    processed: int
+    enriched: int
+    failed: int
+
+
+class EnqueueResult(BaseModel):
+    """Result of enqueueing hotels."""
+    total_found: int
+    enqueued: int
+    skipped: bool
+    reason: Optional[str] = None
+
+
+class ConsumeResult(BaseModel):
+    """Result of consuming from queue."""
+    messages_processed: int
+    hotels_processed: int
+    hotels_enriched: int
+    hotels_failed: int
+
+
+# =============================================================================
+# Service Interface
+# =============================================================================
 
 class IService(ABC):
-    """Enrichment Service - Enrich hotel data with room counts and proximity."""
+    """Enrichment Service - Enrich hotel data with room counts, proximity, and RMS."""
 
     @abstractmethod
     async def enrich_room_counts(self, limit: int = 100) -> int:
@@ -31,11 +71,6 @@ class IService(ABC):
         Get room counts for hotels with websites.
         Uses regex extraction first, then falls back to Groq LLM.
         Tracks status in hotel_room_count table (0=failed, 1=success).
-
-        Args:
-            limit: Max hotels to process
-
-        Returns number of hotels successfully enriched.
         """
         pass
 
@@ -48,28 +83,72 @@ class IService(ABC):
         """
         Calculate distance to nearest Sadie customer for hotels.
         Updates hotel_customer_proximity table.
-        Returns number of hotels processed.
         """
         pass
 
     @abstractmethod
     async def get_pending_enrichment_count(self) -> int:
-        """
-        Count hotels waiting for enrichment (has website, not yet processed).
-        """
+        """Count hotels waiting for enrichment (has website, not yet processed)."""
         pass
 
     @abstractmethod
     async def get_pending_proximity_count(self) -> int:
-        """
-        Count hotels waiting for proximity calculation.
-        """
+        """Count hotels waiting for proximity calculation."""
         pass
 
+    # RMS enrichment methods
+    @abstractmethod
+    async def enrich_rms_hotels(
+        self,
+        hotels: List[RMSHotelRecord],
+        concurrency: int = 6,
+    ) -> EnrichResult:
+        """Enrich RMS hotels by scraping their booking pages."""
+        pass
+
+    @abstractmethod
+    async def enqueue_rms_for_enrichment(
+        self,
+        limit: int = 5000,
+        batch_size: int = 10,
+    ) -> EnqueueResult:
+        """Find and enqueue RMS hotels needing enrichment."""
+        pass
+
+    @abstractmethod
+    async def consume_rms_enrichment_queue(
+        self,
+        concurrency: int = 6,
+        max_messages: int = 0,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> ConsumeResult:
+        """Consume and process RMS enrichment queue."""
+        pass
+
+
+# =============================================================================
+# Service Implementation
+# =============================================================================
 
 class Service(IService):
-    def __init__(self) -> None:
-        pass
+    def __init__(
+        self,
+        rms_repo: Optional[IRMSRepo] = None,
+        rms_queue: Optional[IRMSQueue] = None,
+    ) -> None:
+        # RMS dependencies
+        self._rms_repo = rms_repo or RMSRepo()
+        self._rms_queue = rms_queue or RMSQueue()
+        self._shutdown_requested = False
+
+    def request_shutdown(self):
+        """Request graceful shutdown."""
+        self._shutdown_requested = True
+        logger.info("Shutdown requested")
+
+    # =========================================================================
+    # Room Count Enrichment
+    # =========================================================================
 
     async def enrich_room_counts(
         self,
@@ -164,6 +243,10 @@ class Service(IService):
             )
             return False
 
+    # =========================================================================
+    # Customer Proximity
+    # =========================================================================
+
     async def calculate_customer_proximity(
         self,
         limit: int = 100,
@@ -237,6 +320,10 @@ class Service(IService):
     async def get_pending_proximity_count(self) -> int:
         """Count hotels waiting for proximity calculation."""
         return await repo.get_pending_proximity_count()
+
+    # =========================================================================
+    # Website Enrichment
+    # =========================================================================
 
     async def enrich_websites(
         self,
@@ -342,3 +429,195 @@ class Service(IService):
             "errors": errors,
             "api_calls": api_calls,
         }
+
+    # =========================================================================
+    # RMS Enrichment
+    # =========================================================================
+
+    async def enrich_rms_hotels(
+        self,
+        hotels: List[RMSHotelRecord],
+        concurrency: int = 6,
+    ) -> EnrichResult:
+        """Enrich RMS hotels by scraping their booking pages."""
+
+        processed = 0
+        enriched = 0
+        failed = 0
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+
+            contexts: List[BrowserContext] = []
+            scrapers: List[RMSScraper] = []
+
+            for _ in range(concurrency):
+                ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                )
+                page = await ctx.new_page()
+                # Apply stealth mode to avoid detection
+                stealth = Stealth()
+                await stealth.apply_stealth_async(page)
+                contexts.append(ctx)
+                scrapers.append(RMSScraper(page))
+
+            semaphore = asyncio.Semaphore(concurrency)
+
+            async def enrich_one(hotel: RMSHotelRecord, idx: int) -> tuple[bool, bool]:
+                async with semaphore:
+                    scraper = scrapers[idx % len(scrapers)]
+
+                    url = hotel.booking_url
+                    if not url.startswith("http"):
+                        url = f"https://{url}"
+
+                    slug = url.split("/")[-1]
+                    data = await scraper.extract(url, slug)
+
+                    if data and data.has_data():
+                        await self._rms_repo.update_hotel(
+                            hotel_id=hotel.hotel_id,
+                            name=data.name,
+                            address=data.address,
+                            city=data.city,
+                            state=data.state,
+                            country=data.country,
+                            phone=data.phone,
+                            email=data.email,
+                            website=data.website,
+                        )
+                        await self._rms_repo.update_enrichment_status(hotel.booking_url, "enriched")
+                        logger.info(f"Enriched {hotel.hotel_id}: {data.name}")
+                        return (True, True)
+                    else:
+                        await self._rms_repo.update_enrichment_status(hotel.booking_url, "no_data")
+                        return (True, False)
+
+            tasks = [enrich_one(h, i) for i, h in enumerate(hotels)]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Enrichment error: {result}")
+                    failed += 1
+                else:
+                    p, e = result
+                    processed += 1 if p else 0
+                    enriched += 1 if e else 0
+                    if p and not e:
+                        failed += 1
+
+            for ctx in contexts:
+                await ctx.close()
+            await browser.close()
+
+        return EnrichResult(processed=processed, enriched=enriched, failed=failed)
+
+    async def enqueue_rms_for_enrichment(
+        self,
+        limit: int = 5000,
+        batch_size: int = 10,
+    ) -> EnqueueResult:
+        """Find and enqueue RMS hotels needing enrichment."""
+
+        stats = self._rms_queue.get_stats()
+        logger.info(f"Queue: {stats.pending} pending, {stats.in_flight} in flight")
+
+        if stats.pending > MAX_QUEUE_DEPTH:
+            return EnqueueResult(
+                total_found=0,
+                enqueued=0,
+                skipped=True,
+                reason=f"Queue depth exceeds {MAX_QUEUE_DEPTH}",
+            )
+
+        hotels = await self._rms_repo.get_hotels_needing_enrichment(limit)
+        logger.info(f"Found {len(hotels)} hotels needing enrichment")
+
+        if not hotels:
+            return EnqueueResult(total_found=0, enqueued=0, skipped=False)
+
+        enqueued = self._rms_queue.enqueue_hotels(hotels, batch_size)
+        logger.success(f"Enqueued {enqueued} hotels")
+
+        return EnqueueResult(total_found=len(hotels), enqueued=enqueued, skipped=False)
+
+    async def consume_rms_enrichment_queue(
+        self,
+        concurrency: int = 6,
+        max_messages: int = 0,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> ConsumeResult:
+        """Consume and process RMS enrichment queue."""
+
+        messages_processed = 0
+        hotels_processed = 0
+        hotels_enriched = 0
+        hotels_failed = 0
+
+        should_stop = should_stop or (lambda: self._shutdown_requested)
+
+        logger.info(f"Starting consumer (concurrency={concurrency})")
+
+        while not should_stop():
+            if max_messages > 0 and messages_processed >= max_messages:
+                break
+
+            stats = self._rms_queue.get_stats()
+            if stats.pending == 0 and stats.in_flight == 0:
+                if max_messages > 0:
+                    break
+                logger.info("Queue empty, waiting...")
+                await asyncio.sleep(30)
+                continue
+
+            messages = self._rms_queue.receive_messages(min(concurrency, 10))
+            if not messages:
+                continue
+
+            logger.info(f"Processing {len(messages)} messages")
+
+            for msg in messages:
+                if should_stop():
+                    break
+
+                if not msg.hotels:
+                    self._rms_queue.delete_message(msg.receipt_handle)
+                    continue
+
+                try:
+                    result = await self.enrich_rms_hotels(msg.hotels, concurrency)
+                    hotels_processed += result.processed
+                    hotels_enriched += result.enriched
+                    hotels_failed += result.failed
+                    self._rms_queue.delete_message(msg.receipt_handle)
+                    messages_processed += 1
+                except Exception as e:
+                    logger.error(f"Error: {e}")
+                    hotels_failed += len(msg.hotels)
+
+            logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched")
+
+        return ConsumeResult(
+            messages_processed=messages_processed,
+            hotels_processed=hotels_processed,
+            hotels_enriched=hotels_enriched,
+            hotels_failed=hotels_failed,
+        )
+
+    # =========================================================================
+    # RMS Query Methods
+    # =========================================================================
+
+    async def get_rms_hotels_needing_enrichment(self, limit: int = 1000) -> List[RMSHotelRecord]:
+        return await self._rms_repo.get_hotels_needing_enrichment(limit)
+
+    async def get_rms_stats(self) -> Dict[str, int]:
+        return await self._rms_repo.get_stats()
+
+    async def count_rms_needing_enrichment(self) -> int:
+        return await self._rms_repo.count_needing_enrichment()
+
+    def get_rms_queue_stats(self) -> QueueStats:
+        return self._rms_queue.get_stats()
