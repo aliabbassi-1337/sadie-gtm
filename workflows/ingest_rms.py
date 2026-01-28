@@ -21,7 +21,7 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment.rms_service import RMSService
+from services.ingestor.ingestors.rms import RMSIngestor
 
 
 def main():
@@ -39,14 +39,14 @@ async def run(args):
     logger.info(f"RMS Ingestion: IDs {args.start} - {args.end}, dry_run={args.dry_run}")
     
     await init_db()
-    service = RMSService()
+    ingestor = RMSIngestor()
     
     # Handle shutdown
-    signal.signal(signal.SIGTERM, lambda s, f: service.request_shutdown())
-    signal.signal(signal.SIGINT, lambda s, f: service.request_shutdown())
+    signal.signal(signal.SIGTERM, lambda s, f: ingestor.request_shutdown())
+    signal.signal(signal.SIGINT, lambda s, f: ingestor.request_shutdown())
     
     try:
-        result = await service.ingest_from_id_range(
+        result = await ingestor.ingest(
             start_id=args.start,
             end_id=args.end,
             concurrency=args.concurrency,

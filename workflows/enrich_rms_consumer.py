@@ -20,7 +20,7 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment.rms_service import RMSService
+from services.enrichment.rms_service import RMSEnrichmentService
 
 
 def main():
@@ -34,7 +34,7 @@ def main():
 
 async def run(args):
     await init_db()
-    service = RMSService()
+    service = RMSEnrichmentService()
     
     # Handle shutdown
     signal.signal(signal.SIGTERM, lambda s, f: service.request_shutdown())

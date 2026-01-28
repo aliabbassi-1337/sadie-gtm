@@ -11,7 +11,8 @@ from services.enrichment.rms_scanner import (
 )
 
 
-# These tests mock Playwright pages, not the database
+# These tests mock Playwright pages, no database needed
+pytestmark = pytest.mark.no_db
 
 
 class TestMockScanner:

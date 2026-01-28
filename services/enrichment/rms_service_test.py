@@ -1,8 +1,8 @@
-"""Tests for RMS Service against local database."""
+"""Tests for RMS Enrichment Service against local database."""
 
 import pytest
 
-from services.enrichment.rms_service import RMSService
+from services.enrichment.rms_service import RMSEnrichmentService
 from services.enrichment.rms_repo import RMSRepo, RMSHotelRecord
 from services.enrichment.rms_queue import MockQueue
 
@@ -10,14 +10,14 @@ from services.enrichment.rms_queue import MockQueue
 @pytest.fixture
 async def service():
     """Create service with real repo but mock queue."""
-    return RMSService(repo=RMSRepo(), queue=MockQueue())
+    return RMSEnrichmentService(repo=RMSRepo(), queue=MockQueue())
 
 
 @pytest.fixture
 async def service_with_queue():
     """Create service with real repo and return the mock queue."""
     queue = MockQueue()
-    return RMSService(repo=RMSRepo(), queue=queue), queue
+    return RMSEnrichmentService(repo=RMSRepo(), queue=queue), queue
 
 
 class TestGetStats:
@@ -139,32 +139,6 @@ class TestConsumeEnrichmentQueue:
         )
         
         assert result.messages_processed == 0
-
-
-class TestSaveHotelsBatch:
-    """Tests for _save_hotels_batch."""
-    
-    @pytest.mark.asyncio
-    async def test_saves_hotels_to_db(self, service):
-        """Should save hotels to database."""
-        import uuid
-        from services.enrichment.rms_scraper import ExtractedRMSData
-        
-        unique_id = str(uuid.uuid4())[:8]
-        
-        hotels = [
-            ExtractedRMSData(
-                slug=f"testbatch_{unique_id}",
-                booking_url=f"https://ibe.rmscloud.com/testbatch_{unique_id}",
-                name=f"Test Batch Hotel {unique_id}",
-                phone="555-1234",
-            ),
-        ]
-        
-        booking_engine_id = await service._repo.get_booking_engine_id()
-        saved = await service._save_hotels_batch(hotels, booking_engine_id)
-        
-        assert saved == 1
 
 
 if __name__ == "__main__":
