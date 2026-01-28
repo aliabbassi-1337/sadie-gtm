@@ -7,10 +7,10 @@ Used by the RMS service for both ingestion and enrichment.
 import asyncio
 import re
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Protocol, runtime_checkable
 
 from loguru import logger
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext, Playwright
 
 
 # RMS subdomain variations for new engine
@@ -75,31 +75,27 @@ def normalize_country(country: str) -> str:
     return country_map.get(country.lower().strip(), country.upper()[:2])
 
 
-class RMSScraper:
+@runtime_checkable
+class IRMSScraper(Protocol):
+    """Protocol for RMS scraper operations."""
+    
+    async def extract_from_url(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
+        """Extract data from a single RMS booking page."""
+        ...
+    
+    async def scan_id(self, id_num: int) -> Optional[ExtractedRMSData]:
+        """Scan an RMS ID across subdomains and slug formats."""
+        ...
+
+
+class RMSScraper(IRMSScraper):
     """Playwright-based scraper for RMS booking pages."""
     
-    def __init__(self, browser: Browser):
-        self.browser = browser
-        self._context: Optional[BrowserContext] = None
-        self._page: Optional[Page] = None
-    
-    async def __aenter__(self) -> "RMSScraper":
-        """Create browser context and page."""
-        self._context = await self.browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-        )
-        self._page = await self._context.new_page()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Clean up browser context."""
-        if self._context:
-            await self._context.close()
+    def __init__(self, page: Page):
+        self._page = page
     
     @property
     def page(self) -> Page:
-        if not self._page:
-            raise RuntimeError("Scraper not initialized. Use 'async with' context.")
         return self._page
     
     async def extract_from_url(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
@@ -258,24 +254,67 @@ class RMSScraper:
         return state, country
 
 
-async def create_scraper_pool(concurrency: int = 6) -> tuple[Browser, List[RMSScraper]]:
-    """Create a pool of scrapers for concurrent processing.
+class ScraperPool:
+    """Manages a pool of RMS scrapers for concurrent processing."""
     
-    Returns browser instance and list of scrapers.
-    Caller is responsible for closing browser.
-    """
-    playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(headless=True)
+    def __init__(self, concurrency: int = 6):
+        self.concurrency = concurrency
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._scrapers: List[RMSScraper] = []
+        self._contexts: List[BrowserContext] = []
     
-    scrapers = []
-    for _ in range(concurrency):
-        ctx = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-        )
-        page = await ctx.new_page()
-        scraper = RMSScraper(browser)
-        scraper._context = ctx
-        scraper._page = page
-        scrapers.append(scraper)
+    async def __aenter__(self) -> "ScraperPool":
+        """Initialize browser and create scraper pool."""
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(headless=True)
+        
+        for _ in range(self.concurrency):
+            ctx = await self._browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            )
+            page = await ctx.new_page()
+            self._contexts.append(ctx)
+            self._scrapers.append(RMSScraper(page))
+        
+        return self
     
-    return browser, scrapers
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Clean up browser resources."""
+        for ctx in self._contexts:
+            await ctx.close()
+        if self._browser:
+            await self._browser.close()
+        if self._playwright:
+            await self._playwright.stop()
+    
+    def get_scraper(self, index: int) -> RMSScraper:
+        """Get a scraper by index (wraps around)."""
+        return self._scrapers[index % len(self._scrapers)]
+    
+    @property
+    def scrapers(self) -> List[RMSScraper]:
+        """Get all scrapers."""
+        return self._scrapers
+
+
+class MockScraper(IRMSScraper):
+    """Mock scraper for unit testing."""
+    
+    def __init__(self, results: Optional[dict[str, ExtractedRMSData]] = None):
+        """Initialize with optional URL->result mapping."""
+        self._results = results or {}
+        self.calls: List[tuple[str, str]] = []
+    
+    async def extract_from_url(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
+        """Return mocked result for URL."""
+        self.calls.append((url, slug))
+        return self._results.get(url)
+    
+    async def scan_id(self, id_num: int) -> Optional[ExtractedRMSData]:
+        """Return mocked result for ID."""
+        for subdomain in RMS_SUBDOMAINS:
+            url = f"https://{subdomain}.rmscloud.com/{id_num}"
+            if url in self._results:
+                return self._results[url]
+        return None

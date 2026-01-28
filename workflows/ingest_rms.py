@@ -7,10 +7,6 @@ Scans RMS booking engine IDs to discover valid hotels and saves them to the data
 Usage:
     python workflows/ingest_rms.py --start 0 --end 10000
     python workflows/ingest_rms.py --start 0 --end 100 --dry-run
-    
-    # Distributed (different ranges per server)
-    python workflows/ingest_rms.py --start 0 --end 5000
-    python workflows/ingest_rms.py --start 5000 --end 10000
 """
 
 import sys
@@ -28,29 +24,28 @@ from db.client import init_db, close_db
 from services.enrichment.rms_service import RMSService
 
 
-async def main():
-    parser = argparse.ArgumentParser(description="Ingest RMS hotels by scanning booking engine IDs")
+def main():
+    parser = argparse.ArgumentParser(description="Ingest RMS hotels by scanning IDs")
     parser.add_argument("--start", type=int, default=0, help="Start ID")
     parser.add_argument("--end", type=int, default=10000, help="End ID")
     parser.add_argument("--concurrency", type=int, default=6, help="Concurrent pages")
     parser.add_argument("--dry-run", action="store_true", help="Don't save to database")
     args = parser.parse_args()
     
-    logger.info(f"Starting RMS ingestion: IDs {args.start} - {args.end}")
-    logger.info(f"Concurrency: {args.concurrency}, Dry run: {args.dry_run}")
+    asyncio.run(run(args))
+
+
+async def run(args):
+    logger.info(f"RMS Ingestion: IDs {args.start} - {args.end}, dry_run={args.dry_run}")
     
     await init_db()
+    service = RMSService()
+    
+    # Handle shutdown
+    signal.signal(signal.SIGTERM, lambda s, f: service.request_shutdown())
+    signal.signal(signal.SIGINT, lambda s, f: service.request_shutdown())
     
     try:
-        service = RMSService()
-        
-        # Set up signal handlers
-        def handle_shutdown(signum, frame):
-            service.request_shutdown()
-        
-        signal.signal(signal.SIGTERM, handle_shutdown)
-        signal.signal(signal.SIGINT, handle_shutdown)
-        
         result = await service.ingest_from_id_range(
             start_id=args.start,
             end_id=args.end,
@@ -58,20 +53,18 @@ async def main():
             dry_run=args.dry_run,
         )
         
-        print("\n" + "=" * 50)
+        print(f"\n{'=' * 50}")
         print("INGESTION SUMMARY")
-        print("=" * 50)
-        print(f"Range scanned: {args.start} - {args.end}")
-        print(f"Total IDs scanned: {result.total_scanned}")
-        print(f"Hotels found: {result.hotels_found}")
-        print(f"Hotels saved: {result.hotels_saved}")
-        
+        print(f"{'=' * 50}")
+        print(f"Range: {args.start} - {args.end}")
+        print(f"Scanned: {result.total_scanned}")
+        print(f"Found: {result.hotels_found}")
+        print(f"Saved: {result.hotels_saved}")
         if args.dry_run:
-            print("\n(Dry run - no data was saved)")
-        
+            print("\n(Dry run - no data saved)")
     finally:
         await close_db()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
