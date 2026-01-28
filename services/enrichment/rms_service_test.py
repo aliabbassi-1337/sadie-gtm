@@ -14,6 +14,9 @@ from services.enrichment.rms_repo import IRMSRepo, RMSHotelRecord
 from services.enrichment.rms_queue import MockQueue
 
 
+pytestmark = pytest.mark.no_db  # All tests in this file use mocks
+
+
 class MockRepo(IRMSRepo):
     """Mock repository for testing."""
     

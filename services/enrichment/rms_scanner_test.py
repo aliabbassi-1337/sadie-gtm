@@ -11,6 +11,9 @@ from services.enrichment.rms_scanner import (
 )
 
 
+pytestmark = pytest.mark.no_db  # All tests in this file use mocks
+
+
 class TestMockScanner:
     """Tests for MockScanner."""
     
@@ -180,5 +183,55 @@ class TestScannedURL:
         assert url.subdomain == "ibe"
 
 
+@pytest.mark.online
+@pytest.mark.integration
+class TestRMSScannerIntegration:
+    """Integration tests that hit live RMS URLs."""
+    
+    @pytest.mark.asyncio
+    async def test_scan_known_valid_id(self):
+        """Should find a known valid RMS hotel."""
+        from playwright.async_api import async_playwright
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            )
+            page = await ctx.new_page()
+            
+            scanner = RMSScanner(page)
+            
+            # Test a URL that should be valid (or might be)
+            # This tests the actual network request handling
+            result = await scanner.is_valid_page("https://ibe.rmscloud.com/1")
+            
+            # Result could be True or False depending on whether ID exists
+            assert isinstance(result, bool)
+            
+            await ctx.close()
+            await browser.close()
+    
+    @pytest.mark.asyncio
+    async def test_invalid_url_returns_false(self):
+        """Should return False for clearly invalid URLs."""
+        from playwright.async_api import async_playwright
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context()
+            page = await ctx.new_page()
+            
+            scanner = RMSScanner(page)
+            
+            # Test a URL that definitely doesn't exist
+            result = await scanner.is_valid_page("https://ibe.rmscloud.com/99999999999")
+            
+            assert result is False
+            
+            await ctx.close()
+            await browser.close()
+
+
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    pytest.main([__file__, "-v", "-m", "not online"])

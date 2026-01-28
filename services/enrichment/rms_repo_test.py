@@ -6,6 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from services.enrichment.rms_repo import RMSRepo, RMSHotelRecord
 
 
+pytestmark = pytest.mark.no_db  # All tests in this file use mocks, no real DB
+
+
 class TestRMSRepoGetBookingEngineId:
     """Tests for get_booking_engine_id."""
     

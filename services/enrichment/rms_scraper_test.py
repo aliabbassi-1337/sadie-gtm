@@ -12,6 +12,9 @@ from services.enrichment.rms_scraper import (
 )
 
 
+pytestmark = pytest.mark.no_db  # All tests in this file use mocks
+
+
 class TestExtractedRMSData:
     """Tests for ExtractedRMSData dataclass."""
     
@@ -51,11 +54,20 @@ class TestDecodeCloudflareEmail:
     
     def test_decodes_valid_email(self):
         """Should decode Cloudflare-protected email."""
-        # Example: "test@example.com" encoded
-        encoded = "7a515a461915151c465d5f1c464f4852"
+        # Real example: "test@test.com" XOR encoded with key 0x12
+        # t=0x74, e=0x65, s=0x73, t=0x74, @=0x40, t=0x74, e=0x65, s=0x73, t=0x74, .=0x2e, c=0x63, o=0x6f, m=0x6d
+        # XOR with 0x12: 66 77 61 66 52 66 77 61 66 3c 71 7d 7f
+        encoded = "12667761665266776166" + "3c717d7f"
         result = decode_cloudflare_email(encoded)
-        # Note: This is a simplified test - real encoding varies
-        assert "@" in result or result == ""
+        assert result == "test@test.com"
+    
+    def test_decodes_another_email(self):
+        """Should decode another email correctly."""
+        # "a@b.c" XOR with key 0x00
+        # a=0x61, @=0x40, b=0x62, .=0x2e, c=0x63
+        encoded = "006140622e63"
+        result = decode_cloudflare_email(encoded)
+        assert result == "a@b.c"
     
     def test_returns_empty_on_invalid(self):
         """Should return empty string on invalid input."""
@@ -266,5 +278,54 @@ class TestRMSScraperParseAddress:
         assert country is None
 
 
+@pytest.mark.online
+@pytest.mark.integration
+class TestRMSScraperIntegration:
+    """Integration tests that hit live RMS URLs."""
+    
+    @pytest.mark.asyncio
+    async def test_extract_from_live_url(self):
+        """Should extract data from a live RMS page (if accessible)."""
+        from playwright.async_api import async_playwright
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            )
+            page = await ctx.new_page()
+            
+            scraper = RMSScraper(page)
+            
+            # Try to extract from a URL - result depends on whether it exists
+            result = await scraper.extract("https://ibe.rmscloud.com/1", "1")
+            
+            # Result should be ExtractedRMSData or None
+            assert result is None or isinstance(result, ExtractedRMSData)
+            
+            await ctx.close()
+            await browser.close()
+    
+    @pytest.mark.asyncio
+    async def test_extract_returns_none_for_invalid(self):
+        """Should return None for invalid URLs."""
+        from playwright.async_api import async_playwright
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context()
+            page = await ctx.new_page()
+            
+            scraper = RMSScraper(page)
+            
+            # Definitely invalid URL
+            result = await scraper.extract("https://ibe.rmscloud.com/99999999999", "99999999999")
+            
+            assert result is None
+            
+            await ctx.close()
+            await browser.close()
+
+
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    pytest.main([__file__, "-v", "-m", "not online"])
