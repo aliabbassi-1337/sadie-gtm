@@ -9,6 +9,11 @@ Usage:
 import argparse
 import json
 import os
+import sys
+from pathlib import Path
+
+# Add project root to path for imports when run as script
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import boto3
 from loguru import logger
