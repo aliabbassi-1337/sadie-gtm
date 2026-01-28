@@ -39,23 +39,28 @@ local:
     command: uv run python workflows/enqueue_detection.py --limit 500
 
   # Step 5: Export final leads
-  export:
-    description: Export leads to Excel and upload to S3
+  export_all:
+    description: Export all states to Excel and upload to S3
+    command: uv run python workflows/export.py --all
+    # Exports all states with hotels
+
+  export_state:
+    description: Export single state leads to Excel
     command: uv run python workflows/export.py --state FL
     # Use --state FL for full state export
     # Use --city "Miami" --state FL for single city
+    # Use --source dbpr to filter by source
+
+  export_crawl:
+    description: Export crawl data by booking engine
+    command: uv run python -m workflows.export_crawl --all
+    # Exports all booking engines (cloudbeds, mews, siteminder, rms)
+    # Use --engine cloudbeds for single engine
 
   # Utility: Check pipeline status
   status:
     description: Check pipeline status (pending, processing, launched counts)
     command: uv run python workflows/launcher.py status
-
-  # RMS Ingestion (scan IDs to discover hotels)
-  ingest_rms:
-    description: Scan RMS booking engine IDs to discover and ingest hotels
-    command: uv run python workflows/ingest_rms.py --start 0 --end 10000
-    # Can be run distributed across servers with different --start/--end ranges
-    # Use --dry-run to preview without saving
 
 # =============================================================================
 # EC2 WORKFLOWS (auto-start on instance boot via systemd/cron)
@@ -92,14 +97,79 @@ ec2:
     schedule: "*/2 * * * *"  # Every 2 min
     type: cron
 
-  # RMS Enrichment
+  # Booking page enrichment (scrape name/address from booking pages)
+  booking_enrichment_consumer:
+    description: Poll SQS and enrich hotels from booking pages (with archive fallback)
+    command: uv run python -m workflows.enrich_booking_pages_consumer --archive-fallback
+    type: systemd  # Runs continuously while instance is up
+
+  enqueue_booking_enrichment:
+    description: Queue hotels needing enrichment for workers
+    command: uv run python -m workflows.enrich_booking_pages_enqueue --limit 1000
+    schedule: "*/10 * * * *"  # Every 10 min
+    type: cron
+    host: primary  # Only run on first/primary EC2 instance
+
+  # DEPRECATED: Cloudbeds now uses booking_enrichment_consumer (has archive fallback)
+  # cloudbeds_enrichment_consumer:
+  #   description: Poll SQS and scrape Cloudbeds hotels with Playwright
+  #   command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 6
+  #   type: systemd
+  #
+  # enqueue_cloudbeds_enrichment:
+  #   description: Queue Cloudbeds hotels needing enrichment
+  #   command: uv run python -m workflows.enrich_cloudbeds_enqueue --limit 5000
+  #   schedule: "*/15 * * * *"
+  #   type: cron
+  #   host: primary
+
+  # Mews enrichment (scrape hotel name from Mews booking pages)
+  mews_enrichment_consumer:
+    description: Poll SQS and scrape Mews hotels with Playwright
+    command: uv run python -m workflows.enrich_mews_consumer --concurrency 6
+    type: systemd
+
+  enqueue_mews_enrichment:
+    description: Queue Mews hotels needing enrichment
+    command: uv run python -m workflows.enrich_mews_enqueue --limit 3000
+    schedule: "*/15 * * * *"  # Every 15 min
+    type: cron
+    host: primary
+
+  # RMS enrichment (scrape hotel data from RMS booking pages)
   enrich_rms_enqueue:
     description: Enqueue RMS hotels needing enrichment
     command: uv run python workflows/enrich_rms_enqueue.py --limit 1000
     schedule: "0 */4 * * *"  # Every 4 hours
     type: cron
+    host: primary
 
   enrich_rms_consumer:
     description: Scrape RMS booking pages for hotel data (name, email, phone, etc.)
     command: uv run python workflows/enrich_rms_consumer.py --concurrency 6
     type: systemd  # Runs continuously
+
+  # Serper geocoding (for non-Cloudbeds crawl data - SiteMinder, Mews, etc.)
+  geocode_crawl_data:
+    description: Geocode crawl hotels by name using Serper Places API
+    command: uv run python -m workflows.geocode_by_name --source '%crawl%' --limit 500
+    schedule: "0 * * * *"  # Every hour
+    type: cron
+    host: primary  # Only run on primary (costs money)
+
+  # -------------------------------------------------------------------------
+  # EXPORTS (scheduled export to S3)
+  # -------------------------------------------------------------------------
+  export_states:
+    description: Export all state reports to S3
+    command: uv run python workflows/export.py --all
+    schedule: "0 */6 * * *"  # Every 6 hours
+    type: cron
+    host: primary
+
+  export_crawl:
+    description: Export crawl data by booking engine to S3
+    command: uv run python -m workflows.export_crawl --all
+    schedule: "30 */6 * * *"  # Every 6 hours (offset by 30 min)
+    type: cron
+    host: primary

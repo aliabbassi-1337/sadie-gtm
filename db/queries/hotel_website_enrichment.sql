@@ -121,3 +121,43 @@ WHERE hotel_id = :hotel_id;
 -- Delete website enrichment record for a hotel (for testing)
 DELETE FROM sadie_gtm.hotel_website_enrichment
 WHERE hotel_id = :hotel_id;
+
+-- ============================================================================
+-- LOCATION-ONLY ENRICHMENT (for hotels with website but no location)
+-- ============================================================================
+
+-- name: get_hotels_pending_location_from_places
+-- Get hotels that have website but no location (need Serper Places lookup)
+-- Criteria: has website, has name and city, no location
+SELECT
+    h.id,
+    h.name,
+    h.city,
+    h.state,
+    h.address,
+    h.website,
+    h.source,
+    h.created_at,
+    h.updated_at
+FROM sadie_gtm.hotels h
+WHERE h.website IS NOT NULL
+  AND h.website != ''
+  AND h.name IS NOT NULL
+  AND h.city IS NOT NULL
+  AND h.location IS NULL
+  AND (CAST(:source_filter AS TEXT) IS NULL OR h.source LIKE :source_filter)
+  AND (CAST(:state_filter AS TEXT) IS NULL OR h.state = :state_filter)
+ORDER BY h.created_at DESC
+LIMIT :limit;
+
+-- name: get_pending_location_from_places_count^
+-- Count hotels that have website but no location
+SELECT COUNT(*) AS count
+FROM sadie_gtm.hotels h
+WHERE h.website IS NOT NULL
+  AND h.website != ''
+  AND h.name IS NOT NULL
+  AND h.city IS NOT NULL
+  AND h.location IS NULL
+  AND (CAST(:source_filter AS TEXT) IS NULL OR h.source LIKE :source_filter)
+  AND (CAST(:state_filter AS TEXT) IS NULL OR h.state = :state_filter);

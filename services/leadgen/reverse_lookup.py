@@ -4,13 +4,45 @@ Reverse Lookup - Find hotels by their booking engine software.
 Instead of searching for hotels and detecting their booking engine,
 we search for booking engine URLs directly. These are pre-qualified leads.
 
-Supported engines and their URL patterns:
+## Supported Engines and URL Patterns
+
 - Cloudbeds: hotels.cloudbeds.com/reservation/{slug}
 - Guesty: *.guestybookings.com
 - Little Hotelier: *.littlehotelier.com
 - WebRezPro: "powered by webrezpro"
 - Lodgify: *.lodgify.com
 - Hostaway: *.hostaway.com
+
+## Cloudbeds ID Structure (Research Findings)
+
+Cloudbeds uses two types of identifiers:
+
+1. **Public Slug** (6 alphanumeric chars): e.g., 'cl6l0S', 'UxSswi'
+   - Used in booking URLs: hotels.cloudbeds.com/reservation/{slug}
+   - Not a simple encoding of the numeric ID
+   - Likely hash-based or encrypted
+
+2. **Internal Numeric ID**: e.g., 317832, 202743
+   - Sequential integers (currently ~300,000+ properties)
+   - Exposed in image URLs: h-img*.cloudbeds.com/uploads/{property_id}/
+   - Exposed in analytics: ep.property_id={property_id}
+   - Cannot be used directly in booking URLs
+
+## Enumeration Strategies
+
+1. **Google Dorks** - Search for booking engine URLs (implemented below)
+2. **TheGuestbook API** - Cloudbeds partner directory with 800+ hotels
+   - See: services/leadgen/booking_engines.py
+3. **Certificate Transparency** - Search crt.sh for *.cloudbeds.com subdomains
+
+## Known Mappings
+
+| Hotel               | Slug    | Numeric ID |
+|---------------------|---------|------------|
+| The Kendall         | cl6l0S  | 317832     |
+| 7 Seas Hotel        | UxSswi  | 202743     |
+| St Augustine Hotel  | sEhTC1  | -          |
+| Casa Ocean          | TxCgVr  | -          |
 """
 
 from typing import Optional

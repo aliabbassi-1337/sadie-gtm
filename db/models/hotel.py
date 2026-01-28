@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class Hotel(BaseModel):
@@ -21,6 +21,12 @@ class Hotel(BaseModel):
     city: Optional[str] = None
     state: Optional[str] = None
     country: str = "USA"
+
+    @field_validator('country', mode='before')
+    @classmethod
+    def country_none_to_default(cls, v):
+        """Handle NULL from database by defaulting to USA."""
+        return v if v is not None else "USA"
     address: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None

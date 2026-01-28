@@ -106,10 +106,10 @@ async def process_message(
         # Save results with retry for transient DB errors
         save_attempts = 0
         max_save_attempts = 3
-        detected, errors = 0, 0
+        detected, errors, retriable = 0, 0, 0
         while save_attempts < max_save_attempts:
             try:
-                detected, errors = await service.save_detection_results(results)
+                detected, errors, retriable = await service.save_detection_results(results)
                 break
             except Exception as save_error:
                 save_attempts += 1
@@ -121,8 +121,14 @@ async def process_message(
                 else:
                     raise
 
-        # Delete message from SQS (successful processing)
-        delete_message(queue_url, receipt_handle)
+        # If there were retriable errors, don't delete message - let SQS retry
+        # Hotels that succeeded have HBE records and won't be re-processed
+        if retriable > 0:
+            logger.info(f"  {retriable} retriable errors - leaving message for SQS retry")
+            # Don't delete - SQS will retry after visibility timeout
+        else:
+            # All hotels processed successfully, delete message
+            delete_message(queue_url, receipt_handle)
 
         return (len(results), detected, errors)
 

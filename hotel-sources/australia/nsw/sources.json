@@ -1,0 +1,45 @@
+{
+  "state": "New South Wales",
+  "country": "Australia",
+  "last_updated": "2026-01-25",
+  "files": [
+    {
+      "filename": "sydney_hotels.csv",
+      "source": "NSW Liquor & Gaming",
+      "description": "Hotels and accommodation venues in Sydney metro area with liquor licenses",
+      "has_room_count": false,
+      "has_geospatial": true,
+      "has_names": true,
+      "has_websites": false,
+      "coverage": "Sydney Metropolitan Area",
+      "url": "https://data.nsw.gov.au/data/dataset/liquor-licence-premises-list",
+      "records": 1021,
+      "records_with_coords": 1021,
+      "fields": ["Licence number", "Licence name", "Address", "Suburb", "Postcode", "Latitude", "Longitude", "LGA", "Business type", "Licensee"]
+    },
+    {
+      "filename": "nsw_hotels.csv",
+      "source": "NSW Liquor & Gaming",
+      "description": "All hotels and accommodation venues in NSW with liquor licenses",
+      "has_room_count": false,
+      "has_geospatial": true,
+      "has_names": true,
+      "has_websites": false,
+      "coverage": "New South Wales statewide",
+      "url": "https://data.nsw.gov.au/data/dataset/liquor-licence-premises-list",
+      "records": 2877,
+      "records_with_coords": 2877
+    },
+    {
+      "filename": "nsw_premises_jun2024.csv",
+      "source": "NSW Liquor & Gaming",
+      "description": "Full NSW licensed premises list (all types) as of June 2024",
+      "has_room_count": false,
+      "has_geospatial": true,
+      "coverage": "New South Wales statewide",
+      "url": "https://data.nsw.gov.au/data/dataset/liquor-licence-premises-list",
+      "records": 19233
+    }
+  ],
+  "notes": "Data from NSW Liquor & Gaming licensed premises list. Filtered for 'hotel licence', 'full hotel', and 'accommodation' business types. All records have lat/lon coordinates. No room counts available - would need Serper enrichment for room counts and websites."
+}

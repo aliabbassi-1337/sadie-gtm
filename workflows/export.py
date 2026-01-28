@@ -4,6 +4,9 @@ Workflow: Export Reports
 Generates Excel reports for hotel leads and uploads to S3.
 
 Usage:
+    # Export all states
+    uv run python workflows/export.py --all
+
     # Export all FL hotels with booking engines
     uv run python workflows/export.py --state FL
 
@@ -90,8 +93,42 @@ async def export_state_workflow(
         await close_db()
 
 
+async def export_all_states_workflow(
+    country: str = "USA",
+    notify: bool = True,
+    source: str = None,
+) -> dict:
+    """Export all states that have hotels.
+
+    Args:
+        country: Country code
+        notify: Send Slack notification (summary only)
+        source: Filter by source pattern
+    """
+    await init_db()
+
+    try:
+        service = Service()
+        result = await service.export_all_states(country=country, source_pattern=source)
+
+        if notify and result["total_leads"] > 0:
+            service.send_slack_notification(
+                location="All States",
+                lead_count=result["total_leads"],
+                s3_uri=f"{result['states']} state exports",
+            )
+
+        return result
+
+    finally:
+        await close_db()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export hotel leads to Excel")
+
+    # All states export
+    parser.add_argument("--all", action="store_true", help="Export all states")
 
     # City export
     parser.add_argument("--city", type=str, help="City name (e.g., 'Miami Beach')")
@@ -114,7 +151,21 @@ def main():
     logger.remove()
     logger.add(sys.stderr, level="INFO", format="<level>{level: <8}</level> | {message}")
 
-    if args.city and args.state:
+    # Prepare source filter
+    source = args.source
+    if source and '%' not in source:
+        source = f"%{source}%"
+
+    if args.all:
+        # Export all states
+        result = asyncio.run(export_all_states_workflow(
+            args.country,
+            not args.no_notify,
+            source,
+        ))
+        logger.info(f"Exported {result['states']} states, {result['total_leads']} total leads")
+
+    elif args.city and args.state:
         # Export single city
         result = asyncio.run(export_city_workflow(
             args.city,
@@ -126,9 +177,6 @@ def main():
 
     elif args.state and not args.city:
         # Export all cities in state
-        source = args.source
-        if source and '%' not in source:
-            source = f"%{source}%"
         result = asyncio.run(export_state_workflow(
             args.state,
             args.country,
@@ -138,7 +186,7 @@ def main():
         logger.info(f"Exported: {result}")
 
     else:
-        parser.error("Provide --city and --state, or just --state for full state export")
+        parser.error("Provide --all, --state, or --city and --state")
 
 
 if __name__ == "__main__":

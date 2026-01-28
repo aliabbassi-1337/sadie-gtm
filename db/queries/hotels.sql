@@ -87,7 +87,8 @@ WHERE id = :hotel_id;
 
 -- name: get_hotels_pending_detection
 -- Get hotels that need booking engine detection
--- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet
+-- Criteria: status < DETECTED (30), has website, no booking engine detected yet
+-- Includes: INGESTED (0), HAS_WEBSITE (10), HAS_LOCATION (20)
 SELECT
     h.id,
     h.name,
@@ -111,7 +112,7 @@ SELECT
     h.updated_at
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-WHERE h.status = 0
+WHERE h.status >= 0 AND h.status < 30  -- INGESTED, HAS_WEBSITE, HAS_LOCATION
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
@@ -119,7 +120,7 @@ LIMIT :limit;
 
 -- name: get_hotels_pending_detection_by_categories
 -- Get hotels that need booking engine detection, filtered by categories
--- Criteria: status=0 (pending), has website, not a big chain, no booking engine detected yet, in categories list
+-- Criteria: status < DETECTED (30), has website, no booking engine detected yet, in categories list
 SELECT
     h.id,
     h.name,
@@ -143,11 +144,11 @@ SELECT
     h.updated_at
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-WHERE h.status = 0
+WHERE h.status >= 0 AND h.status < 30  -- INGESTED, HAS_WEBSITE, HAS_LOCATION
   AND hbe.hotel_id IS NULL
   AND h.website IS NOT NULL
   AND h.website != ''
-  AND h.category = ANY(:categories)
+  AND h.category ILIKE ANY(ARRAY(SELECT '%' || unnest(:categories) || '%'))
 LIMIT :limit;
 
 -- name: update_hotel_status!
@@ -164,6 +165,17 @@ WHERE id = :hotel_id;
 UPDATE sadie_gtm.hotels
 SET phone_website = COALESCE(:phone_website, phone_website),
     email = COALESCE(:email, email),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: update_hotel_scraped_address!
+-- Update hotel address scraped from booking page (Cloudbeds).
+-- Only updates if current value is null/empty to avoid overwriting authoritative data.
+UPDATE sadie_gtm.hotels
+SET address = CASE WHEN (address IS NULL OR address = '') THEN :address ELSE address END,
+    city = CASE WHEN (city IS NULL OR city = '') THEN :city ELSE city END,
+    state = CASE WHEN (state IS NULL OR state = '') THEN :state ELSE state END,
+    country = CASE WHEN (country IS NULL OR country = '') THEN :country ELSE country END,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
@@ -296,6 +308,40 @@ LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
   AND h.status = 1
   AND h.source LIKE :source_pattern;
+
+-- name: get_leads_by_booking_engine
+-- Get hotel leads by booking engine name and source pattern
+-- For crawl data exports (doesn't require launched status)
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.category,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hbe.booking_url,
+    hbe.engine_property_id,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE be.name = :booking_engine
+  AND h.source LIKE :source_pattern
+ORDER BY h.city, h.name;
 
 -- name: get_city_stats^
 -- Get stats for a city (for analytics tab)
@@ -634,6 +680,46 @@ SET address = COALESCE(:address, address),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
+-- name: get_hotels_pending_coordinate_enrichment
+-- Get hotels with coordinates but no website (parcel data needing Places API lookup)
+-- sources: optional array of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
+SELECT
+    id,
+    name,
+    address,
+    city,
+    state,
+    category,
+    source,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude
+FROM sadie_gtm.hotels
+WHERE location IS NOT NULL
+  AND (website IS NULL OR website = '')
+  AND (:sources::text[] IS NULL OR source = ANY(:sources))
+ORDER BY id
+LIMIT :limit;
+
+-- name: get_pending_coordinate_enrichment_count^
+-- Count hotels needing coordinate-based enrichment
+-- sources: optional array of source names (e.g., ['sf_assessor', 'md_sdat_cama'])
+SELECT COUNT(*) AS count
+FROM sadie_gtm.hotels
+WHERE location IS NOT NULL
+  AND (website IS NULL OR website = '')
+  AND (:sources::text[] IS NULL OR source = ANY(:sources));
+
+-- name: update_hotel_from_places!
+-- Update hotel with data from Places API (name, website, phone)
+UPDATE sadie_gtm.hotels
+SET name = COALESCE(:name, name),
+    website = COALESCE(:website, website),
+    phone_google = COALESCE(:phone, phone_google),
+    rating = COALESCE(:rating, rating),
+    address = COALESCE(:address, address),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
 -- ============================================================================
 -- INGESTOR QUERIES
 -- ============================================================================
@@ -691,6 +777,15 @@ UPDATE sadie_gtm.hotels
 SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
+
+-- name: update_hotel_location_point_if_null!
+-- Update hotel location from lat/lng ONLY if location is currently NULL
+-- Prevents overwriting existing location data
+UPDATE sadie_gtm.hotels
+SET location = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND location IS NULL;
 
 -- ============================================================================
 -- RETRY QUERIES
@@ -795,3 +890,264 @@ AND ST_Within(
     location::geometry,
     ST_MakeEnvelope(:lng_min, :lat_min, :lng_max, :lat_max, 4326)
 );
+
+-- ============================================================================
+-- PIPELINE STATE MACHINE QUERIES
+-- ============================================================================
+
+-- name: get_pipeline_summary
+-- Get count of hotels at each pipeline stage
+SELECT 
+    status,
+    COUNT(*) AS count
+FROM sadie_gtm.hotels
+GROUP BY status
+ORDER BY status DESC;
+
+-- name: get_pipeline_by_source
+-- Get pipeline breakdown by source
+SELECT 
+    source,
+    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS ingested,
+    SUM(CASE WHEN status = 10 THEN 1 ELSE 0 END) AS has_website,
+    SUM(CASE WHEN status = 20 THEN 1 ELSE 0 END) AS has_location,
+    SUM(CASE WHEN status = 30 THEN 1 ELSE 0 END) AS detected,
+    SUM(CASE WHEN status = 40 THEN 1 ELSE 0 END) AS enriched,
+    SUM(CASE WHEN status = 100 THEN 1 ELSE 0 END) AS launched,
+    SUM(CASE WHEN status < 0 THEN 1 ELSE 0 END) AS rejected,
+    COUNT(*) AS total
+FROM sadie_gtm.hotels
+GROUP BY source
+ORDER BY total DESC;
+
+-- name: get_pipeline_by_source_name
+-- Get pipeline breakdown for a specific source
+SELECT 
+    status,
+    COUNT(*) AS count
+FROM sadie_gtm.hotels
+WHERE source = :source
+GROUP BY status
+ORDER BY status DESC;
+
+-- name: get_hotels_at_stage
+-- Get hotels at a specific pipeline stage
+SELECT
+    id, name, website, city, state, source,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude
+FROM sadie_gtm.hotels
+WHERE status = :stage
+ORDER BY id
+LIMIT :limit;
+
+-- name: get_hotels_needing_action
+-- Get hotels that need action (between stages, not terminal)
+SELECT
+    id, name, website, city, state, source, status,
+    ST_Y(location::geometry) AS latitude,
+    ST_X(location::geometry) AS longitude,
+    CASE 
+        WHEN status = 0 AND website IS NOT NULL THEN 'detect'
+        WHEN status = 0 THEN 'enrich_website'
+        WHEN status = 10 AND location IS NOT NULL THEN 'detect'
+        WHEN status = 10 THEN 'enrich_location'
+        WHEN status = 20 THEN 'detect'
+        WHEN status = 30 THEN 'enrich_room_count'
+        WHEN status = 40 THEN 'launch'
+        ELSE 'unknown'
+    END AS next_action
+FROM sadie_gtm.hotels
+WHERE status >= 0 AND status < 100
+ORDER BY status, id
+LIMIT :limit;
+
+-- name: advance_to_has_website!
+-- Advance hotels to HAS_WEBSITE stage after enrichment
+UPDATE sadie_gtm.hotels
+SET status = 10, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 10
+  AND website IS NOT NULL AND website != '';
+
+-- name: advance_to_has_location!
+-- Advance hotels to HAS_LOCATION stage after location enrichment
+UPDATE sadie_gtm.hotels
+SET status = 20, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 20
+  AND location IS NOT NULL;
+
+-- name: advance_to_detected!
+-- Advance hotels to DETECTED stage after booking engine detection
+UPDATE sadie_gtm.hotels
+SET status = 30, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 30;
+
+-- name: advance_to_enriched!
+-- Advance hotels to ENRICHED stage after all enrichments
+UPDATE sadie_gtm.hotels
+SET status = 40, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 40;
+
+-- name: advance_to_launched!
+-- Advance hotels to LAUNCHED stage
+UPDATE sadie_gtm.hotels
+SET status = 100, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id
+  AND status < 100;
+
+-- name: set_terminal_status!
+-- Set a terminal (rejected) status
+UPDATE sadie_gtm.hotels
+SET status = :terminal_status, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- ============================================================================
+-- COMMON CRAWL / REVERSE LOOKUP QUERIES
+-- ============================================================================
+
+-- name: find_hotel_by_name^
+-- Find hotel by normalized name (case-insensitive, trimmed)
+-- Used for matching Common Crawl hotels to existing records
+SELECT
+    id,
+    name,
+    website,
+    source,
+    city,
+    state
+FROM sadie_gtm.hotels
+WHERE LOWER(TRIM(name)) = LOWER(TRIM(:name))
+LIMIT 1;
+
+-- name: find_hotel_by_name_and_city^
+-- Find hotel by name and city (more precise matching)
+SELECT
+    id,
+    name,
+    website,
+    source,
+    city,
+    state
+FROM sadie_gtm.hotels
+WHERE LOWER(TRIM(name)) = LOWER(TRIM(:name))
+  AND LOWER(TRIM(city)) = LOWER(TRIM(:city))
+LIMIT 1;
+
+-- name: update_hotel_source!
+-- Append source to existing hotel (e.g., dbpr -> dbpr::commoncrawl)
+UPDATE sadie_gtm.hotels
+SET source = CASE 
+    WHEN source IS NULL OR source = '' THEN :new_source
+    WHEN source LIKE '%' || :new_source || '%' THEN source  -- already has this source
+    ELSE source || '::' || :new_source
+    END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
+
+-- name: upsert_commoncrawl_hotel<!
+-- Upsert hotel from Common Crawl with source appending
+-- If hotel exists (by external_id), append source; otherwise insert
+INSERT INTO sadie_gtm.hotels (
+    name, 
+    city, 
+    country,
+    source, 
+    status, 
+    external_id, 
+    external_id_type
+) VALUES (
+    :name,
+    :city,
+    :country,
+    :source,
+    0,
+    :external_id,
+    :external_id_type
+)
+ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL
+DO UPDATE SET
+    source = CASE 
+        WHEN hotels.source IS NULL OR hotels.source = '' THEN EXCLUDED.source
+        WHEN hotels.source LIKE '%' || EXCLUDED.source || '%' THEN hotels.source
+        ELSE hotels.source || '::' || EXCLUDED.source
+    END,
+    updated_at = CURRENT_TIMESTAMP
+RETURNING id, 
+    (xmax = 0) AS inserted;  -- True if inserted, False if updated
+
+
+-- name: get_distinct_states
+-- Get all distinct states that have hotels
+SELECT DISTINCT state
+FROM sadie_gtm.hotels
+WHERE state IS NOT NULL AND state != ''
+ORDER BY state;
+
+
+-- ============================================================================
+-- GEOCODING QUERIES (Serper Places enrichment for crawl data)
+-- ============================================================================
+
+-- name: get_hotels_needing_geocoding
+-- Get hotels with names but missing location data (for Serper Places geocoding)
+-- Targets crawl data hotels that have been name-enriched but need location
+-- NOTE: Excludes Cloudbeds (handled by booking page enrichment with archive fallback)
+SELECT 
+    h.id,
+    h.name,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.source,
+    hbe.booking_url,
+    be.name as engine_name
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.name IS NOT NULL 
+  AND h.name != ''
+  AND h.name NOT LIKE 'Unknown%'
+  AND (h.city IS NULL OR h.city = '')
+  AND (be.name IS NULL OR be.name != 'Cloudbeds')  -- Exclude Cloudbeds
+  AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source)
+ORDER BY h.id
+LIMIT :limit;
+
+
+-- name: get_hotels_needing_geocoding_count^
+-- Count hotels needing geocoding
+SELECT COUNT(*) as count
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.name IS NOT NULL 
+  AND h.name != ''
+  AND h.name NOT LIKE 'Unknown%'
+  AND (h.city IS NULL OR h.city = '')
+  AND (be.name IS NULL OR be.name != 'Cloudbeds')  -- Exclude Cloudbeds
+  AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source);
+
+
+-- name: update_hotel_geocoding!
+-- Update hotel with geocoding results from Serper Places
+-- Updates location, contact info, and coordinates
+UPDATE sadie_gtm.hotels
+SET 
+    address = COALESCE(CAST(:address AS TEXT), address),
+    city = COALESCE(CAST(:city AS TEXT), city),
+    state = COALESCE(CAST(:state AS TEXT), state),
+    country = COALESCE(CAST(:country AS TEXT), country),
+    location = CASE 
+        WHEN CAST(:latitude AS FLOAT) IS NOT NULL AND CAST(:longitude AS FLOAT) IS NOT NULL 
+        THEN ST_SetSRID(ST_MakePoint(CAST(:longitude AS FLOAT), CAST(:latitude AS FLOAT)), 4326)::geography
+        ELSE location
+    END,
+    phone_google = COALESCE(CAST(:phone AS TEXT), phone_google),
+    email = COALESCE(CAST(:email AS TEXT), email),
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;

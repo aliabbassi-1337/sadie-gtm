@@ -74,9 +74,9 @@ async def get_hotels_pending_detection(
     """Get hotels that need booking engine detection.
 
     Criteria:
-    - status = 0 (scraped)
+    - status < DETECTED (30): INGESTED, HAS_WEBSITE, or HAS_LOCATION
     - website is not null
-    - not a big chain (Marriott, Hilton, IHG, Hyatt, Wyndham, etc.)
+    - no hotel_booking_engines record yet (excludes reverse lookup leads)
     - optionally filtered by categories (e.g., ['hotel', 'motel'])
     """
     async with get_conn() as conn:
@@ -123,6 +123,29 @@ async def update_hotel_contact_info(
             hotel_id=hotel_id,
             phone_website=phone_website,
             email=email,
+        )
+
+
+async def update_hotel_scraped_address(
+    hotel_id: int,
+    address: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> None:
+    """Update hotel address scraped from booking page (Cloudbeds).
+    
+    Only updates fields that are currently empty/null to avoid overwriting
+    existing data from authoritative sources.
+    """
+    async with get_conn() as conn:
+        await queries.update_hotel_scraped_address(
+            conn,
+            hotel_id=hotel_id,
+            address=address,
+            city=city,
+            state=state,
+            country=country,
         )
 
 
@@ -177,16 +200,35 @@ async def insert_booking_engine(
         return result
 
 
+async def get_hotel_by_booking_url(booking_url: str) -> Optional[dict]:
+    """Find hotel by booking URL.
+    
+    Used for deduplication when ingesting crawled booking engine URLs.
+    If this booking URL already exists, returns hotel info so we can update
+    rather than create a duplicate.
+    
+    Returns dict with: hotel_id, booking_engine_id, booking_url, detection_method,
+                       name, website, status
+    """
+    async with get_conn() as conn:
+        result = await queries.get_hotel_by_booking_url(conn, booking_url=booking_url)
+        if result:
+            return dict(result)
+        return None
+
+
 async def insert_hotel_booking_engine(
     hotel_id: int,
     booking_engine_id: Optional[int] = None,
     booking_url: Optional[str] = None,
+    engine_property_id: Optional[str] = None,
     detection_method: Optional[str] = None,
     status: int = 1,
 ) -> None:
     """Link hotel to detected booking engine.
 
     status: -1=failed (non-retriable), 1=success (default)
+    engine_property_id: The booking engine's ID for this property (slug, UUID, etc.)
     """
     async with get_conn() as conn:
         await queries.insert_hotel_booking_engine(
@@ -194,6 +236,7 @@ async def insert_hotel_booking_engine(
             hotel_id=hotel_id,
             booking_engine_id=booking_engine_id,
             booking_url=booking_url,
+            engine_property_id=engine_property_id,
             detection_method=detection_method,
             status=status,
         )
