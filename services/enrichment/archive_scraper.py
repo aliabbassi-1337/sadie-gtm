@@ -77,6 +77,41 @@ COUNTRY_TO_CODE = {
     'Tunisia': 'TN', 'Algeria': 'DZ', 'Libya': 'LY',
 }
 
+# State/region names that indicate a country (when country is missing)
+STATE_TO_COUNTRY = {
+    # Thailand
+    'Phuket': 'TH', 'Phangnga': 'TH', 'Krabi': 'TH', 'Chiang Mai': 'TH',
+    'Krung Thep Mahanakhon [Bangkok]': 'TH', 'Bangkok': 'TH', 'Chiang Rai': 'TH',
+    'Koh Samui': 'TH', 'Pattaya': 'TH', 'Hua Hin': 'TH',
+    # Philippines
+    'Palawan': 'PH', 'Cebu': 'PH', 'Batangas': 'PH', 'Surigao del Norte': 'PH',
+    'Bohol': 'PH', 'Boracay': 'PH', 'Davao': 'PH', 'Iloilo': 'PH',
+    # Mexico
+    'Jalisco': 'MX', 'Quintana Roo': 'MX', 'Yucatan': 'MX', 'Baja California': 'MX',
+    'Oaxaca': 'MX', 'Nayarit': 'MX', 'Guanajuato': 'MX',
+    # Spain
+    'Granada': 'ES', 'Barcelona': 'ES', 'Madrid': 'ES', 'Andalucia': 'ES',
+    'Catalonia': 'ES', 'Valencia': 'ES', 'Islas Baleares': 'ES', 'Mallorca': 'ES',
+    # UK
+    'Kent': 'GB', 'London': 'GB', 'Scotland': 'GB', 'Wales': 'GB', 'England': 'GB',
+    # Israel
+    'Tel Aviv': 'IL', 'Jerusalem': 'IL', 'Haifa': 'IL',
+    # Indonesia
+    'Bali': 'ID', 'Java': 'ID', 'Lombok': 'ID', 'Sumatra': 'ID',
+    # Cambodia
+    'Siem Reap': 'KH', 'Phnom Penh': 'KH',
+    # Vietnam
+    'Ho Chi Minh': 'VN', 'Hanoi': 'VN', 'Da Nang': 'VN',
+}
+
+# US state codes
+US_STATES = {
+    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA',
+    'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+    'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT',
+    'VA','WA','WV','WI','WY','DC',
+}
+
 def normalize_country(country: Optional[str]) -> Optional[str]:
     """Normalize country names to ISO 2-letter codes (USA stays as 'USA')."""
     if not country:
@@ -87,6 +122,23 @@ def normalize_country(country: Optional[str]) -> Optional[str]:
         return COUNTRY_TO_CODE[country]
     # Already a code, return as-is
     return country
+
+
+def infer_country_from_state(state: Optional[str]) -> Optional[str]:
+    """Infer country from state/region when country is missing."""
+    if not state:
+        return None
+    state = state.strip()
+    # Check if it's a US state code
+    if state.upper() in US_STATES:
+        return 'USA'
+    # Check if it's a known region
+    if state in STATE_TO_COUNTRY:
+        return STATE_TO_COUNTRY[state]
+    # Check if state IS a country code (data entry error)
+    if len(state) == 2 and state.upper() == state:
+        return state  # Return as-is, it's probably a country code
+    return None
 
 
 class ArchiveScraper:
@@ -272,6 +324,8 @@ class ArchiveScraper:
     
     def extract_from_html(self, html: str) -> Optional[ExtractedBookingData]:
         """Extract hotel data from HTML (live or archived)."""
+        data = None
+        
         # Try Cloudbeds-specific extraction first (modern format)
         cloudbeds_data = self._extract_cloudbeds_modern(html)
         if cloudbeds_data and (cloudbeds_data.city or cloudbeds_data.address):
@@ -284,27 +338,37 @@ class ArchiveScraper:
                 meta_data = self._extract_meta_tags(html)
                 name = meta_data.name
             cloudbeds_data.name = name
-            return cloudbeds_data
+            data = cloudbeds_data
         
         # Try older Cloudbeds format (archives from 2019-2022)
-        older_data = self._extract_cloudbeds_archive(html)
-        if older_data and (older_data.city or older_data.address):
-            return older_data
+        if not data:
+            older_data = self._extract_cloudbeds_archive(html)
+            if older_data and (older_data.city or older_data.address):
+                data = older_data
         
         # Try JSON-LD
-        json_ld = self._extract_json_ld(html)
-        if json_ld:
-            data = self._parse_json_ld(json_ld)
-            if data.city or data.address:
-                return data
+        if not data:
+            json_ld = self._extract_json_ld(html)
+            if json_ld:
+                parsed = self._parse_json_ld(json_ld)
+                if parsed.city or parsed.address:
+                    data = parsed
         
         # Fall back to meta tags
-        data = self._extract_meta_tags(html)
-        if data.city or data.address:
-            return data
+        if not data:
+            meta_data = self._extract_meta_tags(html)
+            if meta_data.city or meta_data.address:
+                data = meta_data
+            else:
+                data = self._extract_cloudbeds_archive(html) or meta_data
         
-        # Return whatever we have (even just name)
-        return older_data or data
+        # Infer country from state if missing
+        if data and not data.country and data.state:
+            inferred = infer_country_from_state(data.state)
+            if inferred:
+                data.country = inferred
+        
+        return data
     
     def _extract_cloudbeds_modern(self, html: str) -> Optional[ExtractedBookingData]:
         """Extract from modern Cloudbeds pages with data-be-text elements."""
