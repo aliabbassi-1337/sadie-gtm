@@ -265,25 +265,28 @@ def deploy(host: str, restart: bool = False, key: str = None) -> None:
     # Reload systemd
     commands.append("sudo systemctl daemon-reload")
 
-    # Enable services
+    # Enable and start services
     for f in generated_files:
         if f.suffix == ".service":
             service_name = f.stem
             commands.append(f"sudo systemctl enable {service_name}")
+            if restart:
+                commands.append(f"sudo systemctl restart {service_name}")
+            else:
+                # Start if not already running
+                commands.append(f"sudo systemctl start {service_name}")
 
     # Run commands
     for cmd in commands:
         logger.info(f"  {cmd}")
-        run_ssh(host, cmd, key)
+        run_ssh(host, cmd, key, check=False)  # Don't fail if service already started
 
-    # Restart if requested
-    if restart:
-        logger.info("Restarting services...")
-        for f in generated_files:
-            if f.suffix == ".service":
-                service_name = f.stem
-                run_ssh(host, f"sudo systemctl restart {service_name}", key)
-                logger.info(f"  Restarted {service_name}")
+    # Show service status
+    logger.info("")
+    logger.info("Service status:")
+    for f in generated_files:
+        if f.suffix == ".service":
+            run_ssh(host, f"sudo systemctl is-active {f.stem} && echo '{f.stem}: running' || echo '{f.stem}: not running'", key, check=False)
 
     logger.info("")
     logger.info("Deployment complete!")
