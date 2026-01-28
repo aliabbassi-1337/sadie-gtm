@@ -64,7 +64,8 @@ class RMSScraper(IRMSScraper):
     async def _extract_name(self, body_text: str) -> Optional[str]:
         # Garbage names to reject
         garbage = ['online bookings', 'search', 'book now', 'unknown', 'error', 'loading', 
-                   'cart', 'book your accommodation', 'dates', 'check in', 'check out', 'guests']
+                   'cart', 'book your accommodation', 'dates', 'check in', 'check out', 'guests',
+                   'looks like we', 'application issues', 'page not found', '404']
         
         # Try standard selectors first
         for selector in ['h1', '.property-name', '.header-title']:
@@ -81,11 +82,14 @@ class RMSScraper(IRMSScraper):
         # Try first line of body text (often the property name)
         lines = [l.strip() for l in body_text.split('\n') if l.strip()]
         for line in lines[:5]:  # Check first 5 non-empty lines
-            if 2 < len(line) < 80 and line.lower() not in garbage:
-                # Skip lines that look like UI elements
-                if not any(x in line.lower() for x in ['(0)', 'search', 'select', 'type:', 'length:']):
-                    if 'rmscloud.com' not in line.lower():
-                        return line
+            line_lower = line.lower()
+            if 2 < len(line) < 80:
+                # Check exact match and substring match for garbage
+                if line_lower not in garbage and not any(g in line_lower for g in garbage):
+                    # Skip lines that look like UI elements
+                    if not any(x in line_lower for x in ['(0)', 'search', 'select', 'type:', 'length:']):
+                        if 'rmscloud.com' not in line_lower:
+                            return line
         
         # Fallback to page title
         title = await self._page.title()
