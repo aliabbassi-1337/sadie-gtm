@@ -36,6 +36,111 @@ class ExtractionResult(BaseModel):
     data: Optional[ExtractedBookingData] = None
 
 
+# Map full country names to ISO 2-letter codes (USA is special case -> "USA")
+COUNTRY_TO_CODE = {
+    # USA special case
+    'US': 'USA', 'United States': 'USA', 'United States of America': 'USA',
+    # Common full names to ISO codes
+    'Germany': 'DE', 'Taiwan': 'TW', 'New Zealand': 'NZ', 'Italy': 'IT',
+    'Malta': 'MT', 'Sri Lanka': 'LK', 'France': 'FR', 'India': 'IN',
+    'Greece': 'GR', 'Belize': 'BZ', 'Tanzania': 'TZ', 'Denmark': 'DK',
+    'Switzerland': 'CH', 'Laos': 'LA', 'El Salvador': 'SV', 'Norway': 'NO',
+    'Finland': 'FI', 'Nicaragua': 'NI', 'Spain': 'ES', 'Thailand': 'TH',
+    'Australia': 'AU', 'United Kingdom': 'GB', 'Philippines': 'PH',
+    'Argentina': 'AR', 'Colombia': 'CO', 'Portugal': 'PT', 'Indonesia': 'ID',
+    'Costa Rica': 'CR', 'Chile': 'CL', 'Peru': 'PE', 'Singapore': 'SG',
+    'Guatemala': 'GT', 'Ireland': 'IE', 'Puerto Rico': 'PR', 'Ecuador': 'EC',
+    'Malaysia': 'MY', 'Morocco': 'MA', 'Panama': 'PA', 'Cambodia': 'KH',
+    'Uruguay': 'UY', 'Japan': 'JP', 'Dominican Republic': 'DO', 'Vietnam': 'VN',
+    'South Africa': 'ZA', 'Honduras': 'HN', 'Netherlands': 'NL', 'Romania': 'RO',
+    'Kenya': 'KE', 'Sweden': 'SE', 'Seychelles': 'SC', 'Aruba': 'AW',
+    'Mauritius': 'MU', 'Austria': 'AT', 'Mexico': 'MX', 'Canada': 'CA',
+    'Brazil': 'BR', 'Belgium': 'BE', 'Czech Republic': 'CZ', 'Hungary': 'HU',
+    'Poland': 'PL', 'Croatia': 'HR', 'Slovenia': 'SI', 'Slovakia': 'SK',
+    'Bulgaria': 'BG', 'Serbia': 'RS', 'Montenegro': 'ME', 'Albania': 'AL',
+    'Bosnia and Herzegovina': 'BA', 'North Macedonia': 'MK', 'Moldova': 'MD',
+    'Ukraine': 'UA', 'Belarus': 'BY', 'Russia': 'RU', 'Turkey': 'TR',
+    'Israel': 'IL', 'Egypt': 'EG', 'Saudi Arabia': 'SA', 'UAE': 'AE',
+    'United Arab Emirates': 'AE', 'Qatar': 'QA', 'Kuwait': 'KW', 'Bahrain': 'BH',
+    'Oman': 'OM', 'Jordan': 'JO', 'Lebanon': 'LB', 'Cyprus': 'CY',
+    'China': 'CN', 'South Korea': 'KR', 'Korea': 'KR', 'Hong Kong': 'HK',
+    'Nepal': 'NP', 'Bangladesh': 'BD', 'Pakistan': 'PK', 'Myanmar': 'MM',
+    'Maldives': 'MV', 'Fiji': 'FJ', 'Papua New Guinea': 'PG', 'Samoa': 'WS',
+    'Vanuatu': 'VU', 'Bolivia': 'BO', 'Paraguay': 'PY', 'Venezuela': 'VE',
+    'Suriname': 'SR', 'Guyana': 'GY', 'Jamaica': 'JM', 'Trinidad and Tobago': 'TT',
+    'Barbados': 'BB', 'Bahamas': 'BS', 'Cuba': 'CU', 'Haiti': 'HT',
+    'Luxembourg': 'LU', 'Liechtenstein': 'LI', 'Monaco': 'MC', 'Andorra': 'AD',
+    'Iceland': 'IS', 'Estonia': 'EE', 'Latvia': 'LV', 'Lithuania': 'LT',
+    'Ghana': 'GH', 'Nigeria': 'NG', 'Ethiopia': 'ET', 'Uganda': 'UG',
+    'Rwanda': 'RW', 'Zambia': 'ZM', 'Zimbabwe': 'ZW', 'Botswana': 'BW',
+    'Namibia': 'NA', 'Mozambique': 'MZ', 'Madagascar': 'MG', 'Senegal': 'SN',
+    'Tunisia': 'TN', 'Algeria': 'DZ', 'Libya': 'LY',
+}
+
+# State/region names that indicate a country (when country is missing)
+STATE_TO_COUNTRY = {
+    # Thailand
+    'Phuket': 'TH', 'Phangnga': 'TH', 'Krabi': 'TH', 'Chiang Mai': 'TH',
+    'Krung Thep Mahanakhon [Bangkok]': 'TH', 'Bangkok': 'TH', 'Chiang Rai': 'TH',
+    'Koh Samui': 'TH', 'Pattaya': 'TH', 'Hua Hin': 'TH',
+    # Philippines
+    'Palawan': 'PH', 'Cebu': 'PH', 'Batangas': 'PH', 'Surigao del Norte': 'PH',
+    'Bohol': 'PH', 'Boracay': 'PH', 'Davao': 'PH', 'Iloilo': 'PH',
+    # Mexico
+    'Jalisco': 'MX', 'Quintana Roo': 'MX', 'Yucatan': 'MX', 'Baja California': 'MX',
+    'Oaxaca': 'MX', 'Nayarit': 'MX', 'Guanajuato': 'MX',
+    # Spain
+    'Granada': 'ES', 'Barcelona': 'ES', 'Madrid': 'ES', 'Andalucia': 'ES',
+    'Catalonia': 'ES', 'Valencia': 'ES', 'Islas Baleares': 'ES', 'Mallorca': 'ES',
+    # UK
+    'Kent': 'GB', 'London': 'GB', 'Scotland': 'GB', 'Wales': 'GB', 'England': 'GB',
+    # Israel
+    'Tel Aviv': 'IL', 'Jerusalem': 'IL', 'Haifa': 'IL',
+    # Indonesia
+    'Bali': 'ID', 'Java': 'ID', 'Lombok': 'ID', 'Sumatra': 'ID',
+    # Cambodia
+    'Siem Reap': 'KH', 'Phnom Penh': 'KH',
+    # Vietnam
+    'Ho Chi Minh': 'VN', 'Hanoi': 'VN', 'Da Nang': 'VN',
+}
+
+# US state codes
+US_STATES = {
+    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA',
+    'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+    'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT',
+    'VA','WA','WV','WI','WY','DC',
+}
+
+def normalize_country(country: Optional[str]) -> Optional[str]:
+    """Normalize country names to ISO 2-letter codes (USA stays as 'USA')."""
+    if not country:
+        return None
+    country = country.strip()
+    # Check if it's a full name we know
+    if country in COUNTRY_TO_CODE:
+        return COUNTRY_TO_CODE[country]
+    # Already a code, return as-is
+    return country
+
+
+def infer_country_from_state(state: Optional[str]) -> Optional[str]:
+    """Infer country from state/region when country is missing."""
+    if not state:
+        return None
+    state = state.strip()
+    # Check if it's a US state code
+    if state.upper() in US_STATES:
+        return 'USA'
+    # Check if it's a known region
+    if state in STATE_TO_COUNTRY:
+        return STATE_TO_COUNTRY[state]
+    # Check if state IS a country code (data entry error)
+    if len(state) == 2 and state.upper() == state:
+        return state  # Return as-is, it's probably a country code
+    return None
+
+
 class ArchiveScraper:
     """Fetches HTML from live pages with archive fallback for 404s.
     
@@ -219,6 +324,8 @@ class ArchiveScraper:
     
     def extract_from_html(self, html: str) -> Optional[ExtractedBookingData]:
         """Extract hotel data from HTML (live or archived)."""
+        data = None
+        
         # Try Cloudbeds-specific extraction first (modern format)
         cloudbeds_data = self._extract_cloudbeds_modern(html)
         if cloudbeds_data and (cloudbeds_data.city or cloudbeds_data.address):
@@ -231,27 +338,37 @@ class ArchiveScraper:
                 meta_data = self._extract_meta_tags(html)
                 name = meta_data.name
             cloudbeds_data.name = name
-            return cloudbeds_data
+            data = cloudbeds_data
         
         # Try older Cloudbeds format (archives from 2019-2022)
-        older_data = self._extract_cloudbeds_archive(html)
-        if older_data and (older_data.city or older_data.address):
-            return older_data
+        if not data:
+            older_data = self._extract_cloudbeds_archive(html)
+            if older_data and (older_data.city or older_data.address):
+                data = older_data
         
         # Try JSON-LD
-        json_ld = self._extract_json_ld(html)
-        if json_ld:
-            data = self._parse_json_ld(json_ld)
-            if data.city or data.address:
-                return data
+        if not data:
+            json_ld = self._extract_json_ld(html)
+            if json_ld:
+                parsed = self._parse_json_ld(json_ld)
+                if parsed.city or parsed.address:
+                    data = parsed
         
         # Fall back to meta tags
-        data = self._extract_meta_tags(html)
-        if data.city or data.address:
-            return data
+        if not data:
+            meta_data = self._extract_meta_tags(html)
+            if meta_data.city or meta_data.address:
+                data = meta_data
+            else:
+                data = self._extract_cloudbeds_archive(html) or meta_data
         
-        # Return whatever we have (even just name)
-        return older_data or data
+        # Infer country from state if missing
+        if data and not data.country and data.state:
+            inferred = infer_country_from_state(data.state)
+            if inferred:
+                data.country = inferred
+        
+        return data
     
     def _extract_cloudbeds_modern(self, html: str) -> Optional[ExtractedBookingData]:
         """Extract from modern Cloudbeds pages with data-be-text elements."""
