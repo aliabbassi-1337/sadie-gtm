@@ -127,7 +127,7 @@ JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND be.name = 'Cloudbeds'  -- Only Cloudbeds (archive fallback works)
+  AND be.name IN ('Cloudbeds', 'RMS Cloud', 'Mews')  -- Booking engines with scrapeable pages
   AND (hbe.enrichment_status IS NULL OR hbe.enrichment_status NOT IN ('success', 'dead'))
   AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
   AND (
