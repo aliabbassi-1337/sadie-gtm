@@ -1,7 +1,7 @@
 """Enrichment service.
 
 Single service for all hotel enrichment operations.
-Self-contained - no imports from other services.
+Uses lib.rms for shared RMS code.
 """
 
 from services.enrichment.service import (
@@ -10,10 +10,9 @@ from services.enrichment.service import (
     EnrichResult,
     EnqueueResult,
     ConsumeResult,
-    RMSHotelRecord,
-    QueueStats,
     MockQueue,
 )
+from lib.rms import RMSHotelRecord, QueueStats
 
 __all__ = [
     "Service",

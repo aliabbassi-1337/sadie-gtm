@@ -2,7 +2,8 @@
 
 import pytest
 
-from services.ingestor.ingestors.rms import RMSIngestor, RMSIngestResult, RMSRepo, ExtractedData
+from services.ingestor.ingestors.rms import RMSIngestor, RMSIngestResult, RMSRepo
+from lib.rms import ExtractedRMSData
 
 
 @pytest.fixture
@@ -49,7 +50,7 @@ class TestRMSIngestorSaveBatch:
         unique_id = str(uuid.uuid4())[:8]
         
         hotels = [
-            ExtractedData(
+            ExtractedRMSData(
                 slug=f"ingest_test_{unique_id}",
                 booking_url=f"https://ibe.rmscloud.com/ingest_test_{unique_id}",
                 name=f"Ingestor Test Hotel {unique_id}",
