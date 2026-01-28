@@ -6,8 +6,9 @@
 SELECT id FROM sadie_gtm.booking_engines WHERE name = 'RMS Cloud';
 
 -- name: get_rms_hotels_needing_enrichment
--- Get RMS hotels that need enrichment (missing or garbage name, address, etc.)
+-- Get RMS hotels that need enrichment (missing name, email, phone, city, etc.)
 -- Uses booking_engine_id for filtering (more efficient than name)
+-- Treats "Unknown", "Online Bookings" as garbage that needs enrichment
 SELECT 
     h.id AS hotel_id,
     hbe.booking_url
@@ -16,14 +17,22 @@ JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
 WHERE hbe.booking_engine_id = :booking_engine_id
   AND h.status = 1
   AND (
+      -- Missing or garbage name
       h.name IS NULL 
       OR h.name = '' 
       OR h.name LIKE 'Unknown%'
+      OR h.name = 'Online Bookings'
       OR h.name LIKE '%rmscloud%'
+      -- Missing location
       OR h.city IS NULL 
       OR h.city = ''
       OR h.state IS NULL
       OR h.state = ''
+      -- Missing contact info
+      OR h.email IS NULL 
+      OR h.email = ''
+      OR h.phone_website IS NULL 
+      OR h.phone_website = ''
   )
 ORDER BY hbe.last_enrichment_attempt ASC NULLS FIRST
 LIMIT :limit;
@@ -70,12 +79,12 @@ DO UPDATE SET
 
 -- name: update_rms_hotel!
 -- Update hotel with enriched data
--- Only fill NULL/empty fields, or replace garbage names (Unknown, URLs)
+-- Only fill NULL/empty fields, or replace garbage names (Unknown, Online Bookings, URLs)
 -- Preserves real existing data
 UPDATE sadie_gtm.hotels 
 SET 
     name = CASE 
-        WHEN name IS NULL OR name = '' OR name LIKE 'Unknown%' OR name LIKE '%rmscloud.com%' 
+        WHEN name IS NULL OR name = '' OR name LIKE 'Unknown%' OR name = 'Online Bookings' OR name LIKE '%rmscloud.com%' 
         THEN COALESCE(:name, name)
         ELSE name 
     END,
@@ -122,13 +131,18 @@ JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
 WHERE hbe.booking_engine_id = :booking_engine_id
   AND h.status = 1
   AND (
+      -- Missing or garbage name
       h.name IS NULL 
       OR h.name = '' 
+      OR h.name LIKE 'Unknown%'
+      OR h.name = 'Online Bookings'
       OR h.name LIKE '%rmscloud%'
+      -- Missing location
       OR h.city IS NULL 
       OR h.city = ''
-  )
-  AND (
-      hbe.enrichment_status IS NULL 
-      OR hbe.enrichment_status NOT IN ('dead', 'enriched')
+      -- Missing contact info
+      OR h.email IS NULL 
+      OR h.email = ''
+      OR h.phone_website IS NULL 
+      OR h.phone_website = ''
   );
