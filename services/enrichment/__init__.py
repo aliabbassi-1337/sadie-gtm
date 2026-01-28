@@ -10,9 +10,8 @@ from services.enrichment.service import (
     EnrichResult,
     EnqueueResult,
     ConsumeResult,
-    MockQueue,
 )
-from lib.rms import RMSHotelRecord, QueueStats
+from lib.rms import RMSHotelRecord, QueueStats, MockQueue
 
 __all__ = [
     "Service",

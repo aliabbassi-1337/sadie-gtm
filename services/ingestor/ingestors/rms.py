@@ -2,7 +2,7 @@
 RMS Cloud Booking Engine Ingestor
 
 Scans RMS booking engine IDs to discover valid hotels.
-Uses shared lib/rms for scanner and scraper.
+Uses shared lib/rms for scanner, scraper, and repo.
 """
 
 import asyncio
@@ -14,8 +14,7 @@ from playwright.async_api import async_playwright, BrowserContext
 from playwright_stealth import Stealth
 
 from services.ingestor.registry import register
-from db.client import queries, get_conn
-from lib.rms import RMSScanner, RMSScraper, ExtractedRMSData
+from lib.rms import RMSScanner, RMSScraper, RMSRepo, ExtractedRMSData
 
 
 # =============================================================================
@@ -35,61 +34,6 @@ class RMSIngestResult(BaseModel):
     total_scanned: int
     hotels_found: int
     hotels_saved: int
-
-
-# =============================================================================
-# Repository (DB operations)
-# =============================================================================
-
-class RMSRepo:
-    """Database operations for RMS ingestion."""
-    
-    def __init__(self):
-        self._booking_engine_id: Optional[int] = None
-    
-    async def get_booking_engine_id(self) -> int:
-        if self._booking_engine_id is None:
-            async with get_conn() as conn:
-                result = await queries.get_rms_booking_engine_id(conn)
-                if result:
-                    self._booking_engine_id = result["id"]
-                else:
-                    raise ValueError("RMS Cloud booking engine not found")
-        return self._booking_engine_id
-    
-    async def insert_hotel(
-        self,
-        name: Optional[str],
-        address: Optional[str],
-        city: Optional[str],
-        state: Optional[str],
-        country: Optional[str],
-        phone: Optional[str],
-        email: Optional[str],
-        website: Optional[str],
-        external_id: Optional[str],
-        source: str = "rms_scan",
-        status: int = 1,
-    ) -> Optional[int]:
-        async with get_conn() as conn:
-            return await queries.insert_rms_hotel(
-                conn, name=name, address=address, city=city, state=state,
-                country=country, phone=phone, email=email, website=website,
-                external_id=external_id, source=source, status=status,
-            )
-    
-    async def insert_hotel_booking_engine(
-        self,
-        hotel_id: int,
-        booking_engine_id: int,
-        booking_url: str,
-        enrichment_status: str = "enriched",
-    ) -> None:
-        async with get_conn() as conn:
-            await queries.insert_rms_hotel_booking_engine(
-                conn, hotel_id=hotel_id, booking_engine_id=booking_engine_id,
-                booking_url=booking_url, enrichment_status=enrichment_status,
-            )
 
 
 # =============================================================================
