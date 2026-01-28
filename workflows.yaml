@@ -149,6 +149,12 @@ ec2:
     command: uv run python workflows/enrich_rms_consumer.py --concurrency 6
     type: systemd  # Runs continuously
 
+  # RMS ingestion (discover new RMS hotels by scanning ID ranges)
+  ingest_rms_consumer:
+    description: Scan RMS ID ranges to discover new hotels (distributed across servers)
+    command: uv run python workflows/ingest_rms_consumer.py --concurrency 6
+    type: systemd  # Runs continuously, pulls ranges from SQS
+
   # Serper geocoding (for non-Cloudbeds crawl data - SiteMinder, Mews, etc.)
   geocode_crawl_data:
     description: Geocode crawl hotels by name using Serper Places API
