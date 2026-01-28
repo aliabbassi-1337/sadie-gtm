@@ -11,7 +11,7 @@ from services.enrichment.service import (
     ConsumeResult,
 )
 from services.enrichment.rms_repo import RMSRepo
-from services.enrichment.rms_queue import RMSQueue, MockQueue
+from services.enrichment.queue import RMSQueue, MockQueue
 from lib.rms import RMSHotelRecord, QueueStats
 
 __all__ = [
