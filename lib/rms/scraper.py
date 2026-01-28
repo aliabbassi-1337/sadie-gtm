@@ -41,7 +41,7 @@ class RMSScraper(IRMSScraper):
             if not self._is_valid(content, body_text):
                 return None
             
-            data.name = await self._extract_name()
+            data.name = await self._extract_name(body_text)
             data.phone = self._extract_phone(body_text)
             data.email = self._extract_email(content, body_text)
             data.website = await self._extract_website()
@@ -61,10 +61,12 @@ class RMSScraper(IRMSScraper):
             return False
         return bool(body_text and len(body_text) >= 100)
     
-    async def _extract_name(self) -> Optional[str]:
+    async def _extract_name(self, body_text: str) -> Optional[str]:
         # Garbage names to reject
-        garbage = ['online bookings', 'search', 'book now', 'unknown', 'error', 'loading']
+        garbage = ['online bookings', 'search', 'book now', 'unknown', 'error', 'loading', 
+                   'cart', 'book your accommodation', 'dates', 'check in', 'check out', 'guests']
         
+        # Try standard selectors first
         for selector in ['h1', '.property-name', '.header-title']:
             try:
                 el = await self._page.query_selector(selector)
@@ -75,6 +77,17 @@ class RMSScraper(IRMSScraper):
                             return text
             except Exception:
                 pass
+        
+        # Try first line of body text (often the property name)
+        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+        for line in lines[:5]:  # Check first 5 non-empty lines
+            if 2 < len(line) < 80 and line.lower() not in garbage:
+                # Skip lines that look like UI elements
+                if not any(x in line.lower() for x in ['(0)', 'search', 'select', 'type:', 'length:']):
+                    if 'rmscloud.com' not in line.lower():
+                        return line
+        
+        # Fallback to page title
         title = await self._page.title()
         if title and title.lower() not in garbage and title.strip():
             title = re.sub(r'\s*[-|]\s*RMS.*$', '', title, flags=re.IGNORECASE)
