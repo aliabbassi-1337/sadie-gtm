@@ -73,17 +73,17 @@ DO UPDATE SET
     updated_at = NOW();
 
 -- name: update_rms_hotel!
--- Update hotel with enriched data
+-- Update hotel with enriched data (only fill missing fields, never overwrite existing)
 UPDATE sadie_gtm.hotels 
 SET 
-    name = COALESCE(:name, name),
-    address = COALESCE(:address, address),
-    city = COALESCE(:city, city),
-    state = COALESCE(:state, state),
-    country = COALESCE(:country, country),
-    phone_website = COALESCE(:phone, phone_website),
-    email = COALESCE(:email, email),
-    website = COALESCE(:website, website),
+    name = COALESCE(NULLIF(name, ''), :name, name),
+    address = COALESCE(NULLIF(address, ''), :address, address),
+    city = COALESCE(NULLIF(city, ''), :city, city),
+    state = COALESCE(NULLIF(state, ''), :state, state),
+    country = COALESCE(NULLIF(country, ''), :country, country),
+    phone_website = COALESCE(NULLIF(phone_website, ''), :phone, phone_website),
+    email = COALESCE(NULLIF(email, ''), :email, email),
+    website = COALESCE(NULLIF(website, ''), :website, website),
     updated_at = NOW()
 WHERE id = :hotel_id;
 
