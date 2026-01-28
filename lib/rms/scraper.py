@@ -11,7 +11,7 @@ from loguru import logger
 from playwright.async_api import Page
 
 from lib.rms.models import ExtractedRMSData
-from lib.rms.helpers import decode_cloudflare_email, normalize_country
+from lib.rms.utils import decode_cloudflare_email, normalize_country
 
 
 SCRAPE_TIMEOUT = 20000
