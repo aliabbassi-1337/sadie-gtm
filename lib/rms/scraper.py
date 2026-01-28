@@ -55,10 +55,14 @@ class RMSScraper(IRMSScraper):
             return None
     
     def _is_valid(self, content: str, body_text: str) -> bool:
-        if "Error" in content[:500] and "application issues" in content:
+        # Reject error pages
+        if "application issues" in body_text or "application issues" in content:
             return False
         if "Page Not Found" in content or "404" in content[:1000]:
             return False
+        if body_text.startswith("Error"):
+            return False
+        # Must have substantial content
         return bool(body_text and len(body_text) >= 100)
     
     async def _extract_name(self, body_text: str) -> Optional[str]:
@@ -88,8 +92,12 @@ class RMSScraper(IRMSScraper):
                 if line_lower not in garbage and not any(g in line_lower for g in garbage):
                     # Skip lines that look like UI elements
                     if not any(x in line_lower for x in ['(0)', 'search', 'select', 'type:', 'length:']):
-                        if 'rmscloud.com' not in line_lower:
-                            return line
+                        # Skip dates and timestamps (e.g., "1/28/2026 7:14:06 PM")
+                        if not re.match(r'^\d{1,2}/\d{1,2}/\d{4}', line):
+                            # Skip version strings (e.g., "V 5.25.345.4")
+                            if not re.match(r'^V\s+\d+\.\d+', line):
+                                if 'rmscloud.com' not in line_lower:
+                                    return line
         
         # Fallback to page title
         title = await self._page.title()
