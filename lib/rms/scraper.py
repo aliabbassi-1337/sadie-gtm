@@ -17,6 +17,20 @@ from lib.rms.utils import decode_cloudflare_email, normalize_country
 SCRAPE_TIMEOUT = 20000
 
 
+def convert_to_bookings_url(url: str) -> str:
+    """Convert ibe12/ibe13 URLs to bookings format that shows hotel names.
+    
+    ibe12.rmscloud.com/{id} -> bookings.rmscloud.com/Search/Index/{id}/90/
+    ibe13.rmscloud.com/{id} -> bookings.rmscloud.com/Search/Index/{id}/90/
+    """
+    # Match ibe12 or ibe13 format
+    match = re.match(r'https?://ibe1[23]\.rmscloud\.com/(\d+)/?', url)
+    if match:
+        id_num = match.group(1)
+        return f"https://bookings.rmscloud.com/Search/Index/{id_num}/90/"
+    return url
+
+
 @runtime_checkable
 class IRMSScraper(Protocol):
     """RMS Scraper interface."""
@@ -31,9 +45,12 @@ class RMSScraper(IRMSScraper):
     
     async def extract(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
         """Extract hotel data from RMS booking page."""
-        data = ExtractedRMSData(slug=slug, booking_url=url)
+        # Convert ibe12/ibe13 URLs to bookings format
+        scrape_url = convert_to_bookings_url(url)
+        
+        data = ExtractedRMSData(slug=slug, booking_url=url)  # Keep original URL
         try:
-            await self._page.goto(url, timeout=SCRAPE_TIMEOUT, wait_until="domcontentloaded")
+            await self._page.goto(scrape_url, timeout=SCRAPE_TIMEOUT, wait_until="domcontentloaded")
             await asyncio.sleep(5)  # RMS pages need time for JS to render
             content = await self._page.content()
             body_text = await self._page.evaluate("document.body.innerText")
