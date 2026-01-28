@@ -1,7 +1,7 @@
-"""RMS Booking Engine Scraper.
+"""RMS Data Scraper.
 
-Abstracts the Playwright-based scraping of RMS booking pages.
-Used by the RMS service for both ingestion and enrichment.
+Extracts hotel data from RMS booking pages.
+Assumes the URL is already known to be valid (use Scanner first).
 """
 
 import asyncio
@@ -10,13 +10,9 @@ from dataclasses import dataclass
 from typing import Optional, List, Protocol, runtime_checkable
 
 from loguru import logger
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext, Playwright
+from playwright.async_api import Page
 
-
-# RMS subdomain variations for new engine
-RMS_SUBDOMAINS = ["ibe12", "ibe"]
-
-# Configuration
+# Timeout for page load
 PAGE_TIMEOUT = 20000  # 20 seconds
 
 
@@ -77,19 +73,15 @@ def normalize_country(country: str) -> str:
 
 @runtime_checkable
 class IRMSScraper(Protocol):
-    """Protocol for RMS scraper operations."""
+    """Protocol for RMS data scraper."""
     
-    async def extract_from_url(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
-        """Extract data from a single RMS booking page."""
-        ...
-    
-    async def scan_id(self, id_num: int) -> Optional[ExtractedRMSData]:
-        """Scan an RMS ID across subdomains and slug formats."""
+    async def extract(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
+        """Extract data from a booking page URL."""
         ...
 
 
 class RMSScraper(IRMSScraper):
-    """Playwright-based scraper for RMS booking pages."""
+    """Playwright-based scraper for RMS booking page data."""
     
     def __init__(self, page: Page):
         self._page = page
@@ -98,35 +90,28 @@ class RMSScraper(IRMSScraper):
     def page(self) -> Page:
         return self._page
     
-    async def extract_from_url(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
-        """Extract data from a single RMS booking page."""
+    async def extract(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
+        """Extract data from a booking page URL."""
         data = ExtractedRMSData(slug=slug, booking_url=url)
         
         try:
-            await self.page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
+            await self._page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
             await asyncio.sleep(3)  # Wait for React to render
             
-            content = await self.page.content()
-            body_text = await self.page.evaluate("document.body.innerText")
+            content = await self._page.content()
+            body_text = await self._page.evaluate("document.body.innerText")
             
-            # Check for error pages
-            if "Error" in content[:500] and "application issues" in content:
-                return None
-            if "Page Not Found" in content or "404" in content[:1000]:
-                return None
-            if not body_text or len(body_text) < 100:
+            # Validate page
+            if not self._is_valid_content(content, body_text):
                 return None
             
-            # Extract property name
+            # Extract all fields
             data.name = await self._extract_name(content, body_text)
-            
-            # Extract contact info
             data.phone = self._extract_phone(body_text)
             data.email = self._extract_email(content, body_text)
             data.website = await self._extract_website()
-            
-            # Extract address
             data.address = self._extract_address(body_text)
+            
             if data.address:
                 data.state, data.country = self._parse_address(data.address)
             
@@ -136,26 +121,23 @@ class RMSScraper(IRMSScraper):
             logger.debug(f"Error extracting {url}: {e}")
             return None
     
-    async def scan_id(self, id_num: int) -> Optional[ExtractedRMSData]:
-        """Scan an RMS ID across subdomains and slug formats."""
-        formats = [str(id_num), f"{id_num:04d}", f"{id_num:05d}"]
-        
-        for fmt in formats:
-            for subdomain in RMS_SUBDOMAINS:
-                url = f"https://{subdomain}.rmscloud.com/{fmt}"
-                data = await self.extract_from_url(url, fmt)
-                if data:
-                    return data
-        
-        return None
+    def _is_valid_content(self, content: str, body_text: str) -> bool:
+        """Check if page content is valid."""
+        if "Error" in content[:500] and "application issues" in content:
+            return False
+        if "Page Not Found" in content or "404" in content[:1000]:
+            return False
+        if not body_text or len(body_text) < 100:
+            return False
+        return True
     
     async def _extract_name(self, content: str, body_text: str) -> Optional[str]:
         """Extract property name from page."""
-        name_selectors = ['h1', '.property-name', '[data-testid="property-name"]', '.header-title']
+        selectors = ['h1', '.property-name', '[data-testid="property-name"]', '.header-title']
         
-        for selector in name_selectors:
+        for selector in selectors:
             try:
-                el = await self.page.query_selector(selector)
+                el = await self._page.query_selector(selector)
                 if el:
                     text = (await el.inner_text()).strip()
                     if text and 2 < len(text) < 100:
@@ -165,7 +147,7 @@ class RMSScraper(IRMSScraper):
                 pass
         
         # Fallback to page title
-        title = await self.page.title()
+        title = await self._page.title()
         if title and title.lower() not in ['online bookings', 'search', '']:
             title = re.sub(r'\s*[-|]\s*RMS.*$', '', title, flags=re.IGNORECASE)
             if title and len(title) > 2:
@@ -175,13 +157,13 @@ class RMSScraper(IRMSScraper):
     
     def _extract_phone(self, body_text: str) -> Optional[str]:
         """Extract phone number from page content."""
-        phone_patterns = [
+        patterns = [
             r'(?:tel|phone|call)[:\s]*([+\d][\d\s\-\(\)]{7,20})',
             r'(\+\d{1,3}[\s\-]?\(?\d{2,4}\)?[\s\-]?\d{3,4}[\s\-]?\d{3,4})',
             r'(?<!\d)(\d{2,4}[\s\-]\d{3,4}[\s\-]\d{3,4})(?!\d)',
         ]
         
-        for pattern in phone_patterns:
+        for pattern in patterns:
             match = re.search(pattern, body_text, re.IGNORECASE)
             if match:
                 phone = match.group(1).strip()
@@ -209,7 +191,7 @@ class RMSScraper(IRMSScraper):
     async def _extract_website(self) -> Optional[str]:
         """Extract website from page links."""
         try:
-            links = await self.page.query_selector_all('a[href^="http"]')
+            links = await self._page.query_selector_all('a[href^="http"]')
             for link in links[:10]:
                 href = await link.get_attribute('href')
                 if href and 'rmscloud' not in href and 'google' not in href:
@@ -222,12 +204,12 @@ class RMSScraper(IRMSScraper):
     
     def _extract_address(self, body_text: str) -> Optional[str]:
         """Extract address from page content."""
-        address_patterns = [
+        patterns = [
             r'(?:address|location)[:\s]*([^\n]{10,100})',
             r'(\d+\s+[A-Za-z]+\s+(?:St|Street|Rd|Road|Ave|Avenue|Blvd|Boulevard|Dr|Drive)[^\n]{0,50})',
         ]
         
-        for pattern in address_patterns:
+        for pattern in patterns:
             match = re.search(pattern, body_text, re.IGNORECASE)
             if match:
                 addr = match.group(1).strip()
@@ -254,67 +236,15 @@ class RMSScraper(IRMSScraper):
         return state, country
 
 
-class ScraperPool:
-    """Manages a pool of RMS scrapers for concurrent processing."""
-    
-    def __init__(self, concurrency: int = 6):
-        self.concurrency = concurrency
-        self._playwright: Optional[Playwright] = None
-        self._browser: Optional[Browser] = None
-        self._scrapers: List[RMSScraper] = []
-        self._contexts: List[BrowserContext] = []
-    
-    async def __aenter__(self) -> "ScraperPool":
-        """Initialize browser and create scraper pool."""
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=True)
-        
-        for _ in range(self.concurrency):
-            ctx = await self._browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-            )
-            page = await ctx.new_page()
-            self._contexts.append(ctx)
-            self._scrapers.append(RMSScraper(page))
-        
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Clean up browser resources."""
-        for ctx in self._contexts:
-            await ctx.close()
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-    
-    def get_scraper(self, index: int) -> RMSScraper:
-        """Get a scraper by index (wraps around)."""
-        return self._scrapers[index % len(self._scrapers)]
-    
-    @property
-    def scrapers(self) -> List[RMSScraper]:
-        """Get all scrapers."""
-        return self._scrapers
-
-
 class MockScraper(IRMSScraper):
     """Mock scraper for unit testing."""
     
     def __init__(self, results: Optional[dict[str, ExtractedRMSData]] = None):
         """Initialize with optional URL->result mapping."""
         self._results = results or {}
-        self.calls: List[tuple[str, str]] = []
+        self.extracted_urls: List[str] = []
     
-    async def extract_from_url(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
+    async def extract(self, url: str, slug: str) -> Optional[ExtractedRMSData]:
         """Return mocked result for URL."""
-        self.calls.append((url, slug))
+        self.extracted_urls.append(url)
         return self._results.get(url)
-    
-    async def scan_id(self, id_num: int) -> Optional[ExtractedRMSData]:
-        """Return mocked result for ID."""
-        for subdomain in RMS_SUBDOMAINS:
-            url = f"https://{subdomain}.rmscloud.com/{id_num}"
-            if url in self._results:
-                return self._results[url]
-        return None

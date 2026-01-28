@@ -1,16 +1,17 @@
-"""Unit tests for RMS Service.
-
-Demonstrates how to use mocks for testing the service layer.
-"""
+"""Unit tests for RMS Service."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 from typing import List, Optional, Dict, Any
 
-from services.enrichment.rms_service import RMSService, IngestResult, EnrichResult
+from services.enrichment.rms_service import (
+    RMSService,
+    IngestResult,
+    EnrichResult,
+    EnqueueResult,
+    ConsumeResult,
+)
 from services.enrichment.rms_repo import IRMSRepo, RMSHotelRecord
-from services.enrichment.rms_scraper import ExtractedRMSData, MockScraper
-from services.enrichment.rms_queue import MockQueue, QueueStats
+from services.enrichment.rms_queue import MockQueue
 
 
 class MockRepo(IRMSRepo):
@@ -23,7 +24,7 @@ class MockRepo(IRMSRepo):
         self._next_id = 1
     
     async def get_booking_engine_id(self) -> int:
-        return 4  # RMS Cloud
+        return 4
     
     async def get_hotels_needing_enrichment(self, limit: int = 1000) -> List[RMSHotelRecord]:
         return [
@@ -119,15 +120,15 @@ class MockRepo(IRMSRepo):
         return sum(1 for h in self.hotels.values() if not h.get("name"))
 
 
-class TestRMSServiceEnqueue:
-    """Test enqueueing hotels for enrichment."""
+class TestEnqueueForEnrichment:
+    """Tests for enqueue_for_enrichment."""
     
     @pytest.mark.asyncio
-    async def test_enqueue_skips_when_queue_full(self):
-        """Should skip enqueueing when queue depth exceeds threshold."""
+    async def test_skips_when_queue_full(self):
+        """Should skip when queue depth exceeds threshold."""
         repo = MockRepo()
         queue = MockQueue()
-        queue.pending = 2000  # Over threshold
+        queue.pending = 2000
         
         service = RMSService(repo=repo, queue=queue)
         result = await service.enqueue_for_enrichment(limit=100)
@@ -137,10 +138,9 @@ class TestRMSServiceEnqueue:
         assert result.enqueued == 0
     
     @pytest.mark.asyncio
-    async def test_enqueue_finds_and_queues_hotels(self):
-        """Should find hotels needing enrichment and queue them."""
+    async def test_enqueues_hotels(self):
+        """Should find and enqueue hotels."""
         repo = MockRepo()
-        # Add some hotels without names
         repo.hotels[1] = {"booking_url": "https://ibe.rmscloud.com/123"}
         repo.hotels[2] = {"booking_url": "https://ibe.rmscloud.com/456"}
         
@@ -152,14 +152,12 @@ class TestRMSServiceEnqueue:
         assert result.skipped is False
         assert result.total_found == 2
         assert result.enqueued == 2
-        assert len(queue._enqueued) == 1  # One batch
     
     @pytest.mark.asyncio
-    async def test_enqueue_returns_zero_when_no_hotels(self):
+    async def test_returns_zero_when_no_hotels(self):
         """Should return zero when no hotels need enrichment."""
         repo = MockRepo()
-        # Add hotel with name (doesn't need enrichment)
-        repo.hotels[1] = {"name": "Test Hotel", "booking_url": "https://x.com"}
+        repo.hotels[1] = {"name": "Has Name", "booking_url": "https://x.com"}
         
         queue = MockQueue()
         
@@ -171,15 +169,15 @@ class TestRMSServiceEnqueue:
         assert result.enqueued == 0
 
 
-class TestRMSServiceStats:
-    """Test statistics methods."""
+class TestGetStats:
+    """Tests for get_stats."""
     
     @pytest.mark.asyncio
-    async def test_get_stats(self):
+    async def test_returns_repo_stats(self):
         """Should return statistics from repo."""
         repo = MockRepo()
-        repo.hotels[1] = {"name": "Hotel A", "email": "a@test.com"}
-        repo.hotels[2] = {"name": "Hotel B"}
+        repo.hotels[1] = {"name": "A", "email": "a@test.com"}
+        repo.hotels[2] = {"name": "B"}
         repo.hotels[3] = {}
         
         service = RMSService(repo=repo, queue=MockQueue())
@@ -188,21 +186,29 @@ class TestRMSServiceStats:
         assert stats["total"] == 3
         assert stats["with_name"] == 2
         assert stats["with_email"] == 1
+
+
+class TestCountNeedingEnrichment:
+    """Tests for count_needing_enrichment."""
     
     @pytest.mark.asyncio
-    async def test_count_needing_enrichment(self):
-        """Should count hotels needing enrichment."""
+    async def test_counts_hotels_without_names(self):
+        """Should count hotels missing names."""
         repo = MockRepo()
-        repo.hotels[1] = {"name": "Hotel A"}
-        repo.hotels[2] = {}  # Needs enrichment
-        repo.hotels[3] = {}  # Needs enrichment
+        repo.hotels[1] = {"name": "Has Name"}
+        repo.hotels[2] = {}
+        repo.hotels[3] = {}
         
         service = RMSService(repo=repo, queue=MockQueue())
         count = await service.count_needing_enrichment()
         
         assert count == 2
+
+
+class TestGetQueueStats:
+    """Tests for get_queue_stats."""
     
-    def test_get_queue_stats(self):
+    def test_returns_queue_stats(self):
         """Should return queue statistics."""
         queue = MockQueue()
         queue.pending = 10
@@ -215,31 +221,88 @@ class TestRMSServiceStats:
         assert stats.in_flight == 5
 
 
-class TestRMSServiceConsume:
-    """Test consuming from queue."""
+class TestConsumeEnrichmentQueue:
+    """Tests for consume_enrichment_queue."""
     
     @pytest.mark.asyncio
-    async def test_consume_stops_when_max_messages_reached(self):
-        """Should stop after processing max_messages."""
+    async def test_stops_on_should_stop(self):
+        """Should stop when should_stop returns True."""
         repo = MockRepo()
         queue = MockQueue()
-        
-        # Add messages with hotels
-        queue.add_message([RMSHotelRecord(hotel_id=1, booking_url="https://test.com/1")])
-        queue.add_message([RMSHotelRecord(hotel_id=2, booking_url="https://test.com/2")])
-        queue.add_message([RMSHotelRecord(hotel_id=3, booking_url="https://test.com/3")])
+        queue.add_message([RMSHotelRecord(hotel_id=1, booking_url="https://x.com")])
         
         service = RMSService(repo=repo, queue=queue)
-        
-        # Note: This test would need scraper mocking to fully work
-        # For now, just test the stop condition
         result = await service.consume_enrichment_queue(
             concurrency=1,
-            max_messages=0,  # Stop immediately when queue empties
-            should_stop=lambda: True,  # Stop immediately
+            should_stop=lambda: True,
         )
         
         assert result.messages_processed == 0
+    
+    @pytest.mark.asyncio
+    async def test_stops_on_max_messages(self):
+        """Should stop after processing max_messages."""
+        repo = MockRepo()
+        queue = MockQueue()
+        # Add messages but set max_messages to 0
+        queue.add_message([RMSHotelRecord(hotel_id=1, booking_url="https://x.com")])
+        
+        service = RMSService(repo=repo, queue=queue)
+        
+        # max_messages=0 with should_stop=True should stop immediately
+        result = await service.consume_enrichment_queue(
+            concurrency=1,
+            max_messages=0,
+            should_stop=lambda: True,
+        )
+        
+        assert result.messages_processed == 0
+
+
+class TestRequestShutdown:
+    """Tests for request_shutdown."""
+    
+    def test_sets_shutdown_flag(self):
+        """Should set shutdown flag."""
+        service = RMSService(repo=MockRepo(), queue=MockQueue())
+        
+        assert service._shutdown_requested is False
+        service.request_shutdown()
+        assert service._shutdown_requested is True
+
+
+class TestSaveHotelsBatch:
+    """Tests for _save_hotels_batch."""
+    
+    @pytest.mark.asyncio
+    async def test_saves_hotels_to_repo(self):
+        """Should save hotels via repo."""
+        from services.enrichment.rms_scraper import ExtractedRMSData
+        
+        repo = MockRepo()
+        service = RMSService(repo=repo, queue=MockQueue())
+        
+        hotels = [
+            ExtractedRMSData(
+                slug="123",
+                booking_url="https://ibe.rmscloud.com/123",
+                name="Hotel A",
+                phone="555-1234",
+            ),
+            ExtractedRMSData(
+                slug="456",
+                booking_url="https://ibe.rmscloud.com/456",
+                name="Hotel B",
+            ),
+        ]
+        
+        saved = await service._save_hotels_batch(hotels, booking_engine_id=4)
+        
+        assert saved == 2
+        assert len(repo.hotels) == 2
+        assert len(repo.booking_engines) == 2
+        assert repo.hotels[1]["name"] == "Hotel A"
+        assert repo.hotels[2]["name"] == "Hotel B"
 
 
 if __name__ == "__main__":

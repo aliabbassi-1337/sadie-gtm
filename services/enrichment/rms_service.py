@@ -1,22 +1,20 @@
 """RMS Booking Engine Service.
 
-Service layer for RMS hotel discovery and enrichment.
-Uses dependency injection for repo, scraper, and queue - enabling unit tests.
+Orchestrates RMS hotel discovery and enrichment.
+Uses dependency injection for repo, scanner, scraper, and queue.
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Callable
 import asyncio
 
 from loguru import logger
+from playwright.async_api import async_playwright, BrowserContext, Browser
 
 from services.enrichment.rms_repo import IRMSRepo, RMSRepo, RMSHotelRecord
-from services.enrichment.rms_scraper import (
-    IRMSScraper,
-    ScraperPool,
-    ExtractedRMSData,
-)
+from services.enrichment.rms_scanner import IRMSScanner, RMSScanner, ScannedURL
+from services.enrichment.rms_scraper import IRMSScraper, RMSScraper, ExtractedRMSData
 from services.enrichment.rms_queue import IRMSQueue, RMSQueue, QueueStats
 
 
@@ -61,11 +59,7 @@ class ConsumeResult:
 
 
 class IRMSService(ABC):
-    """Interface for RMS Service.
-    
-    Provides methods for discovering and enriching RMS hotels.
-    All methods are designed to be easily unit tested via mocks.
-    """
+    """Interface for RMS Service."""
     
     @abstractmethod
     async def ingest_from_id_range(
@@ -75,17 +69,7 @@ class IRMSService(ABC):
         concurrency: int = 6,
         dry_run: bool = False,
     ) -> IngestResult:
-        """Scan RMS IDs and ingest discovered hotels to database.
-        
-        Args:
-            start_id: Starting ID to scan
-            end_id: Ending ID to scan (exclusive)
-            concurrency: Number of concurrent scrapers
-            dry_run: If True, don't save to database
-            
-        Returns:
-            IngestResult with scan statistics
-        """
+        """Scan RMS IDs and ingest discovered hotels."""
         pass
     
     @abstractmethod
@@ -94,15 +78,7 @@ class IRMSService(ABC):
         hotels: List[RMSHotelRecord],
         concurrency: int = 6,
     ) -> EnrichResult:
-        """Enrich a list of RMS hotels by scraping their booking pages.
-        
-        Args:
-            hotels: List of hotel records with booking URLs
-            concurrency: Number of concurrent scrapers
-            
-        Returns:
-            EnrichResult with enrichment statistics
-        """
+        """Enrich hotels by scraping their booking pages."""
         pass
     
     @abstractmethod
@@ -111,15 +87,7 @@ class IRMSService(ABC):
         limit: int = 5000,
         batch_size: int = 10,
     ) -> EnqueueResult:
-        """Find hotels needing enrichment and enqueue them.
-        
-        Args:
-            limit: Maximum hotels to enqueue
-            batch_size: Hotels per queue message
-            
-        Returns:
-            EnqueueResult with enqueue statistics
-        """
+        """Find and enqueue hotels needing enrichment."""
         pass
     
     @abstractmethod
@@ -129,21 +97,12 @@ class IRMSService(ABC):
         max_messages: int = 0,
         should_stop: Optional[Callable[[], bool]] = None,
     ) -> ConsumeResult:
-        """Consume and process messages from enrichment queue.
-        
-        Args:
-            concurrency: Number of concurrent scrapers
-            max_messages: Max messages to process (0 = infinite)
-            should_stop: Callback to check if should stop
-            
-        Returns:
-            ConsumeResult with consumption statistics
-        """
+        """Consume and process enrichment queue."""
         pass
     
     @abstractmethod
     async def get_hotels_needing_enrichment(self, limit: int = 1000) -> List[RMSHotelRecord]:
-        """Get RMS hotels that need enrichment."""
+        """Get hotels needing enrichment."""
         pass
     
     @abstractmethod
@@ -153,7 +112,7 @@ class IRMSService(ABC):
     
     @abstractmethod
     async def count_needing_enrichment(self) -> int:
-        """Count RMS hotels needing enrichment."""
+        """Count hotels needing enrichment."""
         pass
     
     @abstractmethod
@@ -163,19 +122,13 @@ class IRMSService(ABC):
 
 
 class RMSService(IRMSService):
-    """Implementation of RMS Service with dependency injection."""
+    """Implementation of RMS Service."""
     
     def __init__(
         self,
         repo: Optional[IRMSRepo] = None,
         queue: Optional[IRMSQueue] = None,
     ):
-        """Initialize with optional dependencies.
-        
-        Args:
-            repo: Repository for database operations (default: RMSRepo)
-            queue: Queue for message operations (default: RMSQueue)
-        """
         self._repo = repo or RMSRepo()
         self._queue = queue or RMSQueue()
         self._shutdown_requested = False
@@ -186,7 +139,7 @@ class RMSService(IRMSService):
         logger.info("Shutdown requested")
     
     # =========================================================================
-    # Ingestion (scan IDs to discover hotels)
+    # Ingestion
     # =========================================================================
     
     async def ingest_from_id_range(
@@ -196,7 +149,7 @@ class RMSService(IRMSService):
         concurrency: int = 6,
         dry_run: bool = False,
     ) -> IngestResult:
-        """Scan RMS IDs and ingest discovered hotels to database."""
+        """Scan RMS IDs and ingest discovered hotels."""
         
         booking_engine_id = await self._repo.get_booking_engine_id()
         logger.info(f"RMS Cloud booking engine ID: {booking_engine_id}")
@@ -206,22 +159,43 @@ class RMSService(IRMSService):
         total_scanned = 0
         consecutive_failures = 0
         
-        async with ScraperPool(concurrency) as pool:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            
+            # Create scanner/scraper pairs
+            contexts: List[BrowserContext] = []
+            scanners: List[RMSScanner] = []
+            scrapers: List[RMSScraper] = []
+            
+            for _ in range(concurrency):
+                ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                )
+                page = await ctx.new_page()
+                contexts.append(ctx)
+                scanners.append(RMSScanner(page))
+                scrapers.append(RMSScraper(page))
+            
             semaphore = asyncio.Semaphore(concurrency)
             
-            async def scan_id(id_num: int, scraper_idx: int) -> Optional[ExtractedRMSData]:
+            async def scan_and_extract(id_num: int, idx: int) -> Optional[ExtractedRMSData]:
                 nonlocal consecutive_failures
                 
                 async with semaphore:
-                    scraper = pool.get_scraper(scraper_idx)
-                    data = await scraper.scan_id(id_num)
+                    scanner = scanners[idx % len(scanners)]
+                    scraper = scrapers[idx % len(scrapers)]
                     
-                    if data:
-                        consecutive_failures = 0
-                        return data
+                    # Scan for valid URL
+                    scanned = await scanner.scan_id(id_num)
+                    if not scanned:
+                        consecutive_failures += 1
+                        return None
                     
-                    consecutive_failures += 1
-                    return None
+                    consecutive_failures = 0
+                    
+                    # Extract data
+                    data = await scraper.extract(scanned.url, scanned.slug)
+                    return data
             
             # Process in batches
             batch_size = concurrency * 2
@@ -231,21 +205,19 @@ class RMSService(IRMSService):
                 
                 batch_end = min(batch_start + batch_size, end_id)
                 
-                # Run batch
                 tasks = [
-                    scan_id(id_num, i) 
+                    scan_and_extract(id_num, i) 
                     for i, id_num in enumerate(range(batch_start, batch_end))
                 ]
                 results = await asyncio.gather(*tasks)
                 total_scanned += len(tasks)
                 
-                # Collect found hotels
                 for hotel in results:
                     if hotel:
                         found_hotels.append(hotel)
                         logger.success(f"Found: {hotel.name} ({hotel.booking_url})")
                 
-                # Save batch to DB
+                # Save batch
                 if len(found_hotels) >= BATCH_SAVE_SIZE and not dry_run:
                     saved = await self._save_hotels_batch(found_hotels, booking_engine_id)
                     total_saved += saved
@@ -256,17 +228,21 @@ class RMSService(IRMSService):
                 progress = (batch_end - start_id) / (end_id - start_id) * 100
                 logger.info(f"Progress: {progress:.1f}% - Found: {total_saved + len(found_hotels)}")
                 
-                # Check for sparse region
                 if consecutive_failures > MAX_CONSECUTIVE_FAILURES:
-                    logger.warning(f"Many failures at {batch_end}, region may be sparse")
+                    logger.warning(f"Sparse region at {batch_end}")
                     consecutive_failures = 0
                 
                 await asyncio.sleep(0.5)
             
-            # Save remaining hotels
+            # Save remaining
             if found_hotels and not dry_run:
                 saved = await self._save_hotels_batch(found_hotels, booking_engine_id)
                 total_saved += saved
+            
+            # Cleanup
+            for ctx in contexts:
+                await ctx.close()
+            await browser.close()
         
         return IngestResult(
             total_scanned=total_scanned,
@@ -279,7 +255,7 @@ class RMSService(IRMSService):
         hotels: List[ExtractedRMSData],
         booking_engine_id: int,
     ) -> int:
-        """Save a batch of hotels to the database."""
+        """Save a batch of hotels."""
         saved = 0
         
         for hotel in hotels:
@@ -307,12 +283,12 @@ class RMSService(IRMSService):
                     saved += 1
                     
             except Exception as e:
-                logger.error(f"Error saving hotel {hotel.name}: {e}")
+                logger.error(f"Error saving {hotel.name}: {e}")
         
         return saved
     
     # =========================================================================
-    # Enrichment (scrape existing hotels)
+    # Enrichment
     # =========================================================================
     
     async def enrich_hotels(
@@ -320,27 +296,38 @@ class RMSService(IRMSService):
         hotels: List[RMSHotelRecord],
         concurrency: int = 6,
     ) -> EnrichResult:
-        """Enrich a list of RMS hotels by scraping their booking pages."""
+        """Enrich hotels by scraping their booking pages."""
         
         processed = 0
         enriched = 0
         failed = 0
         
-        async with ScraperPool(concurrency) as pool:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            
+            contexts: List[BrowserContext] = []
+            scrapers: List[RMSScraper] = []
+            
+            for _ in range(concurrency):
+                ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                )
+                page = await ctx.new_page()
+                contexts.append(ctx)
+                scrapers.append(RMSScraper(page))
+            
             semaphore = asyncio.Semaphore(concurrency)
             
-            async def enrich_hotel(hotel: RMSHotelRecord, scraper_idx: int) -> tuple[bool, bool]:
-                """Returns (processed, enriched)"""
+            async def enrich_one(hotel: RMSHotelRecord, idx: int) -> tuple[bool, bool]:
                 async with semaphore:
-                    scraper = pool.get_scraper(scraper_idx)
+                    scraper = scrapers[idx % len(scrapers)]
                     
                     url = hotel.booking_url
                     if not url.startswith("http"):
                         url = f"https://{url}"
                     
                     slug = url.split("/")[-1]
-                    
-                    data = await scraper.extract_from_url(url, slug)
+                    data = await scraper.extract(url, slug)
                     
                     if data and data.has_data():
                         await self._repo.update_hotel(
@@ -355,16 +342,13 @@ class RMSService(IRMSService):
                             website=data.website,
                         )
                         await self._repo.update_enrichment_status(hotel.booking_url, "enriched")
-                        logger.info(f"Enriched hotel {hotel.hotel_id}: {data.name}")
+                        logger.info(f"Enriched {hotel.hotel_id}: {data.name}")
                         return (True, True)
                     else:
                         await self._repo.update_enrichment_status(hotel.booking_url, "no_data")
                         return (True, False)
             
-            tasks = [
-                enrich_hotel(hotel, i)
-                for i, hotel in enumerate(hotels)
-            ]
+            tasks = [enrich_one(h, i) for i, h in enumerate(hotels)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for result in results:
@@ -377,11 +361,15 @@ class RMSService(IRMSService):
                     enriched += 1 if e else 0
                     if p and not e:
                         failed += 1
+            
+            for ctx in contexts:
+                await ctx.close()
+            await browser.close()
         
         return EnrichResult(processed=processed, enriched=enriched, failed=failed)
     
     # =========================================================================
-    # Queue operations
+    # Queue Operations
     # =========================================================================
     
     async def enqueue_for_enrichment(
@@ -389,14 +377,12 @@ class RMSService(IRMSService):
         limit: int = 5000,
         batch_size: int = 10,
     ) -> EnqueueResult:
-        """Find hotels needing enrichment and enqueue them."""
+        """Find and enqueue hotels needing enrichment."""
         
-        # Check queue depth
         stats = self._queue.get_stats()
-        logger.info(f"Current queue: {stats.pending} pending, {stats.in_flight} in flight")
+        logger.info(f"Queue: {stats.pending} pending, {stats.in_flight} in flight")
         
         if stats.pending > MAX_QUEUE_DEPTH:
-            logger.warning(f"Queue already has {stats.pending} messages, skipping")
             return EnqueueResult(
                 total_found=0,
                 enqueued=0,
@@ -404,26 +390,16 @@ class RMSService(IRMSService):
                 reason=f"Queue depth exceeds {MAX_QUEUE_DEPTH}",
             )
         
-        # Get hotels needing enrichment
         hotels = await self._repo.get_hotels_needing_enrichment(limit)
-        logger.info(f"Found {len(hotels)} RMS hotels needing enrichment")
+        logger.info(f"Found {len(hotels)} hotels needing enrichment")
         
         if not hotels:
-            return EnqueueResult(
-                total_found=0,
-                enqueued=0,
-                skipped=False,
-            )
+            return EnqueueResult(total_found=0, enqueued=0, skipped=False)
         
-        # Enqueue
         enqueued = self._queue.enqueue_hotels(hotels, batch_size)
         logger.success(f"Enqueued {enqueued} hotels")
         
-        return EnqueueResult(
-            total_found=len(hotels),
-            enqueued=enqueued,
-            skipped=False,
-        )
+        return EnqueueResult(total_found=len(hotels), enqueued=enqueued, skipped=False)
     
     async def consume_enrichment_queue(
         self,
@@ -431,7 +407,7 @@ class RMSService(IRMSService):
         max_messages: int = 0,
         should_stop: Optional[Callable[[], bool]] = None,
     ) -> ConsumeResult:
-        """Consume and process messages from enrichment queue."""
+        """Consume and process enrichment queue."""
         
         messages_processed = 0
         hotels_processed = 0
@@ -443,28 +419,23 @@ class RMSService(IRMSService):
         logger.info(f"Starting consumer (concurrency={concurrency})")
         
         while not should_stop():
-            # Check for max messages limit
             if max_messages > 0 and messages_processed >= max_messages:
                 break
             
-            # Check queue
             stats = self._queue.get_stats()
             if stats.pending == 0 and stats.in_flight == 0:
                 if max_messages > 0:
-                    break  # Finite mode, queue empty
+                    break
                 logger.info("Queue empty, waiting...")
                 await asyncio.sleep(30)
                 continue
             
-            # Receive messages
             messages = self._queue.receive_messages(min(concurrency, 10))
-            
             if not messages:
                 continue
             
-            logger.info(f"Processing {len(messages)} messages ({stats.pending} pending)")
+            logger.info(f"Processing {len(messages)} messages")
             
-            # Process each message
             for msg in messages:
                 if should_stop():
                     break
@@ -481,13 +452,10 @@ class RMSService(IRMSService):
                     self._queue.delete_message(msg.receipt_handle)
                     messages_processed += 1
                 except Exception as e:
-                    logger.error(f"Message processing error: {e}")
+                    logger.error(f"Error: {e}")
                     hotels_failed += len(msg.hotels)
             
-            logger.info(
-                f"Progress: {hotels_processed} processed, "
-                f"{hotels_enriched} enriched, {hotels_failed} failed"
-            )
+            logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched")
         
         return ConsumeResult(
             messages_processed=messages_processed,
@@ -497,21 +465,17 @@ class RMSService(IRMSService):
         )
     
     # =========================================================================
-    # Query methods
+    # Query Methods
     # =========================================================================
     
     async def get_hotels_needing_enrichment(self, limit: int = 1000) -> List[RMSHotelRecord]:
-        """Get RMS hotels that need enrichment."""
         return await self._repo.get_hotels_needing_enrichment(limit)
     
     async def get_stats(self) -> Dict[str, int]:
-        """Get RMS hotel statistics."""
         return await self._repo.get_stats()
     
     async def count_needing_enrichment(self) -> int:
-        """Count RMS hotels needing enrichment."""
         return await self._repo.count_needing_enrichment()
     
     def get_queue_stats(self) -> QueueStats:
-        """Get queue statistics."""
         return self._queue.get_stats()
