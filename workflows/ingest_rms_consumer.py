@@ -85,10 +85,10 @@ class IngestConsumer:
                     )
                     
                     stats["ranges_processed"] += 1
-                    stats["hotels_found"] += result.found
-                    stats["hotels_saved"] += result.saved
+                    stats["hotels_found"] += result.hotels_found
+                    stats["hotels_saved"] += result.hotels_saved
                     
-                    logger.success(f"Completed range {start_id}-{end_id}: found={result.found}, saved={result.saved}")
+                    logger.success(f"Completed range {start_id}-{end_id}: found={result.hotels_found}, saved={result.hotels_saved}")
                     
                     # Delete message on success
                     self.sqs.delete_message(
