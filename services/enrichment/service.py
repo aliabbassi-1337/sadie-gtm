@@ -1367,6 +1367,10 @@ class Service(IService):
 
             async def enrich_one(hotel: RMSHotelRecord, idx: int) -> tuple[bool, bool]:
                 async with semaphore:
+                    # Rate limit: stagger requests to avoid hammering RMS servers
+                    # With 6 concurrent + 1s delay, we get ~6 requests per 6-7 seconds
+                    await asyncio.sleep(idx % concurrency)  # Stagger initial requests
+                    
                     scraper = scrapers[idx % len(scrapers)]
                     url = hotel.booking_url if hotel.booking_url.startswith("http") else f"https://{hotel.booking_url}"
                     slug = url.split("/")[-1]
