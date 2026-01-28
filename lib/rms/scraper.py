@@ -17,16 +17,35 @@ from lib.rms.utils import decode_cloudflare_email, normalize_country
 SCRAPE_TIMEOUT = 20000
 
 
-def convert_to_bookings_url(url: str) -> str:
-    """Convert ibe12/ibe13 URLs to bookings format that shows hotel names.
+def extract_rms_id(url: str) -> Optional[str]:
+    """Extract numeric ID from any RMS URL format.
     
-    ibe12.rmscloud.com/{id} -> bookings.rmscloud.com/Search/Index/{id}/90/
-    ibe13.rmscloud.com/{id} -> bookings.rmscloud.com/Search/Index/{id}/90/
+    Handles:
+    - ibe12.rmscloud.com/{id}
+    - ibe13.rmscloud.com/{id}
+    - bookings.rmscloud.com/Search/Index/{id}/...
+    - bookings{N}.rmscloud.com/Search/Index/{id}/...
+    - bookings.rmscloud.com/obookings3/Search/Index/{id}/...
     """
-    # Match ibe12 or ibe13 format
-    match = re.match(r'https?://ibe1[23]\.rmscloud\.com/(\d+)/?', url)
-    if match:
-        id_num = match.group(1)
+    patterns = [
+        r'ibe1[234]\.rmscloud\.com/(\d+)',  # ibe12, ibe13, ibe14
+        r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/(\d+)',  # bookings format
+        r'rmscloud\.com/.*?/(\d+)/?',  # fallback - any numeric ID in path
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def convert_to_bookings_url(url: str) -> str:
+    """Convert any RMS URL to bookings format that shows hotel names.
+    
+    All formats -> bookings.rmscloud.com/Search/Index/{id}/90/
+    """
+    id_num = extract_rms_id(url)
+    if id_num:
         return f"https://bookings.rmscloud.com/Search/Index/{id_num}/90/"
     return url
 
