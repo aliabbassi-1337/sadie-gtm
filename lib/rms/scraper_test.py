@@ -1,0 +1,186 @@
+"""Tests for RMS Scraper."""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+
+from lib.rms.scraper import RMSScraper
+from lib.rms.models import ExtractedRMSData
+
+
+class TestRMSScraperExtractName:
+    """Tests for name extraction logic."""
+    
+    @pytest.fixture
+    def mock_page(self):
+        """Create mock Playwright page."""
+        page = AsyncMock()
+        page.query_selector = AsyncMock(return_value=None)
+        page.title = AsyncMock(return_value="Online Bookings")
+        return page
+    
+    @pytest.fixture
+    def scraper(self, mock_page):
+        """Create scraper with mock page."""
+        return RMSScraper(mock_page)
+    
+    @pytest.mark.asyncio
+    async def test_extracts_name_from_first_body_line(self, scraper):
+        """Should extract hotel name from first non-garbage line of body text."""
+        body_text = "By the Bay\nCart\n(0)\nBook your accommodation"
+        
+        name = await scraper._extract_name(body_text)
+        
+        assert name == "By the Bay"
+    
+    @pytest.mark.asyncio
+    async def test_skips_garbage_names(self, scraper):
+        """Should skip garbage names like Cart, Search, etc."""
+        body_text = "Cart\n(0)\nBook your accommodation\nReal Hotel Name"
+        
+        name = await scraper._extract_name(body_text)
+        
+        assert name == "Real Hotel Name"
+    
+    @pytest.mark.asyncio
+    async def test_skips_error_messages(self, scraper):
+        """Should skip error message lines."""
+        body_text = "Error\nLooks like we're having some application issues.\n1/28/2026 7:30:26 PM"
+        
+        name = await scraper._extract_name(body_text)
+        
+        assert name is None
+    
+    @pytest.mark.asyncio
+    async def test_skips_dates(self, scraper):
+        """Should skip date/timestamp lines."""
+        body_text = "1/28/2026 7:30:26 PM\nV 5.25.345.4\nReal Hotel"
+        
+        name = await scraper._extract_name(body_text)
+        
+        assert name == "Real Hotel"
+    
+    @pytest.mark.asyncio
+    async def test_skips_version_strings(self, scraper):
+        """Should skip version strings."""
+        body_text = "V 5.25.345.4\nReal Hotel"
+        
+        name = await scraper._extract_name(body_text)
+        
+        assert name == "Real Hotel"
+
+
+class TestRMSScraperIsValid:
+    """Tests for page validation."""
+    
+    @pytest.fixture
+    def scraper(self):
+        """Create scraper with mock page."""
+        return RMSScraper(AsyncMock())
+    
+    def test_rejects_error_pages(self, scraper):
+        """Should reject pages with application issues."""
+        content = "<html>Error page</html>"
+        body_text = "Error\nLooks like we're having some application issues."
+        
+        assert scraper._is_valid(content, body_text) is False
+    
+    def test_rejects_404_pages(self, scraper):
+        """Should reject 404 pages."""
+        content = "<html>404 Page Not Found</html>"
+        body_text = "Page not found"
+        
+        assert scraper._is_valid(content, body_text) is False
+    
+    def test_rejects_short_content(self, scraper):
+        """Should reject pages with very little content."""
+        content = "<html></html>"
+        body_text = "Short"
+        
+        assert scraper._is_valid(content, body_text) is False
+    
+    def test_accepts_valid_pages(self, scraper):
+        """Should accept pages with sufficient content."""
+        content = "<html>Valid booking page content</html>"
+        body_text = "By the Bay\nCart\n(0)\nBook your accommodation\nDates\n" * 20
+        
+        assert scraper._is_valid(content, body_text) is True
+
+
+class TestRMSScraperExtractPhone:
+    """Tests for phone extraction."""
+    
+    @pytest.fixture
+    def scraper(self):
+        return RMSScraper(AsyncMock())
+    
+    def test_extracts_phone_with_label(self, scraper):
+        """Should extract phone number with tel/phone label."""
+        body_text = "Contact us\nPhone: +1 (555) 123-4567\nEmail: test@test.com"
+        
+        phone = scraper._extract_phone(body_text)
+        
+        assert phone is not None
+        assert "555" in phone
+    
+    def test_extracts_international_phone(self, scraper):
+        """Should extract international phone numbers with label."""
+        body_text = "Tel: +61 2 9876 5432"
+        
+        phone = scraper._extract_phone(body_text)
+        
+        assert phone is not None
+
+
+class TestRMSScraperExtractEmail:
+    """Tests for email extraction."""
+    
+    @pytest.fixture
+    def scraper(self):
+        return RMSScraper(AsyncMock())
+    
+    def test_extracts_email(self, scraper):
+        """Should extract email addresses."""
+        content = "<html></html>"
+        body_text = "Contact: info@grandhotel.com"
+        
+        email = scraper._extract_email(content, body_text)
+        
+        assert email == "info@grandhotel.com"
+    
+    def test_ignores_rmscloud_emails(self, scraper):
+        """Should ignore RMS system emails."""
+        content = "<html></html>"
+        body_text = "noreply@rmscloud.com"
+        
+        email = scraper._extract_email(content, body_text)
+        
+        assert email is None
+
+
+@pytest.mark.online
+class TestRMSScraperIntegration:
+    """Integration tests that hit real RMS pages."""
+    
+    @pytest.mark.asyncio
+    async def test_extracts_from_real_page(self):
+        """Should extract data from a real RMS booking page."""
+        from playwright.async_api import async_playwright
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            scraper = RMSScraper(page)
+            
+            # Known working RMS page
+            url = "https://bookings13.rmscloud.com/Search/Index/13308/90/"
+            data = await scraper.extract(url, "13308")
+            
+            await browser.close()
+        
+        assert data is not None
+        assert data.name == "By the Bay"
+        assert data.has_data() is True
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
