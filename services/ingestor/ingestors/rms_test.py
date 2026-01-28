@@ -3,7 +3,8 @@
 import pytest
 
 from services.ingestor.ingestors.rms import RMSIngestor, RMSIngestResult
-from lib.rms import ExtractedRMSData, RMSRepo
+from services.ingestor.rms_repo import RMSRepo
+from lib.rms import ExtractedRMSData
 
 
 @pytest.fixture

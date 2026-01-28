@@ -3,7 +3,9 @@
 import pytest
 
 from services.enrichment.service import Service, EnrichResult, EnqueueResult, ConsumeResult
-from lib.rms import RMSHotelRecord, QueueStats, RMSRepo, MockQueue
+from services.enrichment.rms_repo import RMSRepo
+from services.enrichment.rms_queue import MockQueue
+from lib.rms import RMSHotelRecord, QueueStats
 
 
 @pytest.fixture

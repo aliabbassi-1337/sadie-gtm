@@ -2,7 +2,7 @@
 RMS Cloud Booking Engine Ingestor
 
 Scans RMS booking engine IDs to discover valid hotels.
-Uses shared lib/rms for scanner, scraper, and repo.
+Uses lib/rms for scanner/scraper, local rms_repo.py for DB operations.
 """
 
 import asyncio
@@ -14,7 +14,8 @@ from playwright.async_api import async_playwright, BrowserContext
 from playwright_stealth import Stealth
 
 from services.ingestor.registry import register
-from lib.rms import RMSScanner, RMSScraper, RMSRepo, ExtractedRMSData
+from services.ingestor.rms_repo import RMSRepo
+from lib.rms import RMSScanner, RMSScraper, ExtractedRMSData
 
 
 # =============================================================================

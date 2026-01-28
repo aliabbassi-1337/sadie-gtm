@@ -1,7 +1,7 @@
 """RMS shared library.
 
 Shared code for RMS booking engine operations.
-Can be imported by any service.
+Models, scanner, scraper, utils only - NO repo/queue (those are service-specific).
 """
 
 from lib.rms.models import (
@@ -13,8 +13,6 @@ from lib.rms.models import (
 )
 from lib.rms.scanner import RMSScanner, IRMSScanner
 from lib.rms.scraper import RMSScraper, IRMSScraper
-from lib.rms.repo import RMSRepo
-from lib.rms.queue import RMSQueue, MockQueue
 from lib.rms.utils import decode_cloudflare_email, normalize_country
 
 __all__ = [
@@ -30,11 +28,6 @@ __all__ = [
     # Scraper
     "RMSScraper",
     "IRMSScraper",
-    # Repo
-    "RMSRepo",
-    # Queue
-    "RMSQueue",
-    "MockQueue",
     # Utils
     "decode_cloudflare_email",
     "normalize_country",

@@ -1,8 +1,8 @@
-"""RMS Queue - SQS operations for RMS."""
+"""RMS Queue - SQS operations for RMS enrichment."""
 
 from typing import Optional, List
 
-from lib.rms.models import RMSHotelRecord, QueueStats, QueueMessage
+from lib.rms import RMSHotelRecord, QueueStats, QueueMessage
 from infra.sqs import (
     send_message,
     receive_messages,

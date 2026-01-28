@@ -1,7 +1,7 @@
 """
 Enrichment Service - Enrich hotel data.
 
-Uses lib.rms for shared RMS code.
+Uses lib.rms for shared code, local rms_repo.py and rms_queue.py for service-specific code.
 """
 
 from abc import ABC, abstractmethod
@@ -27,15 +27,9 @@ from services.enrichment.customer_proximity import (
     log as proximity_log,
 )
 from services.enrichment.website_enricher import WebsiteEnricher
-from lib.rms import (
-    RMSScraper,
-    RMSHotelRecord,
-    QueueStats,
-    QueueMessage,
-    RMSRepo,
-    RMSQueue,
-    MockQueue,
-)
+from services.enrichment.rms_repo import RMSRepo
+from services.enrichment.rms_queue import RMSQueue, MockQueue
+from lib.rms import RMSScraper, RMSHotelRecord, QueueStats
 
 load_dotenv()
 
