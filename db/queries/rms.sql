@@ -6,7 +6,7 @@
 SELECT id FROM sadie_gtm.booking_engines WHERE name = 'RMS Cloud';
 
 -- name: get_rms_hotels_needing_enrichment
--- Get RMS hotels that need enrichment (missing name, address, etc.)
+-- Get RMS hotels that need enrichment (missing or garbage name, address, etc.)
 -- Uses booking_engine_id for filtering (more efficient than name)
 SELECT 
     h.id AS hotel_id,
@@ -18,16 +18,12 @@ WHERE hbe.booking_engine_id = :booking_engine_id
   AND (
       h.name IS NULL 
       OR h.name = '' 
+      OR h.name LIKE 'Unknown%'
       OR h.name LIKE '%rmscloud%'
       OR h.city IS NULL 
       OR h.city = ''
       OR h.state IS NULL
       OR h.state = ''
-  )
-  AND (
-      hbe.enrichment_status IS NULL 
-      OR hbe.enrichment_status NOT IN ('dead', 'enriched')
-      OR (hbe.enrichment_status = 'no_data' AND hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
   )
 ORDER BY hbe.last_enrichment_attempt ASC NULLS FIRST
 LIMIT :limit;
