@@ -2,14 +2,13 @@
 
 import pytest
 
-from services.ingestor.ingestors.rms import RMSIngestor, RMSIngestResult
-from services.rms import RMSRepo, ExtractedRMSData
+from services.ingestor.ingestors.rms import RMSIngestor, RMSIngestResult, RMSRepo, ExtractedData
 
 
 @pytest.fixture
 async def ingestor():
-    """Create ingestor with real repo."""
-    return RMSIngestor(repo=RMSRepo())
+    """Create ingestor."""
+    return RMSIngestor()
 
 
 @pytest.mark.no_db
@@ -50,7 +49,7 @@ class TestRMSIngestorSaveBatch:
         unique_id = str(uuid.uuid4())[:8]
         
         hotels = [
-            ExtractedRMSData(
+            ExtractedData(
                 slug=f"ingest_test_{unique_id}",
                 booking_url=f"https://ibe.rmscloud.com/ingest_test_{unique_id}",
                 name=f"Ingestor Test Hotel {unique_id}",

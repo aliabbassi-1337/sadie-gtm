@@ -2,8 +2,7 @@
 
 import pytest
 
-from services.enrichment.service import Service, EnrichResult, EnqueueResult, ConsumeResult
-from services.rms import RMSRepo, MockQueue
+from services.enrichment.service import Service, EnrichResult, EnqueueResult, ConsumeResult, RMSRepo, MockQueue
 
 
 @pytest.fixture
