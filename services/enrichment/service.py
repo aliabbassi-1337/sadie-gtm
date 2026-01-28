@@ -28,7 +28,7 @@ from services.enrichment.customer_proximity import (
 )
 from services.enrichment.website_enricher import WebsiteEnricher
 from services.enrichment.rms_repo import RMSRepo
-from services.enrichment.queue import RMSQueue, MockQueue
+from services.enrichment.rms_queue import RMSQueue, MockQueue
 from lib.rms import RMSScraper, RMSHotelRecord, QueueStats
 
 load_dotenv()
