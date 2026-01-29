@@ -103,7 +103,7 @@ def main():
     parser.add_argument("--status", action="store_true", help="Show enrichment status")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be enriched")
     parser.add_argument("--limit", type=int, default=100, help="Max hotels to process")
-    parser.add_argument("--concurrency", type=int, default=3, help="Concurrent browser contexts")
+    parser.add_argument("--concurrency", type=int, default=6, help="Concurrent browser contexts")
     
     args = parser.parse_args()
     

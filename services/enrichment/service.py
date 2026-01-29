@@ -526,7 +526,7 @@ class IService(ABC):
 
     # Cloudbeds Enrichment
     @abstractmethod
-    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 3) -> EnrichResult:
+    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6) -> EnrichResult:
         """Enrich Cloudbeds hotels by scraping their booking pages."""
         pass
 
@@ -1509,7 +1509,7 @@ class Service(IService):
     # Cloudbeds Enrichment
     # =========================================================================
 
-    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 3) -> EnrichResult:
+    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6) -> EnrichResult:
         """Enrich Cloudbeds hotels by scraping their booking pages."""
         from lib.browser import BrowserPool
         from lib.cloudbeds import CloudbedsScraper

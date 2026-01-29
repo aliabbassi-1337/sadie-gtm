@@ -72,7 +72,7 @@ async def run_consumer(concurrency: int = 5):
 
 def main():
     parser = argparse.ArgumentParser(description="Cloudbeds enrichment consumer")
-    parser.add_argument("--concurrency", type=int, default=5, help="Concurrent browser contexts")
+    parser.add_argument("--concurrency", type=int, default=6, help="Concurrent browser contexts")
 
     args = parser.parse_args()
     asyncio.run(run_consumer(concurrency=args.concurrency))
