@@ -117,9 +117,8 @@ SELECT
     COUNT(CASE WHEN h.city IS NOT NULL AND h.city != '' THEN 1 END) AS with_city,
     COUNT(CASE WHEN h.email IS NOT NULL AND h.email != '' THEN 1 END) AS with_email,
     COUNT(CASE WHEN h.phone_website IS NOT NULL AND h.phone_website != '' THEN 1 END) AS with_phone,
-    COUNT(CASE WHEN hbe.enrichment_status = 'enriched' THEN 1 END) AS enriched,
-    COUNT(CASE WHEN hbe.enrichment_status = 'no_data' THEN 1 END) AS no_data,
-    COUNT(CASE WHEN hbe.enrichment_status = 'dead' THEN 1 END) AS dead
+    COUNT(CASE WHEN hbe.enrichment_status = 1 THEN 1 END) AS enriched,
+    COUNT(CASE WHEN hbe.enrichment_status = -1 THEN 1 END) AS failed
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
 WHERE hbe.booking_engine_id = :booking_engine_id;

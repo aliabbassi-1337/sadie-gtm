@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mark non-hotel businesses in the database with status=-4.
+Mark non-hotel businesses in the database with status=-1 (error).
 
 Uses the same filtering logic as the scraper/detector to identify
 restaurants, stores, and other non-hotel businesses that slipped through.
@@ -77,7 +77,7 @@ NON_HOTEL_KEYWORDS = [
 
 
 async def mark_non_hotels(dry_run: bool = True, batch_size: int = 1000) -> int:
-    """Mark non-hotel businesses with status=-4."""
+    """Mark non-hotel businesses with status=-1 (error)."""
     pool = await init_db()
     
     # Build LIKE conditions for each keyword (escape apostrophes for SQL)
@@ -90,7 +90,7 @@ async def mark_non_hotels(dry_run: bool = True, batch_size: int = 1000) -> int:
                 SELECT COUNT(*) FROM sadie_gtm.hotels 
                 WHERE status >= 0 AND ({like_conditions})
             """)
-            logger.info(f"Would mark {count} non-hotels with status={HotelStatus.NON_HOTEL}")
+            logger.info(f"Would mark {count} non-hotels with status={HotelStatus.ERROR}")
             
             # Show sample
             samples = await conn.fetch(f"""
@@ -109,10 +109,10 @@ async def mark_non_hotels(dry_run: bool = True, batch_size: int = 1000) -> int:
                 UPDATE sadie_gtm.hotels 
                 SET status = $1, updated_at = NOW()
                 WHERE status >= 0 AND ({like_conditions})
-            """, HotelStatus.NON_HOTEL)
+            """, HotelStatus.ERROR)
             
             count = int(result.split()[-1])
-            logger.info(f"Marked {count} non-hotels with status={HotelStatus.NON_HOTEL}")
+            logger.info(f"Marked {count} non-hotels with status={HotelStatus.ERROR}")
             return count
 
 
@@ -132,12 +132,9 @@ async def get_stats() -> None:
             status = s['status']
             cnt = s['cnt']
             label = {
-                -4: "non_hotel",
-                -3: "duplicate", 
-                -2: "location_mismatch",
-                -1: "no_booking_engine",
+                -1: "error",
                 0: "pending",
-                1: "launched",
+                1: "live",
             }.get(status, f"unknown_{status}")
             logger.info(f"  {status:>3} ({label}): {cnt}")
 

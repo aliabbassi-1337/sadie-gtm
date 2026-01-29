@@ -905,16 +905,13 @@ GROUP BY status
 ORDER BY status DESC;
 
 -- name: get_pipeline_by_source
--- Get pipeline breakdown by source
+-- Get status breakdown by source
+-- Status: 0=pending, 1=live, -1=error
 SELECT 
     source,
-    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS ingested,
-    SUM(CASE WHEN status = 10 THEN 1 ELSE 0 END) AS has_website,
-    SUM(CASE WHEN status = 20 THEN 1 ELSE 0 END) AS has_location,
-    SUM(CASE WHEN status = 30 THEN 1 ELSE 0 END) AS detected,
-    SUM(CASE WHEN status = 40 THEN 1 ELSE 0 END) AS enriched,
-    SUM(CASE WHEN status = 100 THEN 1 ELSE 0 END) AS launched,
-    SUM(CASE WHEN status < 0 THEN 1 ELSE 0 END) AS rejected,
+    SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS pending,
+    SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS live,
+    SUM(CASE WHEN status = -1 THEN 1 ELSE 0 END) AS error,
     COUNT(*) AS total
 FROM sadie_gtm.hotels
 GROUP BY source
@@ -930,79 +927,39 @@ WHERE source = :source
 GROUP BY status
 ORDER BY status DESC;
 
--- name: get_hotels_at_stage
--- Get hotels at a specific pipeline stage
+-- name: get_hotels_by_status
+-- Get hotels at a specific status
+-- Status: 0=pending, 1=live, -1=error
 SELECT
     id, name, website, city, state, source,
     ST_Y(location::geometry) AS latitude,
     ST_X(location::geometry) AS longitude
 FROM sadie_gtm.hotels
-WHERE status = :stage
+WHERE status = :status
 ORDER BY id
 LIMIT :limit;
 
--- name: get_hotels_needing_action
--- Get hotels that need action (between stages, not terminal)
+-- name: get_pending_hotels
+-- Get hotels needing processing (status=0)
 SELECT
-    id, name, website, city, state, source, status,
+    id, name, website, city, state, source,
     ST_Y(location::geometry) AS latitude,
-    ST_X(location::geometry) AS longitude,
-    CASE 
-        WHEN status = 0 AND website IS NOT NULL THEN 'detect'
-        WHEN status = 0 THEN 'enrich_website'
-        WHEN status = 10 AND location IS NOT NULL THEN 'detect'
-        WHEN status = 10 THEN 'enrich_location'
-        WHEN status = 20 THEN 'detect'
-        WHEN status = 30 THEN 'enrich_room_count'
-        WHEN status = 40 THEN 'launch'
-        ELSE 'unknown'
-    END AS next_action
+    ST_X(location::geometry) AS longitude
 FROM sadie_gtm.hotels
-WHERE status >= 0 AND status < 100
-ORDER BY status, id
+WHERE status = 0
+ORDER BY id
 LIMIT :limit;
 
--- name: advance_to_has_website!
--- Advance hotels to HAS_WEBSITE stage after enrichment
+-- name: set_hotel_live!
+-- Mark hotel as live (status=1)
 UPDATE sadie_gtm.hotels
-SET status = 10, updated_at = CURRENT_TIMESTAMP
-WHERE id = :hotel_id
-  AND status < 10
-  AND website IS NOT NULL AND website != '';
+SET status = 1, updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id;
 
--- name: advance_to_has_location!
--- Advance hotels to HAS_LOCATION stage after location enrichment
+-- name: set_hotel_error!
+-- Mark hotel as error (status=-1)
 UPDATE sadie_gtm.hotels
-SET status = 20, updated_at = CURRENT_TIMESTAMP
-WHERE id = :hotel_id
-  AND status < 20
-  AND location IS NOT NULL;
-
--- name: advance_to_detected!
--- Advance hotels to DETECTED stage after booking engine detection
-UPDATE sadie_gtm.hotels
-SET status = 30, updated_at = CURRENT_TIMESTAMP
-WHERE id = :hotel_id
-  AND status < 30;
-
--- name: advance_to_enriched!
--- Advance hotels to ENRICHED stage after all enrichments
-UPDATE sadie_gtm.hotels
-SET status = 40, updated_at = CURRENT_TIMESTAMP
-WHERE id = :hotel_id
-  AND status < 40;
-
--- name: advance_to_launched!
--- Advance hotels to LAUNCHED stage
-UPDATE sadie_gtm.hotels
-SET status = 100, updated_at = CURRENT_TIMESTAMP
-WHERE id = :hotel_id
-  AND status < 100;
-
--- name: set_terminal_status!
--- Set a terminal (rejected) status
-UPDATE sadie_gtm.hotels
-SET status = :terminal_status, updated_at = CURRENT_TIMESTAMP
+SET status = -1, updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
 -- ============================================================================

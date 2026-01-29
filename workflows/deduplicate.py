@@ -7,7 +7,7 @@ Uses 3-tier deduplication logic:
 2. Location (secondary - ~11m precision)
 3. Name + Website (tertiary - fallback)
 
-Marks duplicates with status=-3 (DUPLICATE).
+Marks duplicates with status=-1 (ERROR).
 
 Usage:
     # Dry run - show what would be marked as duplicates
@@ -262,7 +262,7 @@ async def find_duplicates_by_name(
 
 
 async def mark_duplicates(hotel_ids: List[int]) -> int:
-    """Mark hotels as duplicates (status=-3)."""
+    """Mark hotels as duplicates (status=-1)."""
     if not hotel_ids:
         return 0
     
@@ -393,7 +393,7 @@ Examples:
     try:
         if args.reset:
             count = await reset_duplicates()
-            logger.info(f"Reset {count} hotels from duplicate (status=-3) back to pending (status=0)")
+            logger.info(f"Reset {count} hotels from duplicate (status=-1) back to pending (status=0)")
             return
         
         if args.stats:

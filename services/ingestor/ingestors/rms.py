@@ -158,7 +158,7 @@ class RMSIngestor:
                 if hotel_id:
                     await self._repo.insert_hotel_booking_engine(
                         hotel_id=hotel_id, booking_engine_id=booking_engine_id,
-                        booking_url=hotel.booking_url, enrichment_status="enriched",
+                        booking_url=hotel.booking_url, enrichment_status=1,
                     )
                     saved += 1
             except Exception as e:

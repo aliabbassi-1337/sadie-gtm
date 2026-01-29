@@ -1377,11 +1377,11 @@ class Service(IService):
                     data = await scraper.extract(url, slug)
                     if data and data.has_data():
                         await self._rms_repo.update_hotel(hotel_id=hotel.hotel_id, name=data.name, address=data.address, city=data.city, state=data.state, country=data.country, phone=data.phone, email=data.email, website=data.website)
-                        await self._rms_repo.update_enrichment_status(hotel.booking_url, "enriched")
+                        await self._rms_repo.update_enrichment_status(hotel.booking_url, 1)
                         logger.info(f"Enriched {hotel.hotel_id}: {data.name}")
                         return (True, True)
                     else:
-                        await self._rms_repo.update_enrichment_status(hotel.booking_url, "no_data")
+                        await self._rms_repo.update_enrichment_status(hotel.booking_url, -1)
                         return (True, False)
 
             tasks = [enrich_one(h, i) for i, h in enumerate(hotels)]
