@@ -2,7 +2,7 @@
 
 from typing import List, Optional
 from db.client import queries, get_conn
-from db.models.reporting import HotelLead, CityStats, EngineCount, LaunchableHotel
+from db.models.reporting import HotelLead, CityStats, EngineCount, LaunchableHotel, EnrichmentStats
 
 
 async def get_leads_for_city(city: str, state: str) -> List[HotelLead]:
@@ -182,3 +182,27 @@ async def get_distinct_states() -> List[str]:
     async with get_conn() as conn:
         results = await queries.get_distinct_states(conn)
         return [r["state"] for r in results]
+
+
+# ============================================================================
+# ENRICHMENT STATS FUNCTIONS
+# ============================================================================
+
+
+async def get_enrichment_stats_by_engine(source_pattern: str = None) -> List[EnrichmentStats]:
+    """Get enrichment stats grouped by booking engine.
+
+    Args:
+        source_pattern: Optional source pattern to filter (e.g., '%crawl%')
+
+    Returns:
+        List of EnrichmentStats, one per booking engine
+    """
+    async with get_conn() as conn:
+        if source_pattern:
+            results = await queries.get_enrichment_stats_by_engine_source(
+                conn, source_pattern=source_pattern
+            )
+        else:
+            results = await queries.get_enrichment_stats_by_engine(conn)
+        return [EnrichmentStats.model_validate(dict(row)) for row in results]

@@ -89,3 +89,33 @@ class LaunchableHotel(BaseModel):
     nearest_customer_distance_km: Optional[Decimal] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class EnrichmentStats(BaseModel):
+    """Enrichment statistics per booking engine."""
+
+    engine_name: str
+    total_hotels: int = 0
+
+    # Status breakdown
+    live: int = 0
+    pending: int = 0
+    error: int = 0
+
+    # Data completeness
+    has_name: int = 0
+    has_email: int = 0
+    has_phone: int = 0
+    has_contact: int = 0
+    has_city: int = 0
+    has_state: int = 0
+    has_country: int = 0
+    has_website: int = 0
+    has_address: int = 0
+    has_coordinates: int = 0
+
+    # Enrichment status
+    has_booking_engine: int = 0
+    has_room_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)

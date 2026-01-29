@@ -11,7 +11,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 from services.reporting import repo
-from db.models.reporting import HotelLead, CityStats, EngineCount, ReportStats, LaunchableHotel
+from db.models.reporting import HotelLead, CityStats, EngineCount, ReportStats, LaunchableHotel, EnrichmentStats
 from infra.s3 import upload_file
 from infra import slack
 
@@ -144,6 +144,31 @@ class IService(ABC):
     @abstractmethod
     async def get_pipeline_by_source_name(self, source: str) -> list:
         """Get pipeline breakdown for a specific source."""
+        pass
+
+    # =========================================================================
+    # ENRICHMENT STATS METHODS
+    # =========================================================================
+
+    @abstractmethod
+    async def get_enrichment_stats(self, source_pattern: str = None) -> List[EnrichmentStats]:
+        """Get enrichment stats by booking engine.
+
+        Args:
+            source_pattern: Optional source pattern filter (e.g., '%crawl%')
+
+        Returns:
+            List of EnrichmentStats, one per booking engine
+        """
+        pass
+
+    @abstractmethod
+    async def export_enrichment_stats(self, source_pattern: str = None) -> tuple[str, int]:
+        """Export enrichment stats to Excel and upload to S3.
+
+        Returns:
+            Tuple of (s3_uri, engine_count)
+        """
         pass
 
 
@@ -757,3 +782,125 @@ class Service(IService):
     async def get_pipeline_by_source_name(self, source: str) -> list:
         """Get pipeline breakdown for a specific source."""
         return await repo.get_pipeline_by_source_name(source)
+
+    # =========================================================================
+    # ENRICHMENT STATS METHODS
+    # =========================================================================
+
+    async def get_enrichment_stats(self, source_pattern: str = None) -> List[EnrichmentStats]:
+        """Get enrichment stats by booking engine."""
+        return await repo.get_enrichment_stats_by_engine(source_pattern=source_pattern)
+
+    async def export_enrichment_stats(self, source_pattern: str = None) -> tuple[str, int]:
+        """Export enrichment stats to Excel and upload to S3."""
+        import subprocess
+
+        logger.info("Generating enrichment stats report")
+
+        stats = await self.get_enrichment_stats(source_pattern=source_pattern)
+        if not stats:
+            logger.warning("No enrichment stats found")
+            return "", 0
+
+        logger.info(f"Found stats for {len(stats)} booking engines")
+
+        workbook = self._create_enrichment_stats_workbook(stats)
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            workbook.save(tmp.name)
+            tmp_path = tmp.name
+
+        try:
+            if source_pattern:
+                source_tag = source_pattern.replace('%', '').replace('_', '')
+                filename = f"enrichment_stats_{source_tag}.xlsx"
+            else:
+                filename = "enrichment_stats.xlsx"
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/reports/{filename}"
+
+            result = subprocess.run(
+                ["s5cmd", "cp", tmp_path, s3_uri],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
+                s3_key = f"HotelLeadGen/reports/{filename}"
+                s3_uri = upload_file(tmp_path, s3_key)
+
+            logger.info(f"Uploaded enrichment stats report to {s3_uri}")
+            return s3_uri, len(stats)
+        finally:
+            os.unlink(tmp_path)
+
+    def _create_enrichment_stats_workbook(self, stats: List[EnrichmentStats]) -> Workbook:
+        """Create Excel workbook for enrichment stats."""
+        workbook = Workbook()
+
+        sheet = workbook.active
+        sheet.title = "Enrichment Stats"
+        self._populate_enrichment_stats_sheet(sheet, stats)
+
+        return workbook
+
+    def _populate_enrichment_stats_sheet(self, sheet, stats: List[EnrichmentStats]) -> None:
+        """Populate the enrichment stats sheet."""
+        headers = [
+            "Engine", "Total", "Live", "Pending", "Error",
+            "Has Name", "Has Email", "Has Phone", "Has Contact",
+            "Has City", "Has State", "Has Country",
+            "Has Website", "Has Address", "Has Coordinates",
+            "Has Booking Engine", "Has Room Count"
+        ]
+
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        thin_border = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
+        )
+
+        for col, header in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+        for row, stat in enumerate(stats, 2):
+            data = [
+                stat.engine_name,
+                stat.total_hotels,
+                stat.live,
+                stat.pending,
+                stat.error,
+                stat.has_name,
+                stat.has_email,
+                stat.has_phone,
+                stat.has_contact,
+                stat.has_city,
+                stat.has_state,
+                stat.has_country,
+                stat.has_website,
+                stat.has_address,
+                stat.has_coordinates,
+                stat.has_booking_engine,
+                stat.has_room_count,
+            ]
+            for col, value in enumerate(data, 1):
+                cell = sheet.cell(row=row, column=col, value=value)
+                cell.border = thin_border
+                if col > 1:
+                    cell.alignment = Alignment(horizontal="right")
+
+        for col in range(1, len(headers) + 1):
+            max_length = len(headers[col - 1])
+            for row in range(2, len(stats) + 2):
+                cell_value = sheet.cell(row=row, column=col).value
+                if cell_value:
+                    max_length = max(max_length, len(str(cell_value)))
+            sheet.column_dimensions[get_column_letter(col)].width = min(max_length + 2, 20)
