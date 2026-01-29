@@ -567,21 +567,27 @@ WHERE state = :state
 -- LAUNCHER QUERIES
 -- ============================================================================
 -- Status values:
---   -2 = Location mismatch (rejected)
---   -1 = No booking engine found (rejected)
+--   -1 = Error/rejected
 --    0 = Pending/Not ready
---    1 = Launched and live
+--    1 = Launched (fully enriched)
+--
+-- Launch criteria (ALL required):
+--   - name (not null, not empty, not 'Unknown')
+--   - email OR phone (at least one)
+--   - city, state, country (all required)
+--   - booking engine detected (hbe.status = 1)
 
 -- name: get_launchable_hotels
--- Get hotels ready to be launched
--- Criteria: status=0 (pending), has booking engine with successful detection
--- Room count and proximity are optional (LEFT JOIN)
+-- Get hotels ready to be launched (fully enriched)
 SELECT
     h.id,
     h.name AS hotel_name,
     h.website,
+    h.email,
+    h.phone_website,
     h.city,
     h.state,
+    h.country,
     be.name AS booking_engine_name,
     be.tier AS booking_engine_tier,
     hrc.room_count,
@@ -594,18 +600,32 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status =
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.status = 0
+  -- Name required (not null, not empty, not placeholder)
+  AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
+  -- Email OR phone required
+  AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
+  -- Location required
+  AND h.city IS NOT NULL AND h.city != ''
+  AND h.state IS NOT NULL AND h.state != ''
+  AND h.country IS NOT NULL AND h.country != ''
 LIMIT :limit;
 
 -- name: get_launchable_count^
--- Count hotels ready to be launched (status=0, has successful detection)
+-- Count hotels ready to be launched (fully enriched)
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
-WHERE h.status = 0;
+WHERE h.status = 0
+  AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
+  AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
+  AND h.city IS NOT NULL AND h.city != ''
+  AND h.state IS NOT NULL AND h.state != ''
+  AND h.country IS NOT NULL AND h.country != '';
 
 -- name: launch_hotels
 -- Atomically claim and launch hotels (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
+-- Only launches fully enriched hotels
 -- Returns launched hotel IDs for logging/tracking
 WITH claimed AS (
     SELECT h.id
@@ -613,6 +633,12 @@ WITH claimed AS (
     INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     WHERE h.status = 0
       AND h.id = ANY(:hotel_ids)
+      -- Enrichment requirements
+      AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
+      AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
+      AND h.city IS NOT NULL AND h.city != ''
+      AND h.state IS NOT NULL AND h.state != ''
+      AND h.country IS NOT NULL AND h.country != ''
     FOR UPDATE OF h SKIP LOCKED
 )
 UPDATE sadie_gtm.hotels
@@ -623,12 +649,19 @@ RETURNING id;
 -- name: launch_ready_hotels
 -- Atomically claim and launch up to :limit ready hotels (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
+-- Only launches fully enriched hotels
 -- Returns launched hotel IDs for logging/tracking
 WITH claimed AS (
     SELECT h.id
     FROM sadie_gtm.hotels h
     INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     WHERE h.status = 0
+      -- Enrichment requirements
+      AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
+      AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
+      AND h.city IS NOT NULL AND h.city != ''
+      AND h.state IS NOT NULL AND h.state != ''
+      AND h.country IS NOT NULL AND h.country != ''
     FOR UPDATE OF h SKIP LOCKED
     LIMIT :limit
 )

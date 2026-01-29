@@ -11,14 +11,15 @@ USAGE:
 3. Launch a batch of ready hotels:
    uv run python workflows/launcher.py launch --limit 100
 
-NOTES:
-- A hotel is "launchable" when it has:
-  - status = 0 (pending)
-  - A record in hotel_booking_engines (has booking engine)
-  - A record in hotel_room_count with status=1 (successful enrichment)
-  - A record in hotel_customer_proximity (has proximity)
-- Launching sets the hotel status to 1 (live)
-- Uses FOR UPDATE SKIP LOCKED for multi-worker safety (can run on multiple EC2 instances)
+LAUNCH CRITERIA (all required):
+- status = 0 (pending)
+- name (not null, not empty, not 'Unknown')
+- email OR phone (at least one contact method)
+- city, state, country (location required)
+- booking engine detected (hbe.status = 1)
+
+Launching sets the hotel status to 1 (live).
+Uses FOR UPDATE SKIP LOCKED for multi-worker safety.
 """
 
 import sys
