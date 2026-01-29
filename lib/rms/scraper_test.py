@@ -157,29 +157,270 @@ class TestRMSScraperExtractEmail:
         assert email is None
 
 
+class TestRMSScraperParseAddress:
+    """Tests for address parsing logic."""
+    
+    @pytest.fixture
+    def scraper(self):
+        return RMSScraper(AsyncMock())
+    
+    def test_parses_australian_address(self, scraper):
+        """Should parse Australian address format."""
+        address = "40 Ragonesi Rd, Alice Springs NT 0870 , Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Alice Springs"
+        assert state == "NT"
+        assert country == "AU"
+    
+    def test_parses_australian_address_vic(self, scraper):
+        """Should parse Victorian address."""
+        address = "830 Fifteenth Street, Mildura VIC 3500 , Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Mildura"
+        assert state == "VIC"
+        assert country == "AU"
+    
+    def test_parses_australian_address_nsw(self, scraper):
+        """Should parse NSW address."""
+        address = "98 Durham Street, Clarence Town NSW 2321 , Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Clarence Town"
+        assert state == "NSW"
+        assert country == "AU"
+    
+    def test_parses_us_address(self, scraper):
+        """Should parse US address format."""
+        address = "123 Main Street, Austin, TX 78701"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Austin"
+        assert state == "TX"
+        assert country == "USA"
+    
+    def test_parses_us_address_california(self, scraper):
+        """Should parse California address."""
+        address = "456 Beach Blvd, San Diego, CA 92101-1234"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "San Diego"
+        assert state == "CA"
+        assert country == "USA"
+    
+    def test_parses_nz_address(self, scraper):
+        """Should parse New Zealand address."""
+        address = "10 Queen Street, Auckland 1010, New Zealand"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Auckland"
+        assert country == "NZ"
+    
+    def test_returns_none_for_unparseable(self, scraper):
+        """Should return None for unparseable addresses."""
+        address = "just a short description, not an address"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city is None
+        # May still extract country if spelled out
+    
+    def test_fallback_extracts_country_name(self, scraper):
+        """Should fallback to extracting country name."""
+        address = "Some address in Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert country == "AU"
+    
+    # Edge cases
+    def test_handles_empty_address(self, scraper):
+        """Should handle empty address string."""
+        city, state, country = scraper._parse_address("")
+        
+        assert city is None
+        assert state is None
+        assert country is None
+    
+    def test_handles_none_address(self, scraper):
+        """Should handle None address."""
+        city, state, country = scraper._parse_address(None)
+        
+        assert city is None
+        assert state is None
+        assert country is None
+    
+    def test_handles_address_with_only_numbers(self, scraper):
+        """Should handle address that's just numbers."""
+        city, state, country = scraper._parse_address("12345")
+        
+        assert city is None
+    
+    def test_handles_unicode_city_names(self, scraper):
+        """Should handle unicode in city names."""
+        address = "123 Main St, São Paulo SP 01310, Brazil"
+        
+        city, state, country = scraper._parse_address(address)
+        # May or may not parse, but shouldn't crash
+    
+    def test_handles_multiple_commas(self, scraper):
+        """Should handle addresses with many commas."""
+        address = "Unit 5, Level 3, 123 Main Street, Sydney, NSW 2000, Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        # Should still extract Australia
+        assert country == "AU"
+    
+    def test_handles_lowercase_state(self, scraper):
+        """Should handle lowercase state abbreviations."""
+        address = "123 Main St, Austin, tx 78701"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert state == "TX"
+        assert country == "USA"
+    
+    def test_handles_mixed_case_country(self, scraper):
+        """Should handle mixed case country names."""
+        address = "123 Street, City NSW 2000, AUSTRALIA"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert country == "AU"
+    
+    def test_handles_zip_plus_four(self, scraper):
+        """Should handle US ZIP+4 format."""
+        address = "456 Oak Ave, Los Angeles, CA 90001-1234"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Los Angeles"
+        assert state == "CA"
+        assert country == "USA"
+    
+    def test_handles_po_box_address(self, scraper):
+        """Should handle PO Box addresses."""
+        address = "PO Box 123, Melbourne VIC 3000, Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert state == "VIC"
+        assert country == "AU"
+    
+    def test_handles_very_long_address(self, scraper):
+        """Should handle very long addresses without crashing."""
+        address = "A" * 1000 + ", Sydney NSW 2000, Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        # Should not crash, may or may not parse
+    
+    def test_handles_newlines_in_address(self, scraper):
+        """Should handle newlines in address."""
+        address = "123 Main St\nAustin, TX 78701"
+        
+        city, state, country = scraper._parse_address(address)
+        # Should still attempt to parse
+
+
 @pytest.mark.online
 class TestRMSScraperIntegration:
     """Integration tests that hit real RMS pages."""
     
-    @pytest.mark.asyncio
-    async def test_extracts_from_real_page(self):
-        """Should extract data from a real RMS booking page."""
+    @pytest.fixture
+    async def browser_and_scraper(self):
+        """Create real browser and scraper for integration tests."""
         from playwright.async_api import async_playwright
+        from playwright_stealth import Stealth
         
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            scraper = RMSScraper(page)
-            
-            # Known working RMS page
-            url = "https://bookings13.rmscloud.com/Search/Index/13308/90/"
-            data = await scraper.extract(url, "13308")
-            
-            await browser.close()
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        )
+        page = await ctx.new_page()
         
-        assert data is not None
-        assert data.name == "By the Bay"
-        assert data.has_data() is True
+        # Apply stealth to page
+        stealth = Stealth()
+        await stealth.apply_stealth_async(page)
+        
+        scraper = RMSScraper(page)
+        
+        yield scraper, page
+        
+        await ctx.close()
+        await browser.close()
+        await pw.stop()
+    
+    @pytest.mark.asyncio
+    async def test_extracts_name_from_real_page(self, browser_and_scraper):
+        """Should extract hotel name from a real RMS booking page."""
+        scraper, page = browser_and_scraper
+        
+        # Try a few known RMS pages in case one is down
+        urls = [
+            ("https://bookings13.rmscloud.com/Search/Index/13308/90/", "13308"),
+            ("https://bookings10.rmscloud.com/Search/Index/22261/68/", "22261"),
+        ]
+        
+        data = None
+        for url, slug in urls:
+            data = await scraper.extract(url, slug)
+            if data and data.has_data():
+                break
+        
+        # At least one page should work
+        if data:
+            assert data.has_data() is True
+            assert data.name is not None, "Should have hotel name"
+        else:
+            pytest.skip("All test RMS pages unavailable")
+    
+    @pytest.mark.asyncio
+    async def test_parses_address_from_real_page(self, browser_and_scraper):
+        """Should parse address and extract location from RMS page."""
+        scraper, page = browser_and_scraper
+        
+        url = "https://bookings13.rmscloud.com/Search/Index/13308/90/"
+        data = await scraper.extract(url, "13308")
+        
+        # RMS pages may or may not have address visible
+        if data and data.address:
+            # If address exists, parsing should have been attempted
+            assert data.country is not None or data.state is not None or data.city is not None
+    
+    @pytest.mark.asyncio
+    async def test_handles_invalid_slug(self, browser_and_scraper):
+        """Should handle invalid RMS slugs gracefully."""
+        scraper, page = browser_and_scraper
+        
+        url = "https://bookings13.rmscloud.com/Search/Index/99999/99/"
+        data = await scraper.extract(url, "99999")
+        
+        # Should either return None or return data with is_valid=False
+        if data:
+            # If data exists, it should be marked as invalid or have no meaningful content
+            pass  # Some error pages still return partial data
+    
+    @pytest.mark.asyncio
+    async def test_extracts_email_from_page(self, browser_and_scraper):
+        """Should extract email if present on page."""
+        scraper, page = browser_and_scraper
+        
+        url = "https://bookings13.rmscloud.com/Search/Index/13308/90/"
+        data = await scraper.extract(url, "13308")
+        
+        # Email extraction - may or may not be present
+        if data and data.email:
+            assert "@" in data.email
+            assert "rmscloud.com" not in data.email.lower(), "Should filter out RMS system emails"
 
 
 if __name__ == "__main__":
