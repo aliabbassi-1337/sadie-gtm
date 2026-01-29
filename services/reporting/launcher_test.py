@@ -581,35 +581,24 @@ async def test_excludes_failed_room_count():
 
 @pytest.mark.asyncio
 async def test_excludes_rejected_hotels():
-    """Test that rejected hotels (status=-1, -2) are excluded."""
+    """Test that rejected hotels (status=-1) are excluded."""
     hotel_ids = []
 
     try:
-        # Create hotel with status=-1 (no booking engine)
-        hotel_id_no_engine = await insert_hotel(
-            name="Test No Engine Hotel",
-            website="https://testnoengine.com",
-            city="NoEngineCity",
-            state="NoEngineState",
-            status=-1,  # rejected - no booking engine
+        # Create hotel with status=-1 (error/rejected)
+        hotel_id_error = await insert_hotel(
+            name="Test Error Hotel",
+            website="https://testerror.com",
+            city="ErrorCity",
+            state="ErrorState",
+            status=-1,  # rejected/error
             source="test",
         )
-        hotel_ids.append(hotel_id_no_engine)
-
-        # Create hotel with status=-2 (location mismatch)
-        hotel_id_mismatch = await insert_hotel(
-            name="Test Location Mismatch Hotel",
-            website="https://testmismatch.com",
-            city="MismatchCity",
-            state="MismatchState",
-            status=-2,  # rejected - location mismatch
-            source="test",
-        )
-        hotel_ids.append(hotel_id_mismatch)
+        hotel_ids.append(hotel_id_error)
 
         hotels = await get_launchable_hotels(limit=1000)
 
-        # Neither rejected hotel should be launchable
+        # Rejected hotel should not be launchable
         for hotel_id in hotel_ids:
             test_hotel = next((h for h in hotels if h.id == hotel_id), None)
             assert test_hotel is None, f"Rejected hotel {hotel_id} should not be launchable"

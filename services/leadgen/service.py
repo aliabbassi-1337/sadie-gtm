@@ -534,7 +534,7 @@ class Service(IService):
             if result.error == "location_mismatch":
                 await repo.update_hotel_status(
                     hotel_id=result.hotel_id,
-                    status=HotelStatus.LOCATION_MISMATCH,
+                    status=HotelStatus.ERROR,
                     phone_website=result.phone_website or None,
                     email=result.email or None,
                 )
@@ -624,7 +624,7 @@ class Service(IService):
                 # No booking engine found
                 await repo.update_hotel_status(
                     hotel_id=result.hotel_id,
-                    status=HotelStatus.NO_BOOKING_ENGINE,
+                    status=HotelStatus.ERROR,
                     phone_website=result.phone_website or None,
                     email=result.email or None,
                 )

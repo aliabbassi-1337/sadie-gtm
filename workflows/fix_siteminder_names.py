@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from loguru import logger
 
@@ -150,24 +150,27 @@ async def get_hotels_with_garbage_names(limit: Optional[int] = None) -> list[dic
         return [dict(r) for r in rows]
 
 
-async def update_hotel_name(hotel_id: int, new_name: str) -> bool:
-    """Update hotel name in database."""
+async def batch_update_hotel_names(updates: List[Tuple[str, int]]) -> int:
+    """Batch update hotel names. Returns count of updated rows."""
+    if not updates:
+        return 0
+    
     async with get_conn() as conn:
-        await conn.execute(
+        # Use executemany for batch updates
+        await conn.executemany(
             """
             UPDATE sadie_gtm.hotels
             SET name = $1, updated_at = CURRENT_TIMESTAMP
             WHERE id = $2
             """,
-            new_name,
-            hotel_id,
+            updates,
         )
-        return True
+        return len(updates)
 
 
 async def main(dry_run: bool = False, limit: Optional[int] = None):
     """Main entry point."""
-    logger.info(f"Fetching SiteMinder hotels with garbage names...")
+    logger.info("Fetching SiteMinder hotels with garbage names...")
     
     hotels = await get_hotels_with_garbage_names(limit)
     logger.info(f"Found {len(hotels)} hotels to fix")
@@ -176,12 +179,12 @@ async def main(dry_run: bool = False, limit: Optional[int] = None):
         logger.info("No hotels to fix!")
         return
     
-    fixed = 0
+    # Parse all names first
+    updates = []
     skipped = 0
     
     for hotel in hotels:
         hotel_id = hotel["hotel_id"]
-        old_name = hotel["name"]
         booking_url = hotel["booking_url"]
         
         new_name = parse_siteminder_slug(booking_url)
@@ -190,22 +193,30 @@ async def main(dry_run: bool = False, limit: Optional[int] = None):
             skipped += 1
             continue
         
-        if dry_run:
-            logger.info(f"[DRY RUN] Would update hotel {hotel_id}: {old_name!r} -> {new_name!r}")
-        else:
-            await update_hotel_name(hotel_id, new_name)
-            if fixed < 10:  # Only log first 10
-                logger.info(f"Updated hotel {hotel_id}: {old_name!r} -> {new_name!r}")
-        
-        fixed += 1
-        
-        if fixed % 500 == 0:
-            logger.info(f"Progress: {fixed}/{len(hotels)} fixed")
+        updates.append((new_name, hotel_id))
     
-    logger.success(f"Done! Fixed: {fixed}, Skipped: {skipped}")
+    logger.info(f"Parsed {len(updates)} names, {skipped} skipped")
     
     if dry_run:
-        logger.info("This was a dry run. Run without --dry-run to apply changes.")
+        # Show first 10 samples
+        for new_name, hotel_id in updates[:10]:
+            logger.info(f"[DRY RUN] Would update hotel {hotel_id} -> {new_name!r}")
+        if len(updates) > 10:
+            logger.info(f"... and {len(updates) - 10} more")
+        logger.success(f"Done! Would fix: {len(updates)}, Skipped: {skipped}")
+        return
+    
+    # Batch update in chunks of 1000
+    BATCH_SIZE = 1000
+    total_updated = 0
+    
+    for i in range(0, len(updates), BATCH_SIZE):
+        batch = updates[i:i + BATCH_SIZE]
+        count = await batch_update_hotel_names(batch)
+        total_updated += count
+        logger.info(f"Progress: {total_updated}/{len(updates)} updated")
+    
+    logger.success(f"Done! Fixed: {total_updated}, Skipped: {skipped}")
 
 
 if __name__ == "__main__":

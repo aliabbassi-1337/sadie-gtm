@@ -128,7 +128,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
   AND be.name IN ('Cloudbeds', 'RMS Cloud', 'Mews')  -- Booking engines with scrapeable pages
-  AND (hbe.enrichment_status IS NULL OR hbe.enrichment_status NOT IN ('success', 'dead'))
+  AND (hbe.enrichment_status IS NULL OR hbe.enrichment_status NOT IN (1, -1))
   AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
   AND (
     (:enrich_type = 'names' AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%'))
@@ -226,7 +226,7 @@ SET last_enrichment_attempt = NOW()
 WHERE hotel_id = :hotel_id;
 
 -- name: set_enrichment_status!
--- Set enrichment status (success, no_data, dead)
+-- Set enrichment status: 1=success, -1=failed/dead
 UPDATE sadie_gtm.hotel_booking_engines
 SET enrichment_status = :status,
     last_enrichment_attempt = NOW()
@@ -235,7 +235,7 @@ WHERE hotel_id = :hotel_id;
 -- name: mark_enrichment_dead!
 -- Mark a booking URL as permanently dead (404)
 UPDATE sadie_gtm.hotel_booking_engines
-SET enrichment_status = 'dead',
+SET enrichment_status = -1,
     last_enrichment_attempt = NOW()
 WHERE hotel_id = :hotel_id;
 

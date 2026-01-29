@@ -704,8 +704,8 @@ async def set_last_enrichment_attempt(hotel_id: int) -> None:
         await queries.set_last_enrichment_attempt(conn, hotel_id=hotel_id)
 
 
-async def set_enrichment_status(hotel_id: int, status: str) -> None:
-    """Set enrichment status (success, no_data, dead)."""
+async def set_enrichment_status(hotel_id: int, status: int) -> None:
+    """Set enrichment status. 1=success, -1=failed/dead."""
     async with get_conn() as conn:
         await queries.set_enrichment_status(conn, hotel_id=hotel_id, status=status)
 
@@ -727,7 +727,7 @@ async def batch_mark_enrichment_dead(hotel_ids: List[int]) -> int:
     async with get_conn() as conn:
         sql = """
         UPDATE sadie_gtm.hotel_booking_engines
-        SET enrichment_status = 'dead',
+        SET enrichment_status = -1,
             last_enrichment_attempt = NOW()
         WHERE hotel_id = ANY($1::integer[])
         """

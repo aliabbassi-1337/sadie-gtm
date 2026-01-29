@@ -54,8 +54,8 @@ class RMSRepo:
                 state=state, country=country, phone=phone, email=email, website=website,
             )
     
-    async def update_enrichment_status(self, booking_url: str, status: str) -> None:
-        """Update enrichment status for a hotel."""
+    async def update_enrichment_status(self, booking_url: str, status: int) -> None:
+        """Update enrichment status for a hotel. 1=success, -1=failed."""
         async with get_conn() as conn:
             await queries.update_rms_enrichment_status(conn, booking_url=booking_url, status=status)
     

@@ -49,7 +49,7 @@ class RMSRepo:
         hotel_id: int,
         booking_engine_id: int,
         booking_url: str,
-        enrichment_status: str = "enriched",
+        enrichment_status: int = 1,
     ) -> None:
         """Insert hotel booking engine relation."""
         async with get_conn() as conn:

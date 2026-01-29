@@ -87,8 +87,8 @@ async def process_message(
     
     if result.success:
         if result.name_updated or result.address_updated:
-            # Actually enriched something - mark as success
-            await enrichment_repo.set_enrichment_status(hotel_id, 'success')
+            # Actually enriched something - mark as success (1)
+            await enrichment_repo.set_enrichment_status(hotel_id, 1)
             parts = []
             if result.name_updated:
                 parts.append("name")
@@ -98,10 +98,10 @@ async def process_message(
             delete_message(queue_url, receipt_handle)
             return (True, result.name_updated, result.address_updated, False)
         else:
-            # Page loaded but no data extracted - mark as no_data (retry later)
-            await enrichment_repo.set_enrichment_status(hotel_id, 'no_data')
+            # Page loaded but no data extracted - mark as failed (-1)
+            await enrichment_repo.set_enrichment_status(hotel_id, -1)
             delete_message(queue_url, receipt_handle)
-            logger.debug(f"  Hotel {hotel_id}: no data extracted, will retry in 7 days")
+            logger.debug(f"  Hotel {hotel_id}: no data extracted")
             return (True, False, False, False)
     else:
         # Error - mark attempt timestamp (will retry after 7 days)

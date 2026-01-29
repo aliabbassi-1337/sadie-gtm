@@ -21,7 +21,7 @@
 **Types/Classes:**
 - PascalCase for classes and Pydantic models: `Hotel`, `DetectionResult`, `CityLocation`
 - Interface classes prefixed with `I`: `IService`
-- Status constants in classes: `HotelStatus.PENDING`, `HotelStatus.LAUNCHED`
+- Status constants in classes: `HotelStatus.PENDING` (0), `HotelStatus.LIVE` (1), `HotelStatus.ERROR` (-1)
 
 **Database:**
 - SQL uses snake_case for tables and columns
