@@ -175,6 +175,7 @@ WHERE id = :hotel_id;
 
 -- name: get_cloudbeds_hotels_needing_enrichment
 -- Get hotels with Cloudbeds booking URLs that need name, city, or state enrichment
+-- Includes both pending (status=0) and live (status=1) hotels
 -- Only includes hotels not attempted in last 7 days (handles rate limits)
 SELECT h.id, h.name, h.city, h.state, h.country, h.address,
        hbe.booking_url, hbe.engine_property_id as slug
@@ -185,7 +186,7 @@ WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
   AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
-  AND h.status = 1
+  AND h.status >= 0  -- Include pending (0) and live (1), exclude errors (-1)
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
       OR (h.city IS NULL OR h.city = '')
@@ -195,7 +196,7 @@ ORDER BY h.id
 LIMIT :limit;
 
 -- name: get_cloudbeds_hotels_needing_enrichment_count^
--- Count Cloudbeds hotels needing enrichment
+-- Count Cloudbeds hotels needing enrichment (pending and live)
 SELECT COUNT(*)
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
@@ -204,7 +205,7 @@ WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
   AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
-  AND h.status = 1
+  AND h.status >= 0  -- Include pending (0) and live (1), exclude errors (-1)
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
       OR (h.city IS NULL OR h.city = '')

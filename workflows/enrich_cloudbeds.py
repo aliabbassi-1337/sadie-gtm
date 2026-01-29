@@ -104,55 +104,95 @@ async def extract_from_cloudbeds_page(page: Page) -> Dict[str, Any]:
     except Exception:
         pass
     
-    # Extract address and contact from Cloudbeds widget (if present)
-    # This widget is optional - not all properties enable it
+    # Extract address and contact from Cloudbeds "Address and Contact" section
+    # Uses multiple selectors for robustness across different Cloudbeds page versions
     try:
         widget_data = await page.evaluate("""
             () => {
-                const container = document.querySelector('[data-testid="property-address-and-contact"]') 
-                               || document.querySelector('.cb-address-and-contact');
+                // Strategy 1: Find by data-testid or class
+                let container = document.querySelector('[data-testid="property-address-and-contact"]') 
+                             || document.querySelector('.cb-address-and-contact');
+                
+                // Strategy 2: Find by heading text "Address and Contact"
+                if (!container) {
+                    const headings = Array.from(document.querySelectorAll('h3'));
+                    const addressHeading = headings.find(h => 
+                        h.textContent?.toLowerCase().includes('address and contact')
+                    );
+                    if (addressHeading) {
+                        // Get the parent container that holds both heading and content
+                        container = addressHeading.closest('div')?.parentElement || 
+                                    addressHeading.parentElement;
+                    }
+                }
+                
                 if (!container) return null;
                 
-                // Get all text lines
-                const lines = Array.from(container.querySelectorAll('p[data-be-text="true"]'))
-                    .map(p => p.textContent?.trim() || '');
+                // Get all paragraph text (try multiple selectors for different page versions)
+                let paragraphs = Array.from(container.querySelectorAll('p[data-be-text="true"]'));
+                if (paragraphs.length === 0) {
+                    paragraphs = Array.from(container.querySelectorAll('p'));
+                }
+                
+                const lines = paragraphs
+                    .map(p => p.textContent?.trim())
+                    .filter(t => t && t.length > 0 && t.length < 100);  // Filter out empty and long text
                 
                 // Get email from mailto link
                 const mailtoLink = container.querySelector('a[href^="mailto:"]');
                 const email = mailtoLink ? mailtoLink.href.replace('mailto:', '').split('?')[0] : '';
                 
-                return { lines, email };
+                // Get phone from tel link
+                const telLink = container.querySelector('a[href^="tel:"]');
+                const phone = telLink ? telLink.href.replace('tel:', '').replace(/[^0-9+()-]/g, '') : '';
+                
+                return { lines, email, phone };
             }
         """)
         
-        if widget_data and widget_data.get('lines') and len(widget_data['lines']) >= 3:
+        if widget_data and widget_data.get('lines') and len(widget_data['lines']) >= 2:
             lines = widget_data['lines']
             
-            # Widget data is more detailed - use it to override/enhance title data
-            # Line 0: Street address
+            # Parse lines to find address, city, state/country
+            # Typical order: Street, City, "State Country", Zip, Phone
             if len(lines) > 0:
                 result['address'] = lines[0]
             
-            # Line 1: City (override title if widget has it)
             if len(lines) > 1:
                 result['city'] = lines[1]
             
-            # Line 2: "State Country" e.g. "Texas US"
-            if len(lines) > 2:
+            # Look for "State Country" pattern (e.g., "California US", "Texas US", "NSW AU")
+            # This could be line 2 or later depending on formatting
+            state_country_pattern = re.compile(
+                r'^([A-Za-z\s]+)\s+(US|USA|AU|UK|CA|NZ|GB|IE|MX|AR|PR|CO|IT|ES|FR|DE|PT|BR|CL|PE|CR|PA)$',
+                re.IGNORECASE
+            )
+            for line in lines[2:6]:  # Check lines 2-5
+                match = state_country_pattern.match(line.strip())
+                if match:
+                    result['state'] = match.group(1).strip()
+                    country = match.group(2).strip().upper()
+                    result['country'] = 'USA' if country in ['US', 'USA'] else country
+                    break
+            
+            # Fallback: try original rsplit approach if pattern didn't match
+            if 'state' not in result and len(lines) > 2:
                 state_country = lines[2].strip()
                 parts = state_country.rsplit(' ', 1)
-                if len(parts) == 2:
+                if len(parts) == 2 and len(parts[1]) <= 3:  # Country code is 2-3 chars
                     result['state'] = parts[0].strip()
                     country = parts[1].strip().upper()
                     result['country'] = 'USA' if country in ['US', 'USA'] else country
-                else:
-                    result['state'] = state_country
             
-            # Find phone (digits with common phone chars)
-            phone_pattern = re.compile(r'^[\d\-\(\)\s\+\.]{7,20}$')
-            for line in lines[3:]:
-                if phone_pattern.match(line) and 'phone' not in result:
-                    result['phone'] = line
+            # Phone from tel link (more reliable) or pattern match
+            if widget_data.get('phone') and len(widget_data['phone']) >= 10:
+                result['phone'] = widget_data['phone']
+            else:
+                phone_pattern = re.compile(r'^[\d\-\(\)\s\+\.]{7,20}$')
+                for line in lines[3:]:
+                    if phone_pattern.match(line) and 'phone' not in result:
+                        result['phone'] = line
+                        break
             
             # Email from mailto link
             if widget_data.get('email'):
