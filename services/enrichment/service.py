@@ -550,6 +550,16 @@ class IService(ABC):
         """Mark Cloudbeds hotels as failed (for retry later)."""
         pass
 
+    @abstractmethod
+    async def consume_cloudbeds_queue(
+        self,
+        queue_url: str,
+        concurrency: int = 5,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> ConsumeResult:
+        """Consume and process Cloudbeds enrichment queue."""
+        pass
+
 
 class Service(IService):
     def __init__(self, rms_repo: Optional[RMSRepo] = None, rms_queue = None) -> None:
@@ -1581,3 +1591,168 @@ class Service(IService):
     async def batch_mark_cloudbeds_failed(self, hotel_ids: List[int]) -> int:
         """Mark Cloudbeds hotels as failed (for retry later)."""
         return await repo.batch_set_last_enrichment_attempt(hotel_ids)
+
+    async def consume_cloudbeds_queue(
+        self,
+        queue_url: str,
+        concurrency: int = 5,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> ConsumeResult:
+        """Consume and process Cloudbeds enrichment queue.
+        
+        This is the main entry point for the SQS consumer workflow.
+        Handles browser lifecycle, message processing, and batch updates.
+        """
+        from lib.browser import BrowserPool
+        from lib.cloudbeds import CloudbedsScraper
+        from infra.sqs import receive_messages, delete_message, get_queue_attributes
+
+        should_stop = should_stop or (lambda: self._shutdown_requested)
+        
+        messages_processed = 0
+        hotels_processed = 0
+        hotels_enriched = 0
+        hotels_failed = 0
+        
+        batch_results = []
+        batch_failed_ids = []
+        BATCH_SIZE = 50
+        VISIBILITY_TIMEOUT = 300
+
+        logger.info(f"Starting Cloudbeds consumer (concurrency={concurrency})")
+
+        async with BrowserPool(concurrency=concurrency) as pool:
+            scrapers = [CloudbedsScraper(page) for page in pool.pages]
+            logger.info(f"Created {concurrency} browser contexts")
+
+            while not should_stop():
+                # Receive messages from SQS
+                messages = receive_messages(
+                    queue_url,
+                    max_messages=min(concurrency, 10),
+                    visibility_timeout=VISIBILITY_TIMEOUT,
+                    wait_time_seconds=10,
+                )
+
+                if not messages:
+                    logger.debug("No messages, waiting...")
+                    continue
+
+                # Parse and validate messages
+                valid_messages = []
+                for msg in messages:
+                    body = msg["body"]
+                    hotel_id = body.get("hotel_id")
+                    booking_url = body.get("booking_url")
+
+                    if not hotel_id or not booking_url:
+                        delete_message(queue_url, msg["receipt_handle"])
+                        continue
+
+                    valid_messages.append((msg, hotel_id, booking_url))
+
+                if not valid_messages:
+                    continue
+
+                # Process hotels in parallel
+                tasks = []
+                message_map = {}
+
+                for i, (msg, hotel_id, booking_url) in enumerate(valid_messages[:concurrency]):
+                    message_map[hotel_id] = msg
+                    tasks.append(self._process_cloudbeds_hotel(scrapers[i], hotel_id, booking_url))
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Handle results
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"Task error: {result}")
+                        continue
+
+                    hotel_id, success, data, error = result
+                    msg = message_map.get(hotel_id)
+                    if not msg:
+                        continue
+
+                    if success and data:
+                        batch_results.append({
+                            "hotel_id": hotel_id,
+                            "name": data.name,
+                            "address": data.address,
+                            "city": data.city,
+                            "state": data.state,
+                            "country": data.country,
+                            "phone": data.phone,
+                            "email": data.email,
+                        })
+                        hotels_enriched += 1
+
+                        parts = []
+                        if data.name:
+                            parts.append(f"name={data.name[:20]}")
+                        if data.city:
+                            parts.append(f"city={data.city}")
+                        logger.info(f"  Hotel {hotel_id}: {', '.join(parts)}")
+                    elif error == "404_not_found":
+                        batch_failed_ids.append(hotel_id)
+                        hotels_failed += 1
+                        logger.warning(f"  Hotel {hotel_id}: 404 - will retry")
+                    elif error:
+                        logger.warning(f"  Hotel {hotel_id}: {error}")
+
+                    delete_message(queue_url, msg["receipt_handle"])
+                    hotels_processed += 1
+                    messages_processed += 1
+
+                # Batch update periodically
+                if len(batch_results) >= BATCH_SIZE:
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                    logger.info(f"Batch update: {updated} hotels")
+                    batch_results = []
+
+                if len(batch_failed_ids) >= BATCH_SIZE:
+                    marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                    logger.info(f"Marked {marked} hotels for retry in 7 days")
+                    batch_failed_ids = []
+
+                # Log progress
+                attrs = get_queue_attributes(queue_url)
+                remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
+                logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched, {hotels_failed} failed, ~{remaining} remaining")
+
+            # Final batch flush
+            if batch_results:
+                updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                logger.info(f"Final batch update: {updated} hotels")
+
+            if batch_failed_ids:
+                marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                logger.info(f"Final batch: {marked} hotels marked for retry in 7 days")
+
+        logger.info(f"Consumer stopped. Total: {hotels_processed} processed, {hotels_enriched} enriched")
+        return ConsumeResult(
+            messages_processed=messages_processed,
+            hotels_processed=hotels_processed,
+            hotels_enriched=hotels_enriched,
+            hotels_failed=hotels_failed,
+        )
+
+    async def _process_cloudbeds_hotel(self, scraper, hotel_id: int, booking_url: str):
+        """Process a single Cloudbeds hotel. Returns (hotel_id, success, data, error)."""
+        try:
+            data = await scraper.extract(booking_url)
+
+            if not data:
+                return (hotel_id, False, None, "no_data")
+
+            # Check for garbage data (Cloudbeds homepage or error pages)
+            if data.name and data.name.lower() in ['cloudbeds.com', 'cloudbeds', 'book now', 'reservation']:
+                return (hotel_id, False, None, "404_not_found")
+            if data.city and 'soluções online' in data.city.lower():
+                return (hotel_id, False, None, "404_not_found")
+
+            return (hotel_id, True, data, None)
+
+        except Exception as e:
+            return (hotel_id, False, None, str(e)[:100])
