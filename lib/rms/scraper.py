@@ -83,7 +83,7 @@ class RMSScraper(IRMSScraper):
             data.website = await self._extract_website()
             data.address = self._extract_address(body_text)
             if data.address:
-                data.state, data.country = self._parse_address(data.address)
+                data.city, data.state, data.country = self._parse_address(data.address)
             
             return data if data.has_data() else None
         except Exception as e:
@@ -192,13 +192,60 @@ class RMSScraper(IRMSScraper):
                     return addr
         return None
     
-    def _parse_address(self, address: str) -> tuple[Optional[str], Optional[str]]:
+    def _parse_address(self, address: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Parse address to extract city, state, country.
+        
+        Returns (city, state, country).
+        
+        Handles formats:
+        - Australian: "Street, City STATE Postcode, Australia"
+        - US: "Street, City, STATE ZIP"
+        - NZ: "Street, City Postcode, New Zealand"
+        """
+        city = None
         state = None
         country = None
-        state_match = re.search(r',\s*([A-Z]{2,3})\s*(?:\d|$)', address)
+        
+        # Australian pattern: "City STATE Postcode, Australia" or "City STATE Postcode , Australia"
+        au_match = re.search(
+            r',\s*([A-Za-z\s\-\']+)\s+(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\s+(\d{4})\s*,?\s*Australia',
+            address, re.IGNORECASE
+        )
+        if au_match:
+            city = au_match.group(1).strip()
+            state = au_match.group(2).upper()
+            country = 'AU'
+            return city, state, country
+        
+        # US pattern: "City, STATE ZIP" or "City STATE ZIP"
+        us_states = 'AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC'
+        us_match = re.search(
+            rf',\s*([A-Za-z\s\-\'\.]+)[,\s]+({us_states})\s+(\d{{5}}(?:-\d{{4}})?)',
+            address, re.IGNORECASE
+        )
+        if us_match:
+            city = us_match.group(1).strip().rstrip(',')
+            state = us_match.group(2).upper()
+            country = 'USA'
+            return city, state, country
+        
+        # NZ pattern: "City Postcode, New Zealand"
+        nz_match = re.search(
+            r',\s*([A-Za-z\s\-\']+)\s+(\d{4})\s*,?\s*New Zealand',
+            address, re.IGNORECASE
+        )
+        if nz_match:
+            city = nz_match.group(1).strip()
+            country = 'NZ'
+            return city, state, country
+        
+        # Fallback: try to extract just state code and country name
+        state_match = re.search(r',\s*([A-Z]{2,3})\s+\d', address)
         if state_match:
             state = state_match.group(1)
-        country_match = re.search(r'(?:Australia|USA|Canada|New Zealand|UK)', address, re.IGNORECASE)
+        
+        country_match = re.search(r'(?:Australia|USA|Canada|New Zealand|UK|United States)', address, re.IGNORECASE)
         if country_match:
             country = normalize_country(country_match.group(0))
-        return state, country
+        
+        return city, state, country
