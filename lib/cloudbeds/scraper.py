@@ -6,14 +6,13 @@ Extracts hotel data from Cloudbeds booking pages.
 import asyncio
 import re
 from typing import Optional, Dict, Any, Protocol, runtime_checkable
-from dataclasses import dataclass
 
 from loguru import logger
 from playwright.async_api import Page
+from pydantic import BaseModel
 
 
-@dataclass
-class ExtractedCloudbedsData:
+class ExtractedCloudbedsData(BaseModel):
     """Extracted data from a Cloudbeds booking page."""
     name: Optional[str] = None
     address: Optional[str] = None

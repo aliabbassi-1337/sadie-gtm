@@ -5,26 +5,24 @@ Orchestrates Cloudbeds hotel enrichment using Playwright scraping.
 
 import asyncio
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
 
 from loguru import logger
 from playwright.async_api import async_playwright, Page, BrowserContext
 from playwright_stealth import Stealth
+from pydantic import BaseModel
 
 from lib.cloudbeds import CloudbedsScraper, ExtractedCloudbedsData
 from services.enrichment import repo
 
 
-@dataclass
-class EnrichmentResult:
+class EnrichmentResult(BaseModel):
     """Result of enrichment batch."""
     processed: int
     enriched: int
     failed: int
 
 
-@dataclass
-class HotelEnrichmentResult:
+class HotelEnrichmentResult(BaseModel):
     """Result of enriching a single hotel."""
     hotel_id: int
     success: bool
