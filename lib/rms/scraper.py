@@ -206,6 +206,10 @@ class RMSScraper(IRMSScraper):
         state = None
         country = None
         
+        # Handle None or empty address
+        if not address:
+            return city, state, country
+        
         # Australian pattern: "City STATE Postcode, Australia" or "City STATE Postcode , Australia"
         au_match = re.search(
             r',\s*([A-Za-z\s\-\']+)\s+(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\s+(\d{4})\s*,?\s*Australia',

@@ -239,6 +239,95 @@ class TestRMSScraperParseAddress:
         city, state, country = scraper._parse_address(address)
         
         assert country == "AU"
+    
+    # Edge cases
+    def test_handles_empty_address(self, scraper):
+        """Should handle empty address string."""
+        city, state, country = scraper._parse_address("")
+        
+        assert city is None
+        assert state is None
+        assert country is None
+    
+    def test_handles_none_address(self, scraper):
+        """Should handle None address."""
+        city, state, country = scraper._parse_address(None)
+        
+        assert city is None
+        assert state is None
+        assert country is None
+    
+    def test_handles_address_with_only_numbers(self, scraper):
+        """Should handle address that's just numbers."""
+        city, state, country = scraper._parse_address("12345")
+        
+        assert city is None
+    
+    def test_handles_unicode_city_names(self, scraper):
+        """Should handle unicode in city names."""
+        address = "123 Main St, São Paulo SP 01310, Brazil"
+        
+        city, state, country = scraper._parse_address(address)
+        # May or may not parse, but shouldn't crash
+    
+    def test_handles_multiple_commas(self, scraper):
+        """Should handle addresses with many commas."""
+        address = "Unit 5, Level 3, 123 Main Street, Sydney, NSW 2000, Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        # Should still extract Australia
+        assert country == "AU"
+    
+    def test_handles_lowercase_state(self, scraper):
+        """Should handle lowercase state abbreviations."""
+        address = "123 Main St, Austin, tx 78701"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert state == "TX"
+        assert country == "USA"
+    
+    def test_handles_mixed_case_country(self, scraper):
+        """Should handle mixed case country names."""
+        address = "123 Street, City NSW 2000, AUSTRALIA"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert country == "AU"
+    
+    def test_handles_zip_plus_four(self, scraper):
+        """Should handle US ZIP+4 format."""
+        address = "456 Oak Ave, Los Angeles, CA 90001-1234"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Los Angeles"
+        assert state == "CA"
+        assert country == "USA"
+    
+    def test_handles_po_box_address(self, scraper):
+        """Should handle PO Box addresses."""
+        address = "PO Box 123, Melbourne VIC 3000, Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert state == "VIC"
+        assert country == "AU"
+    
+    def test_handles_very_long_address(self, scraper):
+        """Should handle very long addresses without crashing."""
+        address = "A" * 1000 + ", Sydney NSW 2000, Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        # Should not crash, may or may not parse
+    
+    def test_handles_newlines_in_address(self, scraper):
+        """Should handle newlines in address."""
+        address = "123 Main St\nAustin, TX 78701"
+        
+        city, state, country = scraper._parse_address(address)
+        # Should still attempt to parse
 
 
 @pytest.mark.online

@@ -281,5 +281,134 @@ class TestBatchMarkCloudbedsFailed:
         assert marked == 0
 
 
+# ============================================================================
+# EDGE CASE TESTS
+# ============================================================================
+
+
+class TestServiceEdgeCases:
+    """Edge case tests for enrichment service."""
+    
+    @pytest.fixture
+    def service(self):
+        return Service(rms_repo=RMSRepo(), rms_queue=MockQueue())
+    
+    @pytest.mark.asyncio
+    async def test_batch_update_with_empty_list(self, service):
+        """Should handle empty batch update."""
+        result = await service.batch_update_cloudbeds_enrichment([])
+        assert result == 0
+    
+    @pytest.mark.asyncio
+    async def test_batch_update_with_none_fields(self, service):
+        """Should handle updates with None fields."""
+        # Hotel ID that likely doesn't exist
+        results = [{
+            "hotel_id": 999999999,
+            "name": None,
+            "address": None,
+            "city": None,
+            "state": None,
+            "country": None,
+            "phone": None,
+            "email": None,
+        }]
+        # Should not crash
+        await service.batch_update_cloudbeds_enrichment(results)
+    
+    @pytest.mark.asyncio
+    async def test_batch_mark_failed_with_nonexistent_ids(self, service):
+        """Should handle marking non-existent hotel IDs."""
+        # These IDs likely don't exist
+        result = await service.batch_mark_cloudbeds_failed([999999998, 999999999])
+        # Should not crash, may return 0
+        assert result >= 0
+
+
+@pytest.mark.online
+class TestServiceEdgeCasesOnline:
+    """Edge case tests that require network access."""
+    
+    @pytest.fixture
+    async def service_and_scraper(self):
+        """Create service with real browser."""
+        from playwright.async_api import async_playwright
+        from playwright_stealth import Stealth
+        from lib.cloudbeds import CloudbedsScraper
+        
+        service = Service(rms_repo=RMSRepo(), rms_queue=MockQueue())
+        
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        )
+        page = await ctx.new_page()
+        
+        stealth = Stealth()
+        await stealth.apply_stealth_async(page)
+        
+        scraper = CloudbedsScraper(page)
+        
+        yield service, scraper
+        
+        await ctx.close()
+        await browser.close()
+        await pw.stop()
+    
+    @pytest.mark.asyncio
+    async def test_handles_malformed_url(self, service_and_scraper):
+        """Should handle malformed URLs gracefully."""
+        service, scraper = service_and_scraper
+        
+        # Malformed URL
+        result = await service._process_cloudbeds_hotel(
+            scraper, 123, "not-a-valid-url"
+        )
+        
+        hotel_id, success, data, error = result
+        assert success is False
+        assert error is not None
+    
+    @pytest.mark.asyncio
+    async def test_handles_non_cloudbeds_url(self, service_and_scraper):
+        """Should handle non-Cloudbeds URLs gracefully."""
+        service, scraper = service_and_scraper
+        
+        # Google homepage - not a Cloudbeds page
+        result = await service._process_cloudbeds_hotel(
+            scraper, 456, "https://www.google.com"
+        )
+        
+        hotel_id, success, data, error = result
+        # Should fail or return garbage detection
+        assert hotel_id == 456
+    
+    @pytest.mark.asyncio
+    async def test_handles_timeout_url(self, service_and_scraper):
+        """Should handle URLs that might timeout."""
+        service, scraper = service_and_scraper
+        
+        # Non-routable IP - will timeout
+        result = await service._process_cloudbeds_hotel(
+            scraper, 789, "https://10.255.255.1/"
+        )
+        
+        hotel_id, success, data, error = result
+        assert success is False
+    
+    @pytest.mark.asyncio
+    async def test_handles_empty_url(self, service_and_scraper):
+        """Should handle empty URL string."""
+        service, scraper = service_and_scraper
+        
+        result = await service._process_cloudbeds_hotel(
+            scraper, 101, ""
+        )
+        
+        hotel_id, success, data, error = result
+        assert success is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
