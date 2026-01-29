@@ -14,6 +14,12 @@ Usage:
 
     # Export with custom source pattern
     uv run python -m workflows.export_crawl --engine mews --source "%crawl%"
+
+    # Export enrichment stats (data completeness by engine)
+    uv run python -m workflows.export_crawl --enrichment-stats
+
+    # Export enrichment stats filtered by source
+    uv run python -m workflows.export_crawl --enrichment-stats --source "%crawl%"
 """
 
 import argparse
@@ -47,13 +53,18 @@ async def main():
         action="store_true",
         help="Export all booking engines"
     )
+    engine_group.add_argument(
+        "--enrichment-stats",
+        action="store_true",
+        help="Export enrichment stats (data completeness by engine)"
+    )
 
     # Options
     parser.add_argument(
         "--source", "-s",
         type=str,
-        default="%crawl%",
-        help="Source pattern to filter (default: %%crawl%%)"
+        default=None,
+        help="Source pattern to filter (default: %%crawl%% for engines, none for stats)"
     )
 
     args = parser.parse_args()
@@ -66,6 +77,25 @@ async def main():
     from services.reporting.service import Service
     service = Service()
 
+    # Handle enrichment stats export
+    if args.enrichment_stats:
+        source_pattern = args.source
+        logger.info(f"Exporting enrichment stats (source: {source_pattern or 'all'})...")
+        try:
+            s3_uri, engine_count = await service.export_enrichment_stats(
+                source_pattern=source_pattern
+            )
+            if engine_count > 0:
+                logger.info(f"Exported stats for {engine_count} engines to {s3_uri}")
+            else:
+                logger.info("No enrichment stats found")
+        except Exception as e:
+            logger.error(f"Failed to export enrichment stats: {e}")
+        return
+
+    # Default source pattern for engine exports
+    source_pattern = args.source or "%crawl%"
+
     # Determine engines to export
     engines = BOOKING_ENGINES if args.all else [args.engine]
 
@@ -77,7 +107,7 @@ async def main():
         try:
             s3_uri, count = await service.export_by_booking_engine(
                 booking_engine=engine,
-                source_pattern=args.source,
+                source_pattern=source_pattern,
             )
             if count > 0:
                 exports.append((engine, s3_uri, count))

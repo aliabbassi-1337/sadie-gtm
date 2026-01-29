@@ -1127,13 +1127,13 @@ WHERE h.name IS NOT NULL
 -- Update hotel with geocoding results from Serper Places
 -- Updates location, contact info, and coordinates
 UPDATE sadie_gtm.hotels
-SET 
+SET
     address = COALESCE(CAST(:address AS TEXT), address),
     city = COALESCE(CAST(:city AS TEXT), city),
     state = COALESCE(CAST(:state AS TEXT), state),
     country = COALESCE(CAST(:country AS TEXT), country),
-    location = CASE 
-        WHEN CAST(:latitude AS FLOAT) IS NOT NULL AND CAST(:longitude AS FLOAT) IS NOT NULL 
+    location = CASE
+        WHEN CAST(:latitude AS FLOAT) IS NOT NULL AND CAST(:longitude AS FLOAT) IS NOT NULL
         THEN ST_SetSRID(ST_MakePoint(CAST(:longitude AS FLOAT), CAST(:latitude AS FLOAT)), 4326)::geography
         ELSE location
     END,
@@ -1141,3 +1141,66 @@ SET
     email = COALESCE(CAST(:email AS TEXT), email),
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
+
+
+-- ============================================================================
+-- ENRICHMENT STATS QUERIES
+-- ============================================================================
+
+-- name: get_enrichment_stats_by_engine
+-- Get enrichment stats grouped by booking engine
+-- Shows data completeness metrics for target engines (Cloudbeds, Mews, RMS, SiteMinder)
+SELECT
+    bes.name AS engine_name,
+    COUNT(*) AS total_hotels,
+    COUNT(CASE WHEN h.status = 1 THEN 1 END) AS live,
+    COUNT(CASE WHEN h.status = 0 THEN 1 END) AS pending,
+    COUNT(CASE WHEN h.status = -1 THEN 1 END) AS error,
+    COUNT(CASE WHEN h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%' THEN 1 END) AS has_name,
+    COUNT(CASE WHEN h.email IS NOT NULL AND h.email != '' THEN 1 END) AS has_email,
+    COUNT(CASE WHEN h.phone_website IS NOT NULL AND h.phone_website != '' THEN 1 END) AS has_phone,
+    COUNT(CASE WHEN (h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != '') THEN 1 END) AS has_contact,
+    COUNT(CASE WHEN h.city IS NOT NULL AND h.city != '' THEN 1 END) AS has_city,
+    COUNT(CASE WHEN h.state IS NOT NULL AND h.state != '' THEN 1 END) AS has_state,
+    COUNT(CASE WHEN h.country IS NOT NULL AND h.country != '' THEN 1 END) AS has_country,
+    COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS has_website,
+    COUNT(CASE WHEN h.address IS NOT NULL AND h.address != '' THEN 1 END) AS has_address,
+    COUNT(CASE WHEN h.location IS NOT NULL THEN 1 END) AS has_coordinates,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL THEN 1 END) AS has_booking_engine,
+    COUNT(CASE WHEN hrc.hotel_id IS NOT NULL THEN 1 END) AS has_room_count
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+JOIN sadie_gtm.booking_engines bes ON bes.id = hbe.booking_engine_id
+WHERE hbe.booking_engine_id IN (3, 4, 12, 14)  -- Cloudbeds, Mews, RMS Cloud, SiteMinder
+GROUP BY bes.name
+ORDER BY total_hotels DESC;
+
+-- name: get_enrichment_stats_by_engine_source
+-- Get enrichment stats grouped by booking engine, filtered by source pattern
+SELECT
+    bes.name AS engine_name,
+    COUNT(*) AS total_hotels,
+    COUNT(CASE WHEN h.status = 1 THEN 1 END) AS live,
+    COUNT(CASE WHEN h.status = 0 THEN 1 END) AS pending,
+    COUNT(CASE WHEN h.status = -1 THEN 1 END) AS error,
+    COUNT(CASE WHEN h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%' THEN 1 END) AS has_name,
+    COUNT(CASE WHEN h.email IS NOT NULL AND h.email != '' THEN 1 END) AS has_email,
+    COUNT(CASE WHEN h.phone_website IS NOT NULL AND h.phone_website != '' THEN 1 END) AS has_phone,
+    COUNT(CASE WHEN (h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != '') THEN 1 END) AS has_contact,
+    COUNT(CASE WHEN h.city IS NOT NULL AND h.city != '' THEN 1 END) AS has_city,
+    COUNT(CASE WHEN h.state IS NOT NULL AND h.state != '' THEN 1 END) AS has_state,
+    COUNT(CASE WHEN h.country IS NOT NULL AND h.country != '' THEN 1 END) AS has_country,
+    COUNT(CASE WHEN h.website IS NOT NULL AND h.website != '' THEN 1 END) AS has_website,
+    COUNT(CASE WHEN h.address IS NOT NULL AND h.address != '' THEN 1 END) AS has_address,
+    COUNT(CASE WHEN h.location IS NOT NULL THEN 1 END) AS has_coordinates,
+    COUNT(CASE WHEN hbe.hotel_id IS NOT NULL THEN 1 END) AS has_booking_engine,
+    COUNT(CASE WHEN hrc.hotel_id IS NOT NULL THEN 1 END) AS has_room_count
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
+JOIN sadie_gtm.booking_engines bes ON bes.id = hbe.booking_engine_id
+WHERE hbe.booking_engine_id IN (3, 4, 12, 14)  -- Cloudbeds, Mews, RMS Cloud, SiteMinder
+  AND h.source LIKE :source_pattern
+GROUP BY bes.name
+ORDER BY total_hotels DESC;
