@@ -78,13 +78,13 @@ async def run_dry_run(limit: int):
         await close_db()
 
 
-async def run_enrichment(limit: int, concurrency: int = 3):
+async def run_enrichment(limit: int, concurrency: int = 6, delay: float = 1.0):
     """Run the enrichment workflow."""
     await init_db()
     
     try:
         service = Service()
-        result = await service.enrich_cloudbeds_hotels(limit=limit, concurrency=concurrency)
+        result = await service.enrich_cloudbeds_hotels(limit=limit, concurrency=concurrency, delay=delay)
         
         print("\n" + "=" * 60)
         print("ENRICHMENT COMPLETE")
@@ -104,6 +104,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Show what would be enriched")
     parser.add_argument("--limit", type=int, default=100, help="Max hotels to process")
     parser.add_argument("--concurrency", type=int, default=6, help="Concurrent browser contexts")
+    parser.add_argument("--delay", type=float, default=1.0, help="Seconds between batches (rate limiting)")
     
     args = parser.parse_args()
     
@@ -112,7 +113,7 @@ def main():
     elif args.dry_run:
         asyncio.run(run_dry_run(args.limit))
     else:
-        asyncio.run(run_enrichment(args.limit, args.concurrency))
+        asyncio.run(run_enrichment(args.limit, args.concurrency, args.delay))
 
 
 if __name__ == "__main__":

@@ -526,8 +526,14 @@ class IService(ABC):
 
     # Cloudbeds Enrichment
     @abstractmethod
-    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6) -> EnrichResult:
-        """Enrich Cloudbeds hotels by scraping their booking pages."""
+    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6, delay: float = 1.0) -> EnrichResult:
+        """Enrich Cloudbeds hotels by scraping their booking pages.
+        
+        Args:
+            limit: Max hotels to process
+            concurrency: Concurrent browser contexts
+            delay: Seconds between batches (rate limiting, default 1.0)
+        """
         pass
 
     @abstractmethod
@@ -1509,8 +1515,14 @@ class Service(IService):
     # Cloudbeds Enrichment
     # =========================================================================
 
-    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6) -> EnrichResult:
-        """Enrich Cloudbeds hotels by scraping their booking pages."""
+    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6, delay: float = 1.0) -> EnrichResult:
+        """Enrich Cloudbeds hotels by scraping their booking pages.
+        
+        Args:
+            limit: Max hotels to process
+            concurrency: Concurrent browser contexts
+            delay: Seconds between batches (rate limiting, default 1.0)
+        """
         from lib.browser import BrowserPool
         from lib.cloudbeds import CloudbedsScraper
 
@@ -1529,7 +1541,7 @@ class Service(IService):
 
         async with BrowserPool(concurrency=concurrency) as pool:
             scrapers = [CloudbedsScraper(page) for page in pool.pages]
-            logger.info(f"Created {concurrency} browser contexts")
+            logger.info(f"Created {concurrency} browser contexts (delay={delay}s between batches)")
 
             async def process_hotel(page, hotel):
                 scraper = scrapers[pool.pages.index(page)]
@@ -1539,7 +1551,7 @@ class Service(IService):
                 except Exception as e:
                     return (hotel["id"], False, None, str(e)[:100])
 
-            results = await pool.process_batch(hotels, process_hotel)
+            results = await pool.process_batch(hotels, process_hotel, delay_between_batches=delay)
 
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
@@ -1663,6 +1675,9 @@ class Service(IService):
                     tasks.append(self._process_cloudbeds_hotel(scrapers[i], hotel_id, booking_url))
 
                 results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Rate limit: 1 second delay between batches
+                await asyncio.sleep(1.0)
 
                 # Handle results
                 for result in results:

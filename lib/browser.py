@@ -67,19 +67,25 @@ class BrowserPool:
         self,
         items: List[Any],
         process_fn: Callable[[Page, Any], Awaitable[T]],
+        delay_between_batches: float = 1.0,
     ) -> List[T]:
         """Process a batch of items using the browser pool.
         
         Args:
             items: Items to process (will be chunked by concurrency)
             process_fn: Async function that takes (page, item) and returns result
+            delay_between_batches: Seconds to wait between batches (rate limiting)
             
         Returns:
             List of results from process_fn
         """
         all_results = []
         
-        for batch_start in range(0, len(items), self.concurrency):
+        for batch_idx, batch_start in enumerate(range(0, len(items), self.concurrency)):
+            # Rate limit: delay between batches (skip first batch)
+            if batch_idx > 0 and delay_between_batches > 0:
+                await asyncio.sleep(delay_between_batches)
+            
             batch = items[batch_start:batch_start + self.concurrency]
             
             tasks = [

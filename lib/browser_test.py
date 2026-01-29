@@ -9,19 +9,31 @@ from lib.browser import BrowserPool
 class TestBrowserPool:
     """Tests for BrowserPool class."""
     
+    @pytest.fixture
+    def mock_playwright_setup(self):
+        """Create properly mocked playwright setup."""
+        mock_browser = AsyncMock()
+        mock_context = AsyncMock()
+        mock_page = AsyncMock()
+        mock_pw_instance = AsyncMock()
+        
+        mock_pw_instance.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_pw_instance.stop = AsyncMock()
+        
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_browser.close = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.close = AsyncMock()
+        
+        return mock_pw_instance, mock_browser, mock_context, mock_page
+    
     @pytest.mark.asyncio
-    async def test_creates_specified_number_of_contexts(self):
+    async def test_creates_specified_number_of_contexts(self, mock_playwright_setup):
         """Should create the specified number of browser contexts."""
+        mock_pw_instance, mock_browser, mock_context, mock_page = mock_playwright_setup
+        
         with patch('lib.browser.async_playwright') as mock_playwright:
-            mock_browser = AsyncMock()
-            mock_context = AsyncMock()
-            mock_page = AsyncMock()
-            
-            mock_playwright.return_value.start = AsyncMock(return_value=MagicMock(
-                chromium=MagicMock(launch=AsyncMock(return_value=mock_browser))
-            ))
-            mock_browser.new_context = AsyncMock(return_value=mock_context)
-            mock_context.new_page = AsyncMock(return_value=mock_page)
+            mock_playwright.return_value.start = AsyncMock(return_value=mock_pw_instance)
             
             with patch('lib.browser.Stealth') as mock_stealth:
                 mock_stealth.return_value.apply_stealth_async = AsyncMock()
@@ -35,18 +47,12 @@ class TestBrowserPool:
                 await pool.__aexit__(None, None, None)
     
     @pytest.mark.asyncio
-    async def test_pages_property_returns_pages(self):
+    async def test_pages_property_returns_pages(self, mock_playwright_setup):
         """Should return list of pages via pages property."""
+        mock_pw_instance, mock_browser, mock_context, mock_page = mock_playwright_setup
+        
         with patch('lib.browser.async_playwright') as mock_playwright:
-            mock_browser = AsyncMock()
-            mock_context = AsyncMock()
-            mock_page = AsyncMock()
-            
-            mock_playwright.return_value.start = AsyncMock(return_value=MagicMock(
-                chromium=MagicMock(launch=AsyncMock(return_value=mock_browser))
-            ))
-            mock_browser.new_context = AsyncMock(return_value=mock_context)
-            mock_context.new_page = AsyncMock(return_value=mock_page)
+            mock_playwright.return_value.start = AsyncMock(return_value=mock_pw_instance)
             
             with patch('lib.browser.Stealth') as mock_stealth:
                 mock_stealth.return_value.apply_stealth_async = AsyncMock()
@@ -63,19 +69,31 @@ class TestBrowserPool:
 class TestBrowserPoolProcessBatch:
     """Tests for BrowserPool.process_batch() method."""
     
+    @pytest.fixture
+    def mock_playwright_setup(self):
+        """Create properly mocked playwright setup."""
+        mock_browser = AsyncMock()
+        mock_context = AsyncMock()
+        mock_page = AsyncMock()
+        mock_pw_instance = AsyncMock()
+        
+        mock_pw_instance.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_pw_instance.stop = AsyncMock()
+        
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_browser.close = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        mock_context.close = AsyncMock()
+        
+        return mock_pw_instance, mock_browser, mock_context, mock_page
+    
     @pytest.mark.asyncio
-    async def test_processes_items_in_batches(self):
+    async def test_processes_items_in_batches(self, mock_playwright_setup):
         """Should process items in batches of concurrency size."""
+        mock_pw_instance, mock_browser, mock_context, mock_page = mock_playwright_setup
+        
         with patch('lib.browser.async_playwright') as mock_playwright:
-            mock_browser = AsyncMock()
-            mock_context = AsyncMock()
-            mock_page = AsyncMock()
-            
-            mock_playwright.return_value.start = AsyncMock(return_value=MagicMock(
-                chromium=MagicMock(launch=AsyncMock(return_value=mock_browser))
-            ))
-            mock_browser.new_context = AsyncMock(return_value=mock_context)
-            mock_context.new_page = AsyncMock(return_value=mock_page)
+            mock_playwright.return_value.start = AsyncMock(return_value=mock_pw_instance)
             
             with patch('lib.browser.Stealth') as mock_stealth:
                 mock_stealth.return_value.apply_stealth_async = AsyncMock()
@@ -84,30 +102,24 @@ class TestBrowserPoolProcessBatch:
                 await pool.__aenter__()
                 
                 items = [1, 2, 3, 4, 5]
-                results = []
                 
                 async def process_fn(page, item):
                     return item * 2
                 
-                results = await pool.process_batch(items, process_fn)
+                # Use delay=0 for fast tests
+                results = await pool.process_batch(items, process_fn, delay_between_batches=0)
                 
                 assert results == [2, 4, 6, 8, 10]
                 
                 await pool.__aexit__(None, None, None)
     
     @pytest.mark.asyncio
-    async def test_handles_exceptions_in_process_fn(self):
+    async def test_handles_exceptions_in_process_fn(self, mock_playwright_setup):
         """Should capture exceptions from process_fn in results."""
+        mock_pw_instance, mock_browser, mock_context, mock_page = mock_playwright_setup
+        
         with patch('lib.browser.async_playwright') as mock_playwright:
-            mock_browser = AsyncMock()
-            mock_context = AsyncMock()
-            mock_page = AsyncMock()
-            
-            mock_playwright.return_value.start = AsyncMock(return_value=MagicMock(
-                chromium=MagicMock(launch=AsyncMock(return_value=mock_browser))
-            ))
-            mock_browser.new_context = AsyncMock(return_value=mock_context)
-            mock_context.new_page = AsyncMock(return_value=mock_page)
+            mock_playwright.return_value.start = AsyncMock(return_value=mock_pw_instance)
             
             with patch('lib.browser.Stealth') as mock_stealth:
                 mock_stealth.return_value.apply_stealth_async = AsyncMock()
@@ -122,7 +134,7 @@ class TestBrowserPoolProcessBatch:
                         raise ValueError("Test error")
                     return item * 2
                 
-                results = await pool.process_batch(items, process_fn)
+                results = await pool.process_batch(items, process_fn, delay_between_batches=0)
                 
                 assert results[0] == 2
                 assert isinstance(results[1], ValueError)
