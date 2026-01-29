@@ -56,7 +56,7 @@ jobs:
               # Restart all managed services
               sudo systemctl restart detection-consumer || true
               sudo systemctl restart booking-enrichment-consumer || true
-              # cloudbeds-enrichment-consumer DEPRECATED - using booking-enrichment with archive fallback
+              sudo systemctl restart cloudbeds-enrichment-consumer || true
             "; then
               echo "SUCCESS: $ip"
               return 0

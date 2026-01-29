@@ -327,19 +327,34 @@ class BookingPageEnricher:
         if len(lines) > 1:
             city = lines[1]
         
-        # Line 2: "State Country" e.g. "Texas US"
-        if len(lines) > 2:
+        # Line 2+: Look for "State Country" pattern e.g. "Texas US", "California USA"
+        # Enhanced regex to properly extract state and country codes
+        state_country_pattern = re.compile(
+            r'^([A-Za-z\s]+)\s+(US|USA|AU|UK|CA|NZ|GB|IE|MX|AR|PR|CO|IT|ES|FR|DE|PT|BR|CL|PE|CR|PA)$',
+            re.IGNORECASE
+        )
+        
+        # Search lines 2-5 for the "State Country" pattern
+        for line in lines[2:6] if len(lines) > 2 else []:
+            match = state_country_pattern.match(line.strip())
+            if match:
+                state = match.group(1).strip()
+                country_code = match.group(2).strip().upper()
+                country = 'USA' if country_code in ['US', 'USA'] else country_code
+                break
+        
+        # Fallback: original rsplit approach for unrecognized patterns
+        if not state and len(lines) > 2:
             state_country = lines[2].strip()
-            # Common patterns: "Texas US", "California USA", "NY US"
-            # Split by last space - country is usually 2-3 chars
             parts = state_country.rsplit(' ', 1)
-            if len(parts) == 2:
+            if len(parts) == 2 and len(parts[1]) <= 4:
                 state = parts[0].strip()
-                country = parts[1].strip()
-                # Normalize country codes
-                if country.upper() in ['US', 'USA']:
+                country_raw = parts[1].strip().upper()
+                if country_raw in ['US', 'USA']:
                     country = 'USA'
-            else:
+                elif len(country_raw) <= 3:
+                    country = country_raw
+            elif len(parts) == 1:
                 state = state_country
         
         # Line 3: Zip code (numeric or alphanumeric like "78006")

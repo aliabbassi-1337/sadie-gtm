@@ -110,18 +110,18 @@ ec2:
     type: cron
     host: primary  # Only run on first/primary EC2 instance
 
-  # DEPRECATED: Cloudbeds now uses booking_enrichment_consumer (has archive fallback)
-  # cloudbeds_enrichment_consumer:
-  #   description: Poll SQS and scrape Cloudbeds hotels with Playwright
-  #   command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 6
-  #   type: systemd
-  #
-  # enqueue_cloudbeds_enrichment:
-  #   description: Queue Cloudbeds hotels needing enrichment
-  #   command: uv run python -m workflows.enrich_cloudbeds_enqueue --limit 5000
-  #   schedule: "*/15 * * * *"
-  #   type: cron
-  #   host: primary
+  # Cloudbeds enrichment (Playwright-based for JS rendering + enhanced state extraction)
+  cloudbeds_enrichment_consumer:
+    description: Poll SQS and scrape Cloudbeds hotels with Playwright
+    command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 6
+    type: systemd
+
+  enqueue_cloudbeds_enrichment:
+    description: Queue Cloudbeds hotels needing enrichment
+    command: uv run python -m workflows.enrich_cloudbeds_enqueue --limit 5000
+    schedule: "*/15 * * * *"  # Every 15 min
+    type: cron
+    host: primary
 
   # Mews enrichment (scrape hotel name from Mews booking pages)
   mews_enrichment_consumer:
