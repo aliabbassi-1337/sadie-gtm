@@ -33,11 +33,10 @@ class BrowserPool:
     
     async def __aenter__(self):
         """Start browser and create context pool."""
-        self._stealth = Stealth()
         self._playwright = await async_playwright().start()
-        await self._stealth.apply_stealth_async(self._playwright)
-        
         self._browser = await self._playwright.chromium.launch(headless=self.headless)
+        
+        stealth = Stealth()
         
         for _ in range(self.concurrency):
             ctx = await self._browser.new_context(
@@ -45,6 +44,8 @@ class BrowserPool:
                 viewport={"width": 1280, "height": 800},
             )
             page = await ctx.new_page()
+            # Apply stealth to each page
+            await stealth.apply_stealth_async(page)
             self._contexts.append(ctx)
             self._pages.append(page)
         
