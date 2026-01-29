@@ -21,7 +21,7 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment import repo
+from services.enrichment.service import Service
 from infra.sqs import receive_messages, delete_message, get_queue_attributes
 
 from playwright.async_api import async_playwright, BrowserContext
@@ -54,6 +54,7 @@ async def run_consumer(concurrency: int = 5):
     signal.signal(signal.SIGTERM, handle_shutdown)
     
     await init_db()
+    service = Service()
     
     try:
         logger.info(f"Starting Cloudbeds enrichment consumer (concurrency={concurrency})")
@@ -162,12 +163,12 @@ async def run_consumer(concurrency: int = 5):
                 
                 # Batch update every 50 results
                 if len(batch_results) >= 50:
-                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                    updated = await service.batch_update_cloudbeds_enrichment(batch_results)
                     logger.info(f"Batch update: {updated} hotels")
                     batch_results = []
                 
                 if len(batch_failed_ids) >= 50:
-                    marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                    marked = await service.batch_mark_cloudbeds_failed(batch_failed_ids)
                     logger.info(f"Marked {marked} hotels for retry in 7 days")
                     batch_failed_ids = []
                 
@@ -178,11 +179,11 @@ async def run_consumer(concurrency: int = 5):
             
             # Final batch
             if batch_results:
-                updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                updated = await service.batch_update_cloudbeds_enrichment(batch_results)
                 logger.info(f"Final batch update: {updated} hotels")
             
             if batch_failed_ids:
-                marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                marked = await service.batch_mark_cloudbeds_failed(batch_failed_ids)
                 logger.info(f"Final batch: {marked} hotels marked for retry in 7 days")
             
             # Cleanup

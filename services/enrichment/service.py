@@ -530,6 +530,26 @@ class IService(ABC):
         """Enrich Cloudbeds hotels by scraping their booking pages."""
         pass
 
+    @abstractmethod
+    async def get_cloudbeds_enrichment_status(self) -> Dict[str, int]:
+        """Get Cloudbeds enrichment status counts."""
+        pass
+
+    @abstractmethod
+    async def get_cloudbeds_hotels_needing_enrichment(self, limit: int = 100) -> List:
+        """Get Cloudbeds hotels needing enrichment for dry-run."""
+        pass
+
+    @abstractmethod
+    async def batch_update_cloudbeds_enrichment(self, results: List[Dict]) -> int:
+        """Batch update Cloudbeds enrichment results."""
+        pass
+
+    @abstractmethod
+    async def batch_mark_cloudbeds_failed(self, hotel_ids: List[int]) -> int:
+        """Mark Cloudbeds hotels as failed (for retry later)."""
+        pass
+
 
 class Service(IService):
     def __init__(self, rms_repo: Optional[RMSRepo] = None, rms_queue = None) -> None:
@@ -1539,3 +1559,25 @@ class Service(IService):
             logger.info(f"Updated {total_enriched} hotels")
 
         return EnrichResult(processed=len(hotels), enriched=total_enriched, failed=total_errors)
+
+    async def get_cloudbeds_enrichment_status(self) -> Dict[str, int]:
+        """Get Cloudbeds enrichment status counts."""
+        total = await repo.get_cloudbeds_hotels_total_count()
+        needing = await repo.get_cloudbeds_hotels_needing_enrichment_count()
+        return {
+            "total": total,
+            "needing_enrichment": needing,
+            "already_enriched": total - needing,
+        }
+
+    async def get_cloudbeds_hotels_needing_enrichment(self, limit: int = 100) -> List:
+        """Get Cloudbeds hotels needing enrichment for dry-run."""
+        return await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
+
+    async def batch_update_cloudbeds_enrichment(self, results: List[Dict]) -> int:
+        """Batch update Cloudbeds enrichment results."""
+        return await repo.batch_update_cloudbeds_enrichment(results)
+
+    async def batch_mark_cloudbeds_failed(self, hotel_ids: List[int]) -> int:
+        """Mark Cloudbeds hotels as failed (for retry later)."""
+        return await repo.batch_set_last_enrichment_attempt(hotel_ids)

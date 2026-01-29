@@ -24,7 +24,6 @@ import argparse
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment import repo
 from services.enrichment.service import Service
 
 
@@ -33,15 +32,15 @@ async def run_status():
     await init_db()
     
     try:
-        count = await repo.get_cloudbeds_hotels_needing_enrichment_count()
-        total = await repo.get_cloudbeds_hotels_total_count()
+        service = Service()
+        status = await service.get_cloudbeds_enrichment_status()
         
         print("\n" + "=" * 60)
         print("CLOUDBEDS ENRICHMENT STATUS")
         print("=" * 60)
-        print(f"  Total Cloudbeds hotels:     {total:,}")
-        print(f"  Needing enrichment:         {count:,}")
-        print(f"  Already enriched:           {total - count:,}")
+        print(f"  Total Cloudbeds hotels:     {status['total']:,}")
+        print(f"  Needing enrichment:         {status['needing_enrichment']:,}")
+        print(f"  Already enriched:           {status['already_enriched']:,}")
         print("=" * 60 + "\n")
         
     finally:
@@ -53,7 +52,8 @@ async def run_dry_run(limit: int):
     await init_db()
     
     try:
-        candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
+        service = Service()
+        candidates = await service.get_cloudbeds_hotels_needing_enrichment(limit=limit)
         
         print(f"\n=== DRY RUN: Would enrich {len(candidates)} hotels ===\n")
         
