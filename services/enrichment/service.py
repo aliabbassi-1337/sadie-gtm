@@ -1481,8 +1481,7 @@ class Service(IService):
 
     async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 3) -> EnrichResult:
         """Enrich Cloudbeds hotels by scraping their booking pages."""
-        from playwright.async_api import async_playwright, BrowserContext
-        from playwright_stealth import Stealth
+        from lib.browser import BrowserPool
         from lib.cloudbeds import CloudbedsScraper
 
         candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
@@ -1496,87 +1495,47 @@ class Service(IService):
 
         total_enriched = 0
         total_errors = 0
-        batch_size = 50
+        results_buffer = []
 
-        async with Stealth().use_async(async_playwright()) as p:
-            browser = await p.chromium.launch(headless=True)
-
-            contexts: List[BrowserContext] = []
-            scrapers: List[CloudbedsScraper] = []
-
-            for _ in range(concurrency):
-                ctx = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                    viewport={"width": 1280, "height": 800},
-                )
-                page = await ctx.new_page()
-                contexts.append(ctx)
-                scrapers.append(CloudbedsScraper(page))
-
+        async with BrowserPool(concurrency=concurrency) as pool:
+            scrapers = [CloudbedsScraper(page) for page in pool.pages]
             logger.info(f"Created {concurrency} browser contexts")
 
-            results_buffer = []
-            processed = 0
+            async def process_hotel(page, hotel):
+                scraper = scrapers[pool.pages.index(page)]
+                try:
+                    data = await scraper.extract(hotel["booking_url"])
+                    return (hotel["id"], bool(data), data, None if data else "no_data")
+                except Exception as e:
+                    return (hotel["id"], False, None, str(e)[:100])
 
-            for batch_start in range(0, len(hotels), concurrency):
-                batch = hotels[batch_start:batch_start + concurrency]
+            results = await pool.process_batch(hotels, process_hotel)
 
-                async def enrich_one(scraper, hotel):
-                    try:
-                        data = await scraper.extract(hotel["booking_url"])
-                        if not data:
-                            return (hotel["id"], False, None, "no_data")
-                        return (hotel["id"], True, data, None)
-                    except Exception as e:
-                        return (hotel["id"], False, None, str(e)[:100])
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    total_errors += 1
+                    logger.warning(f"  Hotel {hotels[i]['id']}: error - {result}")
+                    continue
 
-                tasks = [enrich_one(scrapers[i], h) for i, h in enumerate(batch)]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                hotel_id, success, data, error = result
+                if success and data and (data.city or data.name):
+                    results_buffer.append({
+                        "hotel_id": hotel_id,
+                        "name": data.name,
+                        "address": data.address,
+                        "city": data.city,
+                        "state": data.state,
+                        "country": data.country,
+                        "phone": data.phone,
+                        "email": data.email,
+                    })
+                    logger.info(f"  Hotel {hotel_id}: {data.name[:25] if data.name else ''}, {data.city}")
+                elif error:
+                    total_errors += 1
+                    logger.warning(f"  Hotel {hotel_id}: {error}")
 
-                for i, result in enumerate(results):
-                    processed += 1
-                    hotel = batch[i]
-
-                    if isinstance(result, Exception):
-                        total_errors += 1
-                        logger.warning(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: error - {result}")
-                        continue
-
-                    hotel_id, success, data, error = result
-                    if success and data and (data.city or data.name):
-                        results_buffer.append({
-                            "hotel_id": hotel_id,
-                            "name": data.name,
-                            "address": data.address,
-                            "city": data.city,
-                            "state": data.state,
-                            "country": data.country,
-                            "phone": data.phone,
-                            "email": data.email,
-                        })
-                        parts = []
-                        if data.name:
-                            parts.append(f"name={data.name[:25]}")
-                        if data.city:
-                            parts.append(f"loc={data.city}, {data.state}")
-                        logger.info(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: {', '.join(parts)}")
-                    elif error:
-                        total_errors += 1
-                        logger.warning(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: {error}")
-
-                if len(results_buffer) >= batch_size:
-                    updated = await repo.batch_update_cloudbeds_enrichment(results_buffer)
-                    total_enriched += updated
-                    logger.info(f"  Batch update: {updated} hotels")
-                    results_buffer = []
-
-            if results_buffer:
-                updated = await repo.batch_update_cloudbeds_enrichment(results_buffer)
-                total_enriched += updated
-                logger.info(f"  Final batch: {updated} hotels")
-
-            for ctx in contexts:
-                await ctx.close()
-            await browser.close()
+        if results_buffer:
+            total_enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
+            logger.info(f"Updated {total_enriched} hotels")
 
         return EnrichResult(processed=len(hotels), enriched=total_enriched, failed=total_errors)
