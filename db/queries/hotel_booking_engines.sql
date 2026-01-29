@@ -220,6 +220,18 @@ JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%';
 
+-- name: reset_cloudbeds_enrichment_for_missing_state$
+-- Reset last_enrichment_attempt for Cloudbeds hotels missing state (to force re-enrichment)
+UPDATE sadie_gtm.hotel_booking_engines hbe
+SET last_enrichment_attempt = NULL
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.booking_engines be ON be.name ILIKE '%cloudbeds%'
+WHERE hbe.hotel_id = h.id
+  AND hbe.booking_engine_id = be.id
+  AND hbe.booking_url IS NOT NULL
+  AND h.status >= 0
+  AND (h.state IS NULL OR h.state = '');
+
 -- name: set_last_enrichment_attempt!
 -- Record when enrichment was last attempted (for rate limit cooldown)
 UPDATE sadie_gtm.hotel_booking_engines
