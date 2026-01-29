@@ -524,6 +524,12 @@ class IService(ABC):
         """Consume and process RMS enrichment queue."""
         pass
 
+    # Cloudbeds Enrichment
+    @abstractmethod
+    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 3) -> EnrichResult:
+        """Enrich Cloudbeds hotels by scraping their booking pages."""
+        pass
+
 
 class Service(IService):
     def __init__(self, rms_repo: Optional[RMSRepo] = None, rms_queue = None) -> None:
@@ -1468,3 +1474,109 @@ class Service(IService):
 
     def get_rms_queue_stats(self) -> QueueStats:
         return self._rms_queue.get_stats()
+
+    # =========================================================================
+    # Cloudbeds Enrichment
+    # =========================================================================
+
+    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 3) -> EnrichResult:
+        """Enrich Cloudbeds hotels by scraping their booking pages."""
+        from playwright.async_api import async_playwright, BrowserContext
+        from playwright_stealth import Stealth
+        from lib.cloudbeds import CloudbedsScraper
+
+        candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
+        hotels = [{"id": c.id, "booking_url": c.booking_url} for c in candidates]
+
+        if not hotels:
+            logger.info("No Cloudbeds hotels need enrichment")
+            return EnrichResult(processed=0, enriched=0, failed=0)
+
+        logger.info(f"Found {len(hotels)} Cloudbeds hotels to enrich")
+
+        total_enriched = 0
+        total_errors = 0
+        batch_size = 50
+
+        async with Stealth().use_async(async_playwright()) as p:
+            browser = await p.chromium.launch(headless=True)
+
+            contexts: List[BrowserContext] = []
+            scrapers: List[CloudbedsScraper] = []
+
+            for _ in range(concurrency):
+                ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                    viewport={"width": 1280, "height": 800},
+                )
+                page = await ctx.new_page()
+                contexts.append(ctx)
+                scrapers.append(CloudbedsScraper(page))
+
+            logger.info(f"Created {concurrency} browser contexts")
+
+            results_buffer = []
+            processed = 0
+
+            for batch_start in range(0, len(hotels), concurrency):
+                batch = hotels[batch_start:batch_start + concurrency]
+
+                async def enrich_one(scraper, hotel):
+                    try:
+                        data = await scraper.extract(hotel["booking_url"])
+                        if not data:
+                            return (hotel["id"], False, None, "no_data")
+                        return (hotel["id"], True, data, None)
+                    except Exception as e:
+                        return (hotel["id"], False, None, str(e)[:100])
+
+                tasks = [enrich_one(scrapers[i], h) for i, h in enumerate(batch)]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for i, result in enumerate(results):
+                    processed += 1
+                    hotel = batch[i]
+
+                    if isinstance(result, Exception):
+                        total_errors += 1
+                        logger.warning(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: error - {result}")
+                        continue
+
+                    hotel_id, success, data, error = result
+                    if success and data and (data.city or data.name):
+                        results_buffer.append({
+                            "hotel_id": hotel_id,
+                            "name": data.name,
+                            "address": data.address,
+                            "city": data.city,
+                            "state": data.state,
+                            "country": data.country,
+                            "phone": data.phone,
+                            "email": data.email,
+                        })
+                        parts = []
+                        if data.name:
+                            parts.append(f"name={data.name[:25]}")
+                        if data.city:
+                            parts.append(f"loc={data.city}, {data.state}")
+                        logger.info(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: {', '.join(parts)}")
+                    elif error:
+                        total_errors += 1
+                        logger.warning(f"  [{processed}/{len(hotels)}] Hotel {hotel['id']}: {error}")
+
+                if len(results_buffer) >= batch_size:
+                    updated = await repo.batch_update_cloudbeds_enrichment(results_buffer)
+                    total_enriched += updated
+                    logger.info(f"  Batch update: {updated} hotels")
+                    results_buffer = []
+
+            if results_buffer:
+                updated = await repo.batch_update_cloudbeds_enrichment(results_buffer)
+                total_enriched += updated
+                logger.info(f"  Final batch: {updated} hotels")
+
+            for ctx in contexts:
+                await ctx.close()
+            await browser.close()
+
+        return EnrichResult(processed=len(hotels), enriched=total_enriched, failed=total_errors)

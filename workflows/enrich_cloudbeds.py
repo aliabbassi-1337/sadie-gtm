@@ -25,7 +25,7 @@ from loguru import logger
 
 from db.client import init_db, close_db
 from services.enrichment import repo
-from services.enrichment.cloudbeds_service import CloudbedsEnrichmentService
+from services.enrichment.service import Service
 
 
 async def run_status():
@@ -83,8 +83,8 @@ async def run_enrichment(limit: int, concurrency: int = 3):
     await init_db()
     
     try:
-        service = CloudbedsEnrichmentService()
-        result = await service.enrich_hotels(limit=limit, concurrency=concurrency)
+        service = Service()
+        result = await service.enrich_cloudbeds_hotels(limit=limit, concurrency=concurrency)
         
         print("\n" + "=" * 60)
         print("ENRICHMENT COMPLETE")

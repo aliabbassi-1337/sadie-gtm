@@ -21,7 +21,6 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment.cloudbeds_service import CloudbedsEnrichmentService
 from services.enrichment import repo
 from infra.sqs import receive_messages, delete_message, get_queue_attributes
 
