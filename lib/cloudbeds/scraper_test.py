@@ -153,28 +153,83 @@ class TestCloudbedsScraperStateCountryPattern:
 class TestCloudbedsScraperIntegration:
     """Integration tests that hit real Cloudbeds pages."""
     
-    @pytest.mark.asyncio
-    async def test_extracts_from_real_page(self):
-        """Should extract data from a real Cloudbeds booking page."""
+    @pytest.fixture
+    async def browser_and_scraper(self):
+        """Create real browser and scraper for integration tests."""
         from playwright.async_api import async_playwright
         from playwright_stealth import Stealth
         
-        async with Stealth().use_async(async_playwright()) as p:
-            browser = await p.chromium.launch(headless=True)
-            ctx = await browser.new_context()
-            page = await ctx.new_page()
-            scraper = CloudbedsScraper(page)
-            
-            # Known working Cloudbeds page
-            url = "https://hotels.cloudbeds.com/reservation/chsz6e"
-            data = await scraper.extract(url)
-            
-            await browser.close()
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        )
+        page = await ctx.new_page()
         
-        # Page may or may not be available, but if data exists, validate structure
+        # Apply stealth to page
+        stealth = Stealth()
+        await stealth.apply_stealth_async(page)
+        
+        scraper = CloudbedsScraper(page)
+        
+        yield scraper, page
+        
+        await ctx.close()
+        await browser.close()
+        await pw.stop()
+    
+    @pytest.mark.asyncio
+    async def test_extracts_name_and_location(self, browser_and_scraper):
+        """Should extract name, city, state from a real Cloudbeds page."""
+        scraper, page = browser_and_scraper
+        
+        # Known working Cloudbeds page (Texican Court in Irving, TX)
+        url = "https://hotels.cloudbeds.com/reservation/chsz6e"
+        data = await scraper.extract(url)
+        
+        assert data is not None, "Should extract data from page"
+        assert isinstance(data, ExtractedCloudbedsData)
+        assert data.has_data() is True
+        assert data.name is not None, "Should have hotel name"
+        assert data.city is not None, "Should have city"
+    
+    @pytest.mark.asyncio
+    async def test_extracts_state_correctly(self, browser_and_scraper):
+        """Should extract state from 'State Country' format."""
+        scraper, page = browser_and_scraper
+        
+        # Test a page that should have state info
+        url = "https://hotels.cloudbeds.com/reservation/chsz6e"
+        data = await scraper.extract(url)
+        
+        if data and data.state:
+            # State should be a valid US state name or abbreviation
+            assert len(data.state) >= 2, "State should be at least 2 chars"
+    
+    @pytest.mark.asyncio
+    async def test_handles_404_gracefully(self, browser_and_scraper):
+        """Should return None for non-existent pages."""
+        scraper, page = browser_and_scraper
+        
+        # Invalid slug that should 404
+        url = "https://hotels.cloudbeds.com/reservation/invalidslug99999"
+        data = await scraper.extract(url)
+        
+        assert data is None, "Should return None for 404 pages"
+    
+    @pytest.mark.asyncio
+    async def test_detects_garbage_homepage(self, browser_and_scraper):
+        """Should return None for Cloudbeds homepage (garbage data)."""
+        scraper, page = browser_and_scraper
+        
+        # Root URL redirects to homepage
+        url = "https://hotels.cloudbeds.com/"
+        data = await scraper.extract(url)
+        
+        # Should either return None or have garbage name detected
         if data:
-            assert isinstance(data, ExtractedCloudbedsData)
-            assert data.has_data() is True
+            assert data.name.lower() not in ['cloudbeds.com', 'cloudbeds'], \
+                "Should not return garbage homepage name"
 
 
 if __name__ == "__main__":

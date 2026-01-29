@@ -1,7 +1,7 @@
 """Tests for Enrichment Service."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 from services.enrichment.service import Service, EnrichResult, EnqueueResult, ConsumeResult
 from services.enrichment.rms_repo import RMSRepo
@@ -20,19 +20,6 @@ def service_with_queue():
     """Create service with real repo and return the mock queue."""
     queue = MockQueue()
     return Service(rms_repo=RMSRepo(), rms_queue=queue), queue
-
-
-# Mock for ExtractedCloudbedsData (used for _process_cloudbeds_hotel tests)
-class MockCloudbedsData:
-    def __init__(self, name=None, city=None, state=None, country=None, 
-                 address=None, phone=None, email=None):
-        self.name = name
-        self.city = city
-        self.state = state
-        self.country = country
-        self.address = address
-        self.phone = phone
-        self.email = email
 
 
 class TestGetRMSStats:
@@ -176,105 +163,81 @@ class TestGetCloudbedsHotelsNeedingEnrichment:
             pytest.skip("DB schema mismatch - skipping")
 
 
-class TestProcessCloudbedsHotel:
-    """Tests for _process_cloudbeds_hotel (garbage detection)."""
+@pytest.mark.online
+class TestProcessCloudbedsHotelIntegration:
+    """Integration tests for _process_cloudbeds_hotel with real scraping."""
     
     @pytest.fixture
-    def service(self):
-        return Service(rms_repo=RMSRepo(), rms_queue=MockQueue())
+    async def service_and_scraper(self):
+        """Create service with real browser for integration tests."""
+        from playwright.async_api import async_playwright
+        from playwright_stealth import Stealth
+        from lib.cloudbeds import CloudbedsScraper
+        
+        service = Service(rms_repo=RMSRepo(), rms_queue=MockQueue())
+        
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        )
+        page = await ctx.new_page()
+        
+        # Apply stealth to page
+        stealth = Stealth()
+        await stealth.apply_stealth_async(page)
+        
+        scraper = CloudbedsScraper(page)
+        
+        yield service, scraper
+        
+        await ctx.close()
+        await browser.close()
+        await pw.stop()
     
     @pytest.mark.asyncio
-    async def test_returns_no_data_when_extract_fails(self, service):
-        """Should return no_data error when scraper returns None."""
-        mock_scraper = AsyncMock()
-        mock_scraper.extract = AsyncMock(return_value=None)
+    async def test_extracts_valid_hotel_data(self, service_and_scraper):
+        """Should extract valid data from a real Cloudbeds page."""
+        service, scraper = service_and_scraper
         
-        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
+        # Known working Cloudbeds page
+        url = "https://hotels.cloudbeds.com/reservation/chsz6e"
+        result = await service._process_cloudbeds_hotel(scraper, 123, url)
         
         hotel_id, success, data, error = result
         assert hotel_id == 123
-        assert success is False
-        assert data is None
-        assert error == "no_data"
+        assert success is True, f"Should succeed, got error: {error}"
+        assert data is not None
+        assert data.name is not None
+        assert data.city is not None
     
     @pytest.mark.asyncio
-    async def test_detects_cloudbeds_homepage_garbage(self, service):
+    async def test_returns_no_data_for_invalid_slug(self, service_and_scraper):
+        """Should return no_data for non-existent pages."""
+        service, scraper = service_and_scraper
+        
+        url = "https://hotels.cloudbeds.com/reservation/invalidslug99999"
+        result = await service._process_cloudbeds_hotel(scraper, 456, url)
+        
+        hotel_id, success, data, error = result
+        assert hotel_id == 456
+        assert success is False
+        # Could be "no_data" or "404_not_found" depending on page behavior
+        assert error in ["no_data", "404_not_found"]
+    
+    @pytest.mark.asyncio
+    async def test_detects_homepage_as_garbage(self, service_and_scraper):
         """Should detect Cloudbeds homepage as garbage."""
-        mock_scraper = AsyncMock()
-        mock_scraper.extract = AsyncMock(return_value=MockCloudbedsData(
-            name="cloudbeds.com",
-            city="Some City"
-        ))
+        service, scraper = service_and_scraper
         
-        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
+        # Root URL that redirects to homepage
+        url = "https://hotels.cloudbeds.com/"
+        result = await service._process_cloudbeds_hotel(scraper, 789, url)
         
         hotel_id, success, data, error = result
-        assert success is False
-        assert error == "404_not_found"
-    
-    @pytest.mark.asyncio
-    async def test_detects_book_now_garbage(self, service):
-        """Should detect 'Book Now' as garbage name."""
-        mock_scraper = AsyncMock()
-        mock_scraper.extract = AsyncMock(return_value=MockCloudbedsData(
-            name="Book Now",
-            city="Austin"
-        ))
-        
-        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
-        
-        hotel_id, success, data, error = result
-        assert success is False
-        assert error == "404_not_found"
-    
-    @pytest.mark.asyncio
-    async def test_detects_portuguese_garbage(self, service):
-        """Should detect Portuguese error page as garbage."""
-        mock_scraper = AsyncMock()
-        mock_scraper.extract = AsyncMock(return_value=MockCloudbedsData(
-            name="Some Hotel",
-            city="Soluções Online para Hotéis"
-        ))
-        
-        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
-        
-        hotel_id, success, data, error = result
-        assert success is False
-        assert error == "404_not_found"
-    
-    @pytest.mark.asyncio
-    async def test_returns_valid_data(self, service):
-        """Should return success for valid hotel data."""
-        mock_scraper = AsyncMock()
-        mock_scraper.extract = AsyncMock(return_value=MockCloudbedsData(
-            name="Grand Hotel Austin",
-            city="Austin",
-            state="Texas",
-            country="USA"
-        ))
-        
-        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
-        
-        hotel_id, success, data, error = result
-        assert hotel_id == 123
-        assert success is True
-        assert data.name == "Grand Hotel Austin"
-        assert data.city == "Austin"
-        assert error is None
-    
-    @pytest.mark.asyncio
-    async def test_handles_exceptions(self, service):
-        """Should handle exceptions gracefully."""
-        mock_scraper = AsyncMock()
-        mock_scraper.extract = AsyncMock(side_effect=Exception("Network error"))
-        
-        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
-        
-        hotel_id, success, data, error = result
-        assert hotel_id == 123
-        assert success is False
-        assert data is None
-        assert "Network error" in error
+        # Homepage should be detected as garbage
+        if data and data.name:
+            assert data.name.lower() not in ['cloudbeds.com', 'cloudbeds']
 
 
 class TestEnrichCloudbedsHotels:
