@@ -157,6 +157,90 @@ class TestRMSScraperExtractEmail:
         assert email is None
 
 
+class TestRMSScraperParseAddress:
+    """Tests for address parsing logic."""
+    
+    @pytest.fixture
+    def scraper(self):
+        return RMSScraper(AsyncMock())
+    
+    def test_parses_australian_address(self, scraper):
+        """Should parse Australian address format."""
+        address = "40 Ragonesi Rd, Alice Springs NT 0870 , Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Alice Springs"
+        assert state == "NT"
+        assert country == "AU"
+    
+    def test_parses_australian_address_vic(self, scraper):
+        """Should parse Victorian address."""
+        address = "830 Fifteenth Street, Mildura VIC 3500 , Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Mildura"
+        assert state == "VIC"
+        assert country == "AU"
+    
+    def test_parses_australian_address_nsw(self, scraper):
+        """Should parse NSW address."""
+        address = "98 Durham Street, Clarence Town NSW 2321 , Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Clarence Town"
+        assert state == "NSW"
+        assert country == "AU"
+    
+    def test_parses_us_address(self, scraper):
+        """Should parse US address format."""
+        address = "123 Main Street, Austin, TX 78701"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Austin"
+        assert state == "TX"
+        assert country == "USA"
+    
+    def test_parses_us_address_california(self, scraper):
+        """Should parse California address."""
+        address = "456 Beach Blvd, San Diego, CA 92101-1234"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "San Diego"
+        assert state == "CA"
+        assert country == "USA"
+    
+    def test_parses_nz_address(self, scraper):
+        """Should parse New Zealand address."""
+        address = "10 Queen Street, Auckland 1010, New Zealand"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city == "Auckland"
+        assert country == "NZ"
+    
+    def test_returns_none_for_unparseable(self, scraper):
+        """Should return None for unparseable addresses."""
+        address = "just a short description, not an address"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert city is None
+        # May still extract country if spelled out
+    
+    def test_fallback_extracts_country_name(self, scraper):
+        """Should fallback to extracting country name."""
+        address = "Some address in Australia"
+        
+        city, state, country = scraper._parse_address(address)
+        
+        assert country == "AU"
+
+
 @pytest.mark.online
 class TestRMSScraperIntegration:
     """Integration tests that hit real RMS pages."""
