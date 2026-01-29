@@ -1,6 +1,8 @@
 """Tests for Enrichment Service."""
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from pydantic import BaseModel
 
 from services.enrichment.service import Service, EnrichResult, EnqueueResult, ConsumeResult
 from services.enrichment.rms_repo import RMSRepo
@@ -9,16 +11,29 @@ from lib.rms import RMSHotelRecord, QueueStats
 
 
 @pytest.fixture
-async def service():
+def service():
     """Create service with real repo but mock queue."""
     return Service(rms_repo=RMSRepo(), rms_queue=MockQueue())
 
 
 @pytest.fixture
-async def service_with_queue():
+def service_with_queue():
     """Create service with real repo and return the mock queue."""
     queue = MockQueue()
     return Service(rms_repo=RMSRepo(), rms_queue=queue), queue
+
+
+# Mock for ExtractedCloudbedsData
+class MockCloudbedsData:
+    def __init__(self, name=None, city=None, state=None, country=None, 
+                 address=None, phone=None, email=None):
+        self.name = name
+        self.city = city
+        self.state = state
+        self.country = country
+        self.address = address
+        self.phone = phone
+        self.email = email
 
 
 class TestGetRMSStats:
@@ -115,6 +130,193 @@ class TestConsumeRMSEnrichmentQueue:
         result = await service.consume_rms_enrichment_queue(max_messages=1)
         
         assert isinstance(result, ConsumeResult)
+
+
+# ============================================================================
+# CLOUDBEDS ENRICHMENT TESTS
+# ============================================================================
+
+
+class TestGetCloudbedsEnrichmentStatus:
+    """Tests for get_cloudbeds_enrichment_status."""
+    
+    @pytest.mark.asyncio
+    async def test_returns_status_dict(self, service):
+        """Should return status dictionary with counts."""
+        status = await service.get_cloudbeds_enrichment_status()
+        
+        assert isinstance(status, dict)
+        assert "total" in status
+        assert "needing_enrichment" in status
+        assert "already_enriched" in status
+        assert status["already_enriched"] == status["total"] - status["needing_enrichment"]
+
+
+class TestGetCloudbedsHotelsNeedingEnrichment:
+    """Tests for get_cloudbeds_hotels_needing_enrichment."""
+    
+    @pytest.mark.asyncio
+    async def test_returns_list(self, service):
+        """Should return list of hotel candidates."""
+        hotels = await service.get_cloudbeds_hotels_needing_enrichment(limit=10)
+        
+        assert isinstance(hotels, list)
+    
+    @pytest.mark.asyncio
+    async def test_respects_limit(self, service):
+        """Should respect the limit parameter."""
+        hotels = await service.get_cloudbeds_hotels_needing_enrichment(limit=5)
+        
+        assert len(hotels) <= 5
+
+
+class TestProcessCloudbedsHotel:
+    """Tests for _process_cloudbeds_hotel (garbage detection)."""
+    
+    @pytest.fixture
+    def service(self):
+        return Service(rms_repo=RMSRepo(), rms_queue=MockQueue())
+    
+    @pytest.mark.asyncio
+    async def test_returns_no_data_when_extract_fails(self, service):
+        """Should return no_data error when scraper returns None."""
+        mock_scraper = AsyncMock()
+        mock_scraper.extract = AsyncMock(return_value=None)
+        
+        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
+        
+        hotel_id, success, data, error = result
+        assert hotel_id == 123
+        assert success is False
+        assert data is None
+        assert error == "no_data"
+    
+    @pytest.mark.asyncio
+    async def test_detects_cloudbeds_homepage_garbage(self, service):
+        """Should detect Cloudbeds homepage as garbage."""
+        mock_scraper = AsyncMock()
+        mock_scraper.extract = AsyncMock(return_value=MockCloudbedsData(
+            name="cloudbeds.com",
+            city="Some City"
+        ))
+        
+        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
+        
+        hotel_id, success, data, error = result
+        assert success is False
+        assert error == "404_not_found"
+    
+    @pytest.mark.asyncio
+    async def test_detects_book_now_garbage(self, service):
+        """Should detect 'Book Now' as garbage name."""
+        mock_scraper = AsyncMock()
+        mock_scraper.extract = AsyncMock(return_value=MockCloudbedsData(
+            name="Book Now",
+            city="Austin"
+        ))
+        
+        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
+        
+        hotel_id, success, data, error = result
+        assert success is False
+        assert error == "404_not_found"
+    
+    @pytest.mark.asyncio
+    async def test_detects_portuguese_garbage(self, service):
+        """Should detect Portuguese error page as garbage."""
+        mock_scraper = AsyncMock()
+        mock_scraper.extract = AsyncMock(return_value=MockCloudbedsData(
+            name="Some Hotel",
+            city="Soluções Online para Hotéis"
+        ))
+        
+        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
+        
+        hotel_id, success, data, error = result
+        assert success is False
+        assert error == "404_not_found"
+    
+    @pytest.mark.asyncio
+    async def test_returns_valid_data(self, service):
+        """Should return success for valid hotel data."""
+        mock_scraper = AsyncMock()
+        mock_scraper.extract = AsyncMock(return_value=MockCloudbedsData(
+            name="Grand Hotel Austin",
+            city="Austin",
+            state="Texas",
+            country="USA"
+        ))
+        
+        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
+        
+        hotel_id, success, data, error = result
+        assert hotel_id == 123
+        assert success is True
+        assert data.name == "Grand Hotel Austin"
+        assert data.city == "Austin"
+        assert error is None
+    
+    @pytest.mark.asyncio
+    async def test_handles_exceptions(self, service):
+        """Should handle exceptions gracefully."""
+        mock_scraper = AsyncMock()
+        mock_scraper.extract = AsyncMock(side_effect=Exception("Network error"))
+        
+        result = await service._process_cloudbeds_hotel(mock_scraper, 123, "https://example.com")
+        
+        hotel_id, success, data, error = result
+        assert hotel_id == 123
+        assert success is False
+        assert data is None
+        assert "Network error" in error
+
+
+class TestEnrichCloudbedsHotels:
+    """Tests for enrich_cloudbeds_hotels."""
+    
+    @pytest.mark.asyncio
+    async def test_returns_zero_when_no_hotels(self, service):
+        """Should return zero counts when no hotels need enrichment."""
+        with patch('services.enrichment.service.repo') as mock_repo:
+            mock_repo.get_cloudbeds_hotels_needing_enrichment = AsyncMock(return_value=[])
+            
+            result = await service.enrich_cloudbeds_hotels(limit=10)
+            
+            assert isinstance(result, EnrichResult)
+            assert result.processed == 0
+            assert result.enriched == 0
+            assert result.failed == 0
+
+
+class TestBatchUpdateCloudbedsEnrichment:
+    """Tests for batch_update_cloudbeds_enrichment."""
+    
+    @pytest.mark.asyncio
+    async def test_calls_repo(self, service):
+        """Should call repo method with results."""
+        with patch('services.enrichment.service.repo') as mock_repo:
+            mock_repo.batch_update_cloudbeds_enrichment = AsyncMock(return_value=5)
+            
+            results = [{"hotel_id": 1, "name": "Test"}]
+            updated = await service.batch_update_cloudbeds_enrichment(results)
+            
+            assert updated == 5
+            mock_repo.batch_update_cloudbeds_enrichment.assert_called_once_with(results)
+
+
+class TestBatchMarkCloudbedsFailed:
+    """Tests for batch_mark_cloudbeds_failed."""
+    
+    @pytest.mark.asyncio
+    async def test_calls_repo(self, service):
+        """Should call repo method with hotel IDs."""
+        with patch('services.enrichment.service.repo') as mock_repo:
+            mock_repo.batch_set_last_enrichment_attempt = AsyncMock(return_value=3)
+            
+            marked = await service.batch_mark_cloudbeds_failed([1, 2, 3])
+            
+            assert marked == 3
+            mock_repo.batch_set_last_enrichment_attempt.assert_called_once_with([1, 2, 3])
 
 
 if __name__ == "__main__":
