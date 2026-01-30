@@ -128,8 +128,8 @@ async def process_hotel(context: BrowserContext, hotel_id: int, booking_url: str
             if "mews.com" in url and ("api" in url.lower() or "bookingEngine" in url):
                 api_urls_seen.append(url[:100])
             
-            # Try multiple endpoint patterns
-            if "configurations" in url or "bookingEngine" in url:
+            # Match the configurations/get API endpoint
+            if "configurations/get" in url:
                 async def fetch_json():
                     try:
                         data = await response.json()
@@ -141,17 +141,13 @@ async def process_hotel(context: BrowserContext, hotel_id: int, booking_url: str
         
         page.on("response", handle_response)
         
-        await page.goto(booking_url, timeout=30000, wait_until="domcontentloaded")
+        # Load page - use commit to get callback early, then wait for API calls
+        await page.goto(booking_url, timeout=30000, wait_until="commit")
         
-        # Wait for page to load and JS to execute
-        await asyncio.sleep(3)
-        
-        # Wait for any pending response tasks
-        if response_tasks:
-            await asyncio.gather(*response_tasks, return_exceptions=True)
-        
-        # Additional wait if not captured yet
-        for _ in range(8):
+        # Wait for configurations/get API call (usually comes within 5s)
+        for _ in range(20):  # 10 second max wait
+            if response_tasks:
+                await asyncio.gather(*response_tasks, return_exceptions=True)
             if "config" in captured_data:
                 break
             await asyncio.sleep(0.5)
