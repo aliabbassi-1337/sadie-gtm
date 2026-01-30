@@ -177,18 +177,18 @@ class MewsApiClient:
         await self.initialize()
         
         try:
-            # Try fast API first
-            data = await self._fetch_via_api(slug)
+            # Try API call - returns (data, needs_session_refresh)
+            data, needs_refresh = await self._fetch_via_api(slug)
             
             if data:
                 return self._parse_response(slug, data)
             
-            # API failed, maybe session expired - force refresh
-            _session_cache["obtained_at"] = 0
-            data = await self._fetch_via_api(slug)
-            
-            if data:
-                return self._parse_response(slug, data)
+            # Only retry with new session if we got a session error
+            if needs_refresh:
+                _session_cache["obtained_at"] = 0
+                data, _ = await self._fetch_via_api(slug)
+                if data:
+                    return self._parse_response(slug, data)
             
             return None
             
@@ -196,8 +196,13 @@ class MewsApiClient:
             logger.debug(f"Mews extraction error for {slug}: {e}")
             return None
     
-    async def _fetch_via_api(self, slug: str, retry_count: int = 0) -> Optional[dict]:
-        """Fetch data via direct API call with rate limiting."""
+    async def _fetch_via_api(self, slug: str, retry_count: int = 0) -> tuple[Optional[dict], bool]:
+        """Fetch data via direct API call with rate limiting.
+        
+        Returns:
+            Tuple of (data, needs_session_refresh). If data is None and needs_refresh
+            is True, caller should refresh session and retry.
+        """
         global _last_api_call, _api_lock
         
         if _api_lock is None:
@@ -207,7 +212,7 @@ class MewsApiClient:
         
         if not session or not client:
             logger.warning("No Mews session available")
-            return None
+            return None, True  # No session - need refresh
         
         # Rate limiting - wait between API calls
         async with _api_lock:
@@ -236,7 +241,7 @@ class MewsApiClient:
             )
             
             if resp.status_code == 200:
-                return resp.json()
+                return resp.json(), False
             elif resp.status_code == 429:
                 # Rate limited - exponential backoff and retry
                 if retry_count < 3:
@@ -245,23 +250,23 @@ class MewsApiClient:
                     await asyncio.sleep(wait)
                     return await self._fetch_via_api(slug, retry_count + 1)
                 logger.warning(f"Mews rate limit exceeded for {slug} after 3 retries")
-                return None
+                return None, False  # Rate limit - don't refresh session
             elif resp.status_code == 400:
-                # Could be invalid ID or expired session
                 text = resp.text
-                if "Invalid" in text and "session" in text.lower():
-                    # Session expired, will retry with fresh session
-                    return None
-                # Invalid hotel ID - log but don't retry
+                if "session" in text.lower():
+                    # Session expired, need refresh
+                    logger.debug(f"Mews session expired for {slug}")
+                    return None, True
+                # Invalid hotel ID - don't retry or refresh
                 logger.debug(f"Invalid Mews ID {slug}: {text[:50]}")
-                return None
+                return None, False
             else:
                 logger.debug(f"Mews API error for {slug}: HTTP {resp.status_code}")
-                return None
+                return None, False
                 
         except Exception as e:
             logger.debug(f"Mews API request failed for {slug}: {e}")
-            return None
+            return None, False
     
     def _parse_response(self, slug: str, data: dict) -> MewsHotelData:
         """Parse Mews API response into hotel data."""
