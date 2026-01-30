@@ -36,6 +36,8 @@ SYSTEMD_TEMPLATE = """[Unit]
 Description={description}
 After=network.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -48,8 +50,6 @@ ExecStart=/home/ubuntu/.local/bin/{command}
 
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 StandardOutput=journal
 StandardError=journal
