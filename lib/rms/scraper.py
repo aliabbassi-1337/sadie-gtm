@@ -95,6 +95,9 @@ class RMSScraper(IRMSScraper):
         content_lower = content.lower()
         body_lower = body_text.lower()
         
+        logger.info(f"_is_valid check: content_len={len(content)}, body_len={len(body_text)}")
+        logger.info(f"_is_valid: first 100 chars of body: {repr(body_text[:100])}")
+        
         error_patterns = [
             "application issues",
             "page not found",
@@ -106,23 +109,24 @@ class RMSScraper(IRMSScraper):
         
         for pattern in error_patterns:
             if pattern in body_lower or pattern in content_lower[:2000]:
-                logger.debug(f"Rejecting page: found error pattern '{pattern}'")
+                logger.info(f"Rejecting page: found error pattern '{pattern}'")
                 return False
         
         if body_text.strip().startswith("Error"):
-            logger.debug("Rejecting page: body starts with 'Error'")
+            logger.info("Rejecting page: body starts with 'Error'")
             return False
         
         # Check for error title
         if "<title>error</title>" in content_lower:
-            logger.debug("Rejecting page: error title")
+            logger.info("Rejecting page: error title")
             return False
         
         # Must have substantial content
         if not body_text or len(body_text) < 100:
-            logger.debug(f"Rejecting page: insufficient content ({len(body_text) if body_text else 0} chars)")
+            logger.info(f"Rejecting page: insufficient content ({len(body_text) if body_text else 0} chars)")
             return False
-            
+        
+        logger.info("_is_valid: PASSED all checks")
         return True
     
     async def _extract_name(self, body_text: str) -> Optional[str]:
