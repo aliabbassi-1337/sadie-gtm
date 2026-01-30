@@ -149,10 +149,11 @@ ec2:
     command: uv run python workflows/enrich_rms_consumer.py --concurrency 6
     type: systemd  # Runs continuously
 
-  # RMS ingestion (discover new RMS hotels by scanning ID ranges)
-  ingest_rms_consumer:
-    description: Scan RMS ID ranges to discover new hotels (distributed across servers)
-    command: uv run python workflows/ingest_rms_consumer.py --concurrency 6
+  # RMS ID scanning (discover new RMS hotels by scanning ID ranges)
+  # Distributed across all 7 servers via SQS
+  rms_scan_consumer:
+    description: Scan RMS ID ranges to discover new hotels (distributed across 7 servers)
+    command: uv run python -m workflows.consume_rms_scan --concurrency 20 --delay 0.1
     type: systemd  # Runs continuously, pulls ranges from SQS
 
   # RMS slug ingestion (ingest discovered slugs from archives)
