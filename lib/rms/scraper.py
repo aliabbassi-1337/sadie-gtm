@@ -28,10 +28,11 @@ def extract_rms_id(url: str) -> Optional[str]:
     - bookings.rmscloud.com/obookings3/Search/Index/{id}/...
     """
     patterns = [
-        r'ibe1[234]\.rmscloud\.com/(\d+)',  # ibe12, ibe13, ibe14
-        # Hex slugs (16 char) - must check before numeric to avoid partial match
+        # Hex slugs (16 char) - check first to avoid partial match
+        r'ibe1[234]\.rmscloud\.com/([A-Fa-f0-9]{16})',  # ibe with hex slug
         r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/([A-Fa-f0-9]{16})',
         # Numeric IDs
+        r'ibe1[234]\.rmscloud\.com/(\d+)',  # ibe with numeric ID
         r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/(\d+)',
         r'rmscloud\.com/.*?/(\d+)/?',  # fallback - any numeric ID in path
     ]
