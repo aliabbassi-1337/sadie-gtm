@@ -356,12 +356,13 @@ class RMSApiClient:
         text = re.sub(r'<[^>]+>', ' ', text)
         
         patterns = [
-            # International format with country code
-            r'(?:tel|phone|call|locally)[:\s]*([+\d][\d\s\-\(\)]{7,20})',
-            r'(\+\d{1,3}[\s\-]?\(?\d{2,4}\)?[\s\-]?\d{3,4}[\s\-]?\d{3,4})',
-            # Australian format
+            # Labeled phone (tel, phone, call, locally, international)
+            r'(?:tel|phone|call|locally|international)[:\s]*([+\d][\d\s\-\(\)]{7,20})',
+            # International format with country code (+XX X XXXX XXXX)
+            r'(\+\d{1,3}[\s\-]?\d{1,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4})',
+            # Australian format (XX XXXX XXXX)
             r'(\d{2}[\s\-]?\d{4}[\s\-]?\d{4})',
-            # US format
+            # US format ((XXX) XXX-XXXX)
             r'(\(\d{3}\)[\s\-]?\d{3}[\s\-]?\d{4})',
         ]
         
