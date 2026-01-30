@@ -92,25 +92,32 @@ class MewsApiClient:
     async def _fetch_via_browser(self, slug: str) -> Optional[dict]:
         """Load distributor page and capture API response."""
         captured_data = {}
+        response_tasks = []
         
         page = await self._context.new_page()
         
         try:
-            async def handle_response(response):
+            def handle_response(response):
+                """Sync handler that creates async task for JSON parsing."""
                 if "configurations/get" in response.url:
-                    try:
-                        data = await response.json()
-                        captured_data["config"] = data
-                    except Exception:
-                        pass
+                    async def fetch_json():
+                        try:
+                            data = await response.json()
+                            captured_data["config"] = data
+                        except Exception:
+                            pass
+                    task = asyncio.create_task(fetch_json())
+                    response_tasks.append(task)
             
             page.on("response", handle_response)
             
             url = self.BOOKING_URL_TEMPLATE.format(slug=slug)
-            await page.goto(url, wait_until="domcontentloaded", timeout=int(self.timeout * 1000))
+            await page.goto(url, wait_until="commit", timeout=int(self.timeout * 1000))
             
-            # Wait for API response
-            for _ in range(10):
+            # Wait for configurations/get API call (can take up to 15-20s)
+            for _ in range(40):  # 20 second max wait
+                if response_tasks:
+                    await asyncio.gather(*response_tasks, return_exceptions=True)
                 if "config" in captured_data:
                     break
                 await asyncio.sleep(0.5)
