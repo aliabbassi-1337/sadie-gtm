@@ -1,15 +1,19 @@
 """Archive slug discovery from Wayback Machine and Common Crawl."""
 
 import asyncio
+import json
 import re
 import logging
-from typing import Optional
-from urllib.parse import unquote
+from typing import Optional, Set
 
 import httpx
 from pydantic import BaseModel, Field
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
+
+# Number of historical Common Crawl indexes to query
+DEFAULT_CC_INDEX_COUNT = 40  # Query last 40 indexes (~2 years of crawls)
 
 
 class BookingEnginePattern(BaseModel):
@@ -41,9 +45,17 @@ BOOKING_ENGINE_PATTERNS = [
     BookingEnginePattern(
         name="rms",
         wayback_url_pattern="bookings*.rmscloud.com/Search/Index/*",
-        slug_regex=r"/(?:Search|Rates)/Index/([A-Fa-f0-9]{16}|\d+)/",
+        # Match hex slugs (16 char), numeric slugs, and slugs with format like "13915/90"
+        slug_regex=r"/(?:Search|Rates)/Index/([A-Fa-f0-9]{16}|\d+(?:/\d+)?)",
         commoncrawl_url_pattern="*.rmscloud.com/Search/Index/*",
         slug_type="mixed",  # numeric or hex
+    ),
+    BookingEnginePattern(
+        name="rms_rates",
+        wayback_url_pattern="bookings*.rmscloud.com/Rates/Index/*",
+        slug_regex=r"/Rates/Index/([A-Fa-f0-9]{16}|\d+(?:/\d+)?)",
+        commoncrawl_url_pattern="*.rmscloud.com/Rates/Index/*",
+        slug_type="mixed",
     ),
     BookingEnginePattern(
         name="rms_ibe",
@@ -80,31 +92,56 @@ class ArchiveSlugDiscovery(BaseModel):
     """Discover booking engine slugs from web archives."""
 
     timeout: float = 60.0
-    max_results_per_query: int = 10000
+    max_results_per_query: int = 50000
     discovered_slugs: dict = Field(default_factory=dict)
+    cc_index_count: int = DEFAULT_CC_INDEX_COUNT
+    existing_slugs: dict = Field(default_factory=dict)  # engine -> set of existing slugs
 
-    async def discover_all(self) -> dict[str, list[DiscoveredSlug]]:
-        """Discover slugs from all sources for all engines."""
+    model_config = {"arbitrary_types_allowed": True}
+
+    async def discover_all(
+        self,
+        existing_slugs: Optional[dict[str, Set[str]]] = None,
+    ) -> dict[str, list[DiscoveredSlug]]:
+        """
+        Discover slugs from all sources for all engines.
+
+        Args:
+            existing_slugs: Dict of engine -> set of existing slugs to exclude
+        """
         results = {}
+        existing = existing_slugs or {}
 
         for pattern in BOOKING_ENGINE_PATTERNS:
             logger.info(f"Discovering slugs for {pattern.name}...")
             engine_slugs = []
+            engine_existing = existing.get(pattern.name, set())
 
             # Query Wayback Machine
             wayback_slugs = await self.query_wayback(pattern)
             engine_slugs.extend(wayback_slugs)
             logger.info(f"  Wayback: {len(wayback_slugs)} slugs")
 
-            # Query Common Crawl
-            cc_slugs = await self.query_commoncrawl(pattern)
+            # Query Common Crawl (multiple historical indexes)
+            cc_slugs = await self.query_commoncrawl_historical(pattern)
             engine_slugs.extend(cc_slugs)
-            logger.info(f"  Common Crawl: {len(cc_slugs)} slugs")
+            logger.info(f"  Common Crawl ({self.cc_index_count} indexes): {len(cc_slugs)} slugs")
 
-            # Dedupe by slug
+            # Dedupe by slug (case-insensitive)
             unique_slugs = self._dedupe_slugs(engine_slugs)
+            logger.info(f"  After deduplication: {len(unique_slugs)}")
+
+            # Filter out existing slugs from database
+            if engine_existing:
+                new_slugs = [
+                    s for s in unique_slugs
+                    if s.slug.lower() not in engine_existing
+                ]
+                logger.info(f"  After DB filter: {len(new_slugs)} new (filtered {len(unique_slugs) - len(new_slugs)} existing)")
+                unique_slugs = new_slugs
+
             results[pattern.name] = unique_slugs
-            logger.info(f"  Total unique: {len(unique_slugs)}")
+            logger.info(f"  Total new: {len(unique_slugs)}")
 
         return results
 
@@ -157,15 +194,91 @@ class ArchiveSlugDiscovery(BaseModel):
     async def query_commoncrawl(
         self, pattern: BookingEnginePattern
     ) -> list[DiscoveredSlug]:
-        """Query Common Crawl Index API for URLs matching pattern."""
-        slugs = []
-
-        # Get latest Common Crawl index
+        """Query latest Common Crawl Index API for URLs matching pattern."""
+        # For backward compatibility, query just the latest index
         index_url = await self._get_latest_cc_index()
         if not index_url:
-            logger.warning("Could not get Common Crawl index")
+            return []
+        return await self._query_single_cc_index(pattern, index_url)
+
+    async def query_commoncrawl_historical(
+        self, pattern: BookingEnginePattern
+    ) -> list[DiscoveredSlug]:
+        """Query multiple historical Common Crawl indexes for more coverage."""
+        slugs = []
+        seen_slugs: Set[str] = set()
+
+        # Get list of all Common Crawl indexes
+        indexes = await self._get_cc_indexes()
+        if not indexes:
+            logger.warning("Could not get Common Crawl indexes")
             return slugs
 
+        # Query the last N indexes
+        indexes_to_query = indexes[: self.cc_index_count]
+        logger.info(f"  Querying {len(indexes_to_query)} CC indexes...")
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for idx in indexes_to_query:
+                index_name = idx.get("id", "unknown")
+                cdx_api = idx.get("cdx-api")
+                if not cdx_api:
+                    continue
+
+                try:
+                    params = {
+                        "url": pattern.commoncrawl_url_pattern,
+                        "output": "json",
+                        "limit": self.max_results_per_query,
+                    }
+                    response = await client.get(cdx_api, params=params)
+
+                    if response.status_code != 200:
+                        continue
+
+                    count = 0
+                    for line in response.text.strip().split("\n"):
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                            url = record.get("url", "")
+                            timestamp = record.get("timestamp")
+                            slug = self._extract_slug(url, pattern.slug_regex)
+
+                            if slug and slug.lower() not in seen_slugs:
+                                seen_slugs.add(slug.lower())
+                                slugs.append(
+                                    DiscoveredSlug(
+                                        engine=pattern.name,
+                                        slug=slug,
+                                        source_url=url,
+                                        archive_source="commoncrawl",
+                                        timestamp=timestamp,
+                                    )
+                                )
+                                count += 1
+                        except Exception:
+                            continue
+
+                    if count > 0:
+                        logger.debug(f"    {index_name}: +{count} slugs")
+
+                except httpx.HTTPError as e:
+                    logger.debug(f"    {index_name}: error - {e}")
+                except Exception as e:
+                    logger.debug(f"    {index_name}: error - {e}")
+
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.3)
+
+        return slugs
+
+    async def _query_single_cc_index(
+        self, pattern: BookingEnginePattern, index_url: str
+    ) -> list[DiscoveredSlug]:
+        """Query a single Common Crawl index."""
+        slugs = []
         params = {
             "url": pattern.commoncrawl_url_pattern,
             "output": "json",
@@ -177,13 +290,10 @@ class ArchiveSlugDiscovery(BaseModel):
                 response = await client.get(index_url, params=params)
                 response.raise_for_status()
 
-                # Common Crawl returns NDJSON (newline-delimited)
                 for line in response.text.strip().split("\n"):
                     if not line:
                         continue
                     try:
-                        import json
-
                         record = json.loads(line)
                         url = record.get("url", "")
                         timestamp = record.get("timestamp")
@@ -207,20 +317,24 @@ class ArchiveSlugDiscovery(BaseModel):
 
         return slugs
 
-    async def _get_latest_cc_index(self) -> Optional[str]:
-        """Get the URL of the latest Common Crawl index."""
+    async def _get_cc_indexes(self) -> list[dict]:
+        """Get list of all Common Crawl indexes."""
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
                     "https://index.commoncrawl.org/collinfo.json"
                 )
                 response.raise_for_status()
-                indexes = response.json()
-                if indexes:
-                    # Return the latest (first) index
-                    return indexes[0].get("cdx-api")
+                return response.json()
         except Exception as e:
-            logger.error(f"Failed to get CC index: {e}")
+            logger.error(f"Failed to get CC indexes: {e}")
+        return []
+
+    async def _get_latest_cc_index(self) -> Optional[str]:
+        """Get the URL of the latest Common Crawl index."""
+        indexes = await self._get_cc_indexes()
+        if indexes:
+            return indexes[0].get("cdx-api")
         return None
 
     def _extract_slug(self, url: str, regex: str) -> Optional[str]:
@@ -247,14 +361,32 @@ class ArchiveSlugDiscovery(BaseModel):
         return unique
 
 
-async def discover_slugs_for_engine(engine_name: str) -> list[DiscoveredSlug]:
-    """Discover slugs for a specific engine."""
+async def discover_slugs_for_engine(
+    engine_name: str,
+    existing_slugs: Optional[Set[str]] = None,
+) -> list[DiscoveredSlug]:
+    """
+    Discover slugs for a specific engine.
+
+    Args:
+        engine_name: Name of the booking engine
+        existing_slugs: Optional set of existing slugs to exclude (lowercase)
+    """
     discovery = ArchiveSlugDiscovery()
     pattern = next((p for p in BOOKING_ENGINE_PATTERNS if p.name == engine_name), None)
     if not pattern:
         raise ValueError(f"Unknown engine: {engine_name}")
 
     wayback_slugs = await discovery.query_wayback(pattern)
-    cc_slugs = await discovery.query_commoncrawl(pattern)
+    cc_slugs = await discovery.query_commoncrawl_historical(pattern)
     all_slugs = wayback_slugs + cc_slugs
-    return discovery._dedupe_slugs(all_slugs)
+    unique_slugs = discovery._dedupe_slugs(all_slugs)
+
+    # Filter out existing slugs
+    if existing_slugs:
+        unique_slugs = [
+            s for s in unique_slugs
+            if s.slug.lower() not in existing_slugs
+        ]
+
+    return unique_slugs
