@@ -92,12 +92,31 @@ class RMSScraper(IRMSScraper):
     
     def _is_valid(self, content: str, body_text: str) -> bool:
         # Reject error pages
-        if "application issues" in body_text or "application issues" in content:
+        content_lower = content.lower()
+        body_lower = body_text.lower()
+        
+        error_patterns = [
+            "application issues",
+            "page not found",
+            "object reference not set",
+            "error page",
+            "404",
+            "not found",
+            "does not exist",
+            "no longer available",
+        ]
+        
+        for pattern in error_patterns:
+            if pattern in body_lower or pattern in content_lower[:2000]:
+                return False
+        
+        if body_text.strip().startswith("Error"):
             return False
-        if "Page Not Found" in content or "404" in content[:1000]:
+        
+        # Check for error title
+        if "<title>Error</title>" in content:
             return False
-        if body_text.startswith("Error"):
-            return False
+        
         # Must have substantial content
         return bool(body_text and len(body_text) >= 100)
     

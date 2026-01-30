@@ -258,6 +258,21 @@ class RMSApiClient:
         
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
+                # First check the redirect without following
+                resp = await client.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+                    follow_redirects=False,
+                )
+                
+                # Check if redirecting to error page
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("location", "")
+                    if "message=" in location or "error" in location.lower():
+                        logger.debug(f"Redirect to error page for {slug}: {location}")
+                        return None
+                
+                # Now follow redirects
                 resp = await client.get(
                     url,
                     headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
@@ -279,6 +294,21 @@ class RMSApiClient:
     
     def _parse_html(self, html: str, slug: str, url: str) -> Optional[ExtractedRMSData]:
         """Parse hotel data from RMS HTML page."""
+        # Check for error page indicators
+        html_lower = html.lower()
+        error_patterns = [
+            "object reference not set",
+            "<title>error</title>",
+            "application issues",
+            "page not found",
+            "does not exist",
+            "no longer available",
+        ]
+        for pattern in error_patterns:
+            if pattern in html_lower:
+                logger.debug(f"Error page detected for {slug}: {pattern}")
+                return None
+        
         soup = BeautifulSoup(html, "html.parser")
         
         data = ExtractedRMSData(slug=slug, booking_url=url)
