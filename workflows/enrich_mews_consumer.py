@@ -21,7 +21,7 @@ import argparse
 import os
 import signal
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from loguru import logger
 # Playwright is used internally by MewsApiClient
 
@@ -104,8 +104,8 @@ async def process_hotel_with_client(client: MewsApiClient, hotel_id: int, bookin
         return EnrichmentResult(hotel_id=hotel_id, success=False, error=str(e)[:100])
 
 
-async def run_consumer(concurrency: int = 5):
-    """Run the SQS consumer with Mews API clients."""
+async def run_consumer():
+    """Run the SQS consumer - fully sequential, one message at a time."""
     if not QUEUE_URL:
         logger.error("SQS_MEWS_ENRICHMENT_QUEUE_URL not set in .env")
         return
@@ -115,72 +115,42 @@ async def run_consumer(concurrency: int = 5):
     
     await init_db()
     
-    # Create pool of API clients for concurrent processing
-    clients: List[MewsApiClient] = []
+    # Single API client for sequential processing
+    client = MewsApiClient(timeout=30.0)
     
     try:
-        logger.info(f"Starting Mews enrichment consumer (concurrency={concurrency})")
-        
-        # Initialize API clients
-        for i in range(concurrency):
-            client = MewsApiClient(timeout=30.0)
-            await client.initialize()
-            clients.append(client)
-        
-        logger.info(f"Created {concurrency} Mews API clients")
+        logger.info("Starting Mews enrichment consumer (sequential mode)")
+        await client.initialize()
         
         total_processed = 0
         total_enriched = 0
         batch_results = []
         
         while not shutdown_requested:
-            # Receive messages
+            # Receive ONE message at a time
             messages = receive_messages(
                 QUEUE_URL,
-                max_messages=min(concurrency, 10),
+                max_messages=1,
                 visibility_timeout=VISIBILITY_TIMEOUT,
-                wait_time_seconds=10,
+                wait_time_seconds=20,
             )
             
             if not messages:
                 logger.debug("No messages, waiting...")
                 continue
             
-            # Process messages - one per client
-            valid_messages = []
-            for msg in messages:
-                body = msg["body"]
-                hotel_id = body.get("hotel_id")
-                booking_url = body.get("booking_url")
-                
-                if not hotel_id or not booking_url:
-                    delete_message(QUEUE_URL, msg["receipt_handle"])
-                    continue
-                
-                valid_messages.append((msg, hotel_id, booking_url))
+            msg = messages[0]
+            body = msg["body"]
+            hotel_id = body.get("hotel_id")
+            booking_url = body.get("booking_url")
             
-            # Process batch
-            tasks = []
-            message_map = {}
-            
-            for i, (msg, hotel_id, booking_url) in enumerate(valid_messages[:concurrency]):
-                message_map[hotel_id] = msg
-                tasks.append(process_hotel_with_client(clients[i], hotel_id, booking_url))
-            
-            if not tasks:
+            if not hotel_id or not booking_url:
+                delete_message(QUEUE_URL, msg["receipt_handle"])
                 continue
             
-            # Wait for all to complete
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"Task error: {result}")
-                    continue
-                
-                msg = message_map.get(result.hotel_id)
-                if not msg:
-                    continue
+            # Process single message
+            try:
+                result = await process_hotel_with_client(client, hotel_id, booking_url)
                 
                 if result.success and result.name:
                     batch_results.append(result.to_dict())
@@ -189,9 +159,12 @@ async def run_consumer(concurrency: int = 5):
                 elif result.error:
                     logger.debug(f"  Hotel {result.hotel_id}: {result.error}")
                 
-                # Delete from queue
-                delete_message(QUEUE_URL, msg["receipt_handle"])
-                total_processed += 1
+            except Exception as e:
+                logger.error(f"Error processing hotel {hotel_id}: {e}")
+            
+            # Always delete from queue (processed or failed)
+            delete_message(QUEUE_URL, msg["receipt_handle"])
+            total_processed += 1
             
             # Batch update every 50 results
             if len(batch_results) >= 50:
@@ -199,10 +172,11 @@ async def run_consumer(concurrency: int = 5):
                 logger.info(f"Batch update: {updated} hotels")
                 batch_results = []
             
-            # Log progress
-            attrs = get_queue_attributes(QUEUE_URL)
-            remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
-            logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, ~{remaining} remaining")
+            # Log progress every 10
+            if total_processed % 10 == 0:
+                attrs = get_queue_attributes(QUEUE_URL)
+                remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
+                logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, ~{remaining} remaining")
         
         # Final batch
         if batch_results:
@@ -212,18 +186,14 @@ async def run_consumer(concurrency: int = 5):
         logger.info(f"Consumer stopped. Total: {total_processed} processed, {total_enriched} enriched")
         
     finally:
-        # Cleanup clients
-        for client in clients:
-            await client.close()
+        await client.close()
         await close_db()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Mews enrichment consumer")
-    parser.add_argument("--concurrency", type=int, default=1, help="Concurrent API clients (1 recommended due to rate limits)")
-    
-    args = parser.parse_args()
-    asyncio.run(run_consumer(concurrency=args.concurrency))
+    parser = argparse.ArgumentParser(description="Mews enrichment consumer (sequential)")
+    parser.parse_args()  # No args needed for sequential mode
+    asyncio.run(run_consumer())
 
 
 if __name__ == "__main__":
