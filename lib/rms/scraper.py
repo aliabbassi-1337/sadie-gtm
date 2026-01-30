@@ -69,8 +69,13 @@ class RMSScraper(IRMSScraper):
         
         data = ExtractedRMSData(slug=slug, booking_url=url)  # Keep original URL
         try:
+            logger.info(f"Navigating to: {scrape_url}")
             await self._page.goto(scrape_url, timeout=SCRAPE_TIMEOUT, wait_until="domcontentloaded")
             await asyncio.sleep(5)  # RMS pages need time for JS to render
+            
+            final_url = self._page.url
+            logger.info(f"Final URL after navigation: {final_url}")
+            
             content = await self._page.content()
             body_text = await self._page.evaluate("document.body.innerText")
             
