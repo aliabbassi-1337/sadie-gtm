@@ -117,22 +117,34 @@ async def process_hotel(context: BrowserContext, hotel_id: int, booking_url: str
     """Process a single hotel by loading page and intercepting API call."""
     page = await context.new_page()
     captured_data = {}
+    response_tasks = []
     
     try:
-        async def handle_response(response):
+        def handle_response(response):
+            """Sync handler that creates async task for JSON parsing."""
             if "configurations/get" in response.url:
-                try:
-                    data = await response.json()
-                    captured_data["config"] = data
-                except Exception:
-                    pass
+                async def fetch_json():
+                    try:
+                        data = await response.json()
+                        captured_data["config"] = data
+                    except Exception:
+                        pass
+                task = asyncio.create_task(fetch_json())
+                response_tasks.append(task)
         
         page.on("response", handle_response)
         
         await page.goto(booking_url, timeout=20000, wait_until="domcontentloaded")
         
-        # Wait for API response
-        for _ in range(10):
+        # Wait a bit for API calls to fire
+        await asyncio.sleep(2)
+        
+        # Wait for any pending response tasks
+        if response_tasks:
+            await asyncio.gather(*response_tasks, return_exceptions=True)
+        
+        # Additional wait if not captured yet
+        for _ in range(6):
             if "config" in captured_data:
                 break
             await asyncio.sleep(0.5)
