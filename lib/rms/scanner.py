@@ -14,7 +14,7 @@ from loguru import logger
 from lib.rms.models import ScannedURL
 
 
-API_TIMEOUT = 10.0
+API_TIMEOUT = 20.0  # Increased for slow connections
 
 # IBE servers to try for OnlineApi
 IBE_SERVERS = [
@@ -178,7 +178,7 @@ class RMSScanner:
 class PlaywrightRMSScanner:
     """Legacy Playwright-based scanner (slower, for fallback only)."""
     
-    PAGE_TIMEOUT = 15000
+    PAGE_TIMEOUT = 25000  # 25s for slow pages
     
     def __init__(self, page):
         self._page = page

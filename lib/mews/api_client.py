@@ -41,7 +41,7 @@ class MewsApiClient:
     
     BOOKING_URL_TEMPLATE = "https://app.mews.com/distributor/{slug}"
     
-    def __init__(self, timeout: float = 15.0):
+    def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
         self._browser = None
         self._context = None
@@ -176,7 +176,7 @@ class MewsApiClient:
         return result
 
 
-async def extract_mews_hotel(slug: str, timeout: float = 30.0) -> Optional[MewsHotelData]:
+async def extract_mews_hotel(slug: str, timeout: float = 45.0) -> Optional[MewsHotelData]:
     """
     Convenience function to extract hotel data from Mews.
     

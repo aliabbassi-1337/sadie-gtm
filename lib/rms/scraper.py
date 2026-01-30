@@ -14,7 +14,7 @@ from lib.rms.models import ExtractedRMSData
 from lib.rms.utils import decode_cloudflare_email, normalize_country
 
 
-SCRAPE_TIMEOUT = 20000
+SCRAPE_TIMEOUT = 30000  # 30s for slow RMS pages
 
 
 def extract_rms_id(url: str) -> Optional[str]:

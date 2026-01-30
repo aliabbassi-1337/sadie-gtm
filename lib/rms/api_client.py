@@ -16,8 +16,8 @@ from lib.rms.models import ExtractedRMSData
 from lib.rms.utils import normalize_country, decode_cloudflare_email
 
 
-# API timeout
-API_TIMEOUT = 10.0
+# API timeout (increased for slow connections)
+API_TIMEOUT = 20.0
 
 # RMS API base URLs by server
 API_SERVERS = [
