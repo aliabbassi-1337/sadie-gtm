@@ -41,11 +41,11 @@ def get_queue_url() -> str:
 class RMSSlugConsumer:
     """Consumes slug batches from SQS and ingests them."""
     
-    def __init__(self, concurrency: int = 5):
-        self.concurrency = concurrency
+    def __init__(self, concurrency: int = 10, batch_concurrency: int = 3):
+        self.concurrency = concurrency  # Concurrent API calls per batch
+        self.batch_concurrency = batch_concurrency  # Concurrent batches
         self.queue_url = get_queue_url()
         self.sqs = boto3.client("sqs", region_name=AWS_REGION)
-        self.ingestor = RMSIngestor()
         self._shutdown = False
         
         # Stats
@@ -59,16 +59,60 @@ class RMSSlugConsumer:
         logger.info("Shutdown requested")
         self._shutdown = True
     
+    async def _process_message(self, msg: dict) -> bool:
+        """Process a single message. Returns True on success."""
+        try:
+            body = json.loads(msg["Body"])
+            slugs = body.get("slugs", [])
+            source = body.get("source", "sqs")
+            
+            logger.info(f"Processing batch: {len(slugs)} slugs")
+            
+            # Create a new ingestor per batch to avoid state issues
+            ingestor = RMSIngestor()
+            
+            result = await ingestor.ingest_slugs(
+                slugs=slugs,
+                source_name=source,
+                concurrency=self.concurrency,
+                use_api=True,
+                dry_run=False,
+            )
+            
+            self.messages_processed += 1
+            self.slugs_processed += len(slugs)
+            self.hotels_found += result.get("found", 0)
+            self.hotels_saved += result.get("saved", 0)
+            
+            logger.success(
+                f"Batch complete: found={result.get('found', 0)}, saved={result.get('saved', 0)} | "
+                f"Total: {self.hotels_saved} saved from {self.slugs_processed} slugs"
+            )
+            
+            # Delete message on success
+            self.sqs.delete_message(
+                QueueUrl=self.queue_url,
+                ReceiptHandle=msg["ReceiptHandle"],
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error processing batch: {e}")
+            return False
+    
     async def run(self):
-        """Run the consumer loop."""
-        logger.info(f"Starting RMS slug consumer (concurrency={self.concurrency})")
+        """Run the consumer loop with concurrent batch processing."""
+        logger.info(f"Starting RMS slug consumer (api_concurrency={self.concurrency}, batch_concurrency={self.batch_concurrency})")
         logger.info(f"Queue: {self.queue_url}")
         
+        semaphore = asyncio.Semaphore(self.batch_concurrency)
+        pending_tasks = set()
+        
         while not self._shutdown:
-            # Long poll for messages
+            # Long poll for multiple messages
             response = self.sqs.receive_message(
                 QueueUrl=self.queue_url,
-                MaxNumberOfMessages=1,
+                MaxNumberOfMessages=min(10, self.batch_concurrency * 2),  # Up to 10 messages
                 WaitTimeSeconds=20,
                 VisibilityTimeout=1800,  # 30 min to process
             )
@@ -76,48 +120,37 @@ class RMSSlugConsumer:
             messages = response.get("Messages", [])
             
             if not messages:
-                logger.debug("Queue empty, waiting...")
+                # Wait for any pending tasks before continuing
+                if pending_tasks:
+                    done, pending_tasks = await asyncio.wait(
+                        pending_tasks, timeout=1.0, return_when=asyncio.FIRST_COMPLETED
+                    )
+                else:
+                    logger.debug("Queue empty, waiting...")
                 continue
             
             for msg in messages:
                 if self._shutdown:
                     break
                 
-                try:
-                    body = json.loads(msg["Body"])
-                    slugs = body.get("slugs", [])
-                    source = body.get("source", "sqs")
-                    
-                    logger.info(f"Processing batch: {len(slugs)} slugs")
-                    
-                    # Ingest - slugs are just strings
-                    result = await self.ingestor.ingest_slugs(
-                        slugs=slugs,
-                        source_name=source,
-                        concurrency=self.concurrency,
-                        use_api=True,
-                        dry_run=False,
-                    )
-                    
-                    self.messages_processed += 1
-                    self.slugs_processed += len(slugs)
-                    self.hotels_found += result.get("found", 0)
-                    self.hotels_saved += result.get("saved", 0)
-                    
-                    logger.success(
-                        f"Batch complete: found={result.get('found', 0)}, saved={result.get('saved', 0)} | "
-                        f"Total: {self.hotels_saved} saved from {self.slugs_processed} slugs"
-                    )
-                    
-                    # Delete message on success
-                    self.sqs.delete_message(
-                        QueueUrl=self.queue_url,
-                        ReceiptHandle=msg["ReceiptHandle"],
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"Error processing batch: {e}")
-                    # Don't delete - will be retried after visibility timeout
+                async def process_with_semaphore(m):
+                    async with semaphore:
+                        return await self._process_message(m)
+                
+                task = asyncio.create_task(process_with_semaphore(msg))
+                pending_tasks.add(task)
+                task.add_done_callback(pending_tasks.discard)
+            
+            # Clean up completed tasks
+            if pending_tasks:
+                done, pending_tasks = await asyncio.wait(
+                    pending_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+                )
+        
+        # Wait for remaining tasks on shutdown
+        if pending_tasks:
+            logger.info(f"Waiting for {len(pending_tasks)} pending tasks...")
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
         
         # Final stats
         logger.info("=" * 50)
@@ -131,11 +164,12 @@ class RMSSlugConsumer:
 
 async def main():
     parser = argparse.ArgumentParser(description="Consume RMS slugs from SQS")
-    parser.add_argument("--concurrency", type=int, default=5, help="Concurrent API calls (default: 5)")
+    parser.add_argument("--concurrency", type=int, default=10, help="Concurrent API calls per batch (default: 10)")
+    parser.add_argument("--batch-concurrency", type=int, default=3, help="Concurrent batches (default: 3)")
     
     args = parser.parse_args()
     
-    consumer = RMSSlugConsumer(concurrency=args.concurrency)
+    consumer = RMSSlugConsumer(concurrency=args.concurrency, batch_concurrency=args.batch_concurrency)
     
     # Handle shutdown signals
     def handle_signal(sig, frame):
