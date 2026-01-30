@@ -15,10 +15,10 @@ from typing import Optional
 from pydantic import BaseModel
 from loguru import logger
 
-# Rate limiting - Mews API is VERY strict, needs ~5 seconds between calls
+# Rate limiting - Mews API is EXTREMELY strict, needs 10+ seconds between calls
 _last_api_call = 0
 _api_lock = None
-API_RATE_LIMIT = 5.0  # 5 seconds between calls to avoid 429s
+API_RATE_LIMIT = 10.0  # 10 seconds between calls to avoid 429s
 
 
 class MewsHotelData(BaseModel):
