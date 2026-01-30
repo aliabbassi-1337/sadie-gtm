@@ -48,16 +48,6 @@ S3_BUCKET = "sadie-gtm"
 S3_PREFIX = "crawl-data/"
 S3_REGION = "eu-north-1"
 
-# URL templates for each booking engine
-ARCHIVE_URL_TEMPLATES = {
-    "rms": "bookings.rmscloud.com/search/index/{slug}",
-    "rms_ibe": "ibe.rmscloud.com/{slug}",
-    "cloudbeds": "hotels.cloudbeds.com/reservation/{slug}",
-    "mews": "app.mews.com/distributor/{slug}",
-    "siteminder": "book-directonline.com/properties/{slug}",
-}
-
-
 class DiscoveryResult(BaseModel):
     """Result of archive slug discovery."""
     
@@ -445,21 +435,16 @@ class Service(IService):
         return None
 
     async def _upload_slugs_to_s3(self, engine: str, slugs: List[dict]) -> str:
-        """Upload discovered slugs to S3 as txt file (async)."""
+        """Upload discovered slugs to S3 as txt file (async).
+        
+        Saves just the slug/ID, not the full URL path. The CrawlIngestor
+        will build the full URL from the slug using URL_PATTERNS.
+        """
         if not slugs:
             return ""
 
-        # Build URL paths
-        url_template = ARCHIVE_URL_TEMPLATES.get(engine)
-        lines = []
-
-        for slug_data in slugs:
-            slug = slug_data["slug"]
-            if url_template:
-                url_path = url_template.format(slug=slug)
-            else:
-                url_path = slug_data.get("source_url", slug).replace("https://", "").replace("http://", "")
-            lines.append(url_path)
+        # Just save the raw slugs, not URL paths
+        lines = [slug_data["slug"] for slug_data in slugs]
 
         # Deduplicate (case-insensitive)
         seen = set()
