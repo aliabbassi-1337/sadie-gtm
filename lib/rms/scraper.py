@@ -100,25 +100,30 @@ class RMSScraper(IRMSScraper):
             "page not found",
             "object reference not set",
             "error page",
-            "404",
-            "not found",
             "does not exist",
             "no longer available",
         ]
         
         for pattern in error_patterns:
             if pattern in body_lower or pattern in content_lower[:2000]:
+                logger.debug(f"Rejecting page: found error pattern '{pattern}'")
                 return False
         
         if body_text.strip().startswith("Error"):
+            logger.debug("Rejecting page: body starts with 'Error'")
             return False
         
         # Check for error title
-        if "<title>Error</title>" in content:
+        if "<title>error</title>" in content_lower:
+            logger.debug("Rejecting page: error title")
             return False
         
         # Must have substantial content
-        return bool(body_text and len(body_text) >= 100)
+        if not body_text or len(body_text) < 100:
+            logger.debug(f"Rejecting page: insufficient content ({len(body_text) if body_text else 0} chars)")
+            return False
+            
+        return True
     
     async def _extract_name(self, body_text: str) -> Optional[str]:
         # Garbage names to reject
