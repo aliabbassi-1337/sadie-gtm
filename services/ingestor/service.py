@@ -357,6 +357,7 @@ class Service(IService):
         # Engine name to booking_engine_id mapping
         ENGINE_IDS = {
             "rms": 12,
+            "rms_rates": 12,  # Same as rms
             "rms_ibe": 12,  # Same as rms
             "cloudbeds": 3,
             "mews": 4,

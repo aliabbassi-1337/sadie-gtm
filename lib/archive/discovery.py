@@ -13,7 +13,7 @@ from urllib.parse import unquote
 logger = logging.getLogger(__name__)
 
 # Number of historical Common Crawl indexes to query
-DEFAULT_CC_INDEX_COUNT = 12
+DEFAULT_CC_INDEX_COUNT = 40  # Query last 40 indexes (~2 years of crawls)
 
 
 class BookingEnginePattern(BaseModel):
@@ -45,9 +45,17 @@ BOOKING_ENGINE_PATTERNS = [
     BookingEnginePattern(
         name="rms",
         wayback_url_pattern="bookings*.rmscloud.com/Search/Index/*",
-        slug_regex=r"/(?:Search|Rates)/Index/([A-Fa-f0-9]{16}|\d+)/",
+        # Match hex slugs (16 char), numeric slugs, and slugs with format like "13915/90"
+        slug_regex=r"/(?:Search|Rates)/Index/([A-Fa-f0-9]{16}|\d+(?:/\d+)?)",
         commoncrawl_url_pattern="*.rmscloud.com/Search/Index/*",
         slug_type="mixed",  # numeric or hex
+    ),
+    BookingEnginePattern(
+        name="rms_rates",
+        wayback_url_pattern="bookings*.rmscloud.com/Rates/Index/*",
+        slug_regex=r"/Rates/Index/([A-Fa-f0-9]{16}|\d+(?:/\d+)?)",
+        commoncrawl_url_pattern="*.rmscloud.com/Rates/Index/*",
+        slug_type="mixed",
     ),
     BookingEnginePattern(
         name="rms_ibe",
