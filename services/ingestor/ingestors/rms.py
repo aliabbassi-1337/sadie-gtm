@@ -117,7 +117,7 @@ class RMSIngestor:
                         logger.success(f"Found: {hotel.name} ({hotel.booking_url})")
                 
                 if len(found_hotels) >= BATCH_SAVE_SIZE and not dry_run:
-                    saved = await self._save_batch(found_hotels, booking_engine_id)
+                    saved = await self._save_batch(found_hotels, booking_engine_id, self.source_name)
                     total_saved += saved
                     logger.info(f"Saved {saved} hotels (total: {total_saved})")
                     found_hotels = []
@@ -132,7 +132,7 @@ class RMSIngestor:
                 await asyncio.sleep(0.5)
             
             if found_hotels and not dry_run:
-                saved = await self._save_batch(found_hotels, booking_engine_id)
+                saved = await self._save_batch(found_hotels, booking_engine_id, self.source_name)
                 total_saved += saved
             
             for ctx in contexts:
@@ -145,15 +145,105 @@ class RMSIngestor:
             hotels_saved=total_saved,
         )
     
-    async def _save_batch(self, hotels: List[ExtractedRMSData], booking_engine_id: int) -> int:
+    async def ingest_slugs(
+        self,
+        slugs: List[str],
+        concurrency: int = 6,
+        dry_run: bool = False,
+        source_name: str = "rms_archive_discovery",
+    ) -> RMSIngestResult:
+        """Ingest hotels from a list of known slugs (numeric or hex).
+        
+        Unlike ingest() which scans a range, this takes pre-discovered slugs
+        and scrapes/saves each one.
+        """
+        booking_engine_id = await self._repo.get_booking_engine_id()
+        logger.info(f"RMS Cloud booking engine ID: {booking_engine_id}")
+        logger.info(f"Ingesting {len(slugs)} slugs (source: {source_name})")
+        
+        found_hotels: List[ExtractedRMSData] = []
+        total_saved = 0
+        total_scanned = 0
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            contexts: List[BrowserContext] = []
+            scrapers: List[RMSScraper] = []
+            
+            for _ in range(concurrency):
+                ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                )
+                page = await ctx.new_page()
+                stealth = Stealth()
+                await stealth.apply_stealth_async(page)
+                contexts.append(ctx)
+                scrapers.append(RMSScraper(page))
+            
+            semaphore = asyncio.Semaphore(concurrency)
+            
+            async def scrape_slug(slug: str, idx: int) -> Optional[ExtractedRMSData]:
+                async with semaphore:
+                    scraper = scrapers[idx % len(scrapers)]
+                    url = f"https://bookings.rmscloud.com/Search/Index/{slug}/90/"
+                    return await scraper.extract(url, slug)
+            
+            batch_size = concurrency * 2
+            for batch_start in range(0, len(slugs), batch_size):
+                if self._shutdown_requested:
+                    break
+                batch_end = min(batch_start + batch_size, len(slugs))
+                batch_slugs = slugs[batch_start:batch_end]
+                
+                tasks = [scrape_slug(slug, i) for i, slug in enumerate(batch_slugs)]
+                results = await asyncio.gather(*tasks)
+                total_scanned += len(tasks)
+                
+                for hotel in results:
+                    if hotel:
+                        found_hotels.append(hotel)
+                        logger.success(f"Found: {hotel.name} ({hotel.booking_url})")
+                
+                if len(found_hotels) >= BATCH_SAVE_SIZE and not dry_run:
+                    saved = await self._save_batch(found_hotels, booking_engine_id, source_name)
+                    total_saved += saved
+                    logger.info(f"Saved {saved} hotels (total: {total_saved})")
+                    found_hotels = []
+                
+                progress = batch_end / len(slugs) * 100
+                logger.info(f"Progress: {progress:.1f}% - Scanned: {total_scanned}, Found: {total_saved + len(found_hotels)}")
+                
+                await asyncio.sleep(1.0)  # Rate limiting
+            
+            if found_hotels and not dry_run:
+                saved = await self._save_batch(found_hotels, booking_engine_id, source_name)
+                total_saved += saved
+            
+            for ctx in contexts:
+                await ctx.close()
+            await browser.close()
+        
+        return RMSIngestResult(
+            total_scanned=total_scanned,
+            hotels_found=total_saved + len(found_hotels) if dry_run else total_saved,
+            hotels_saved=total_saved,
+        )
+    
+    async def _save_batch(
+        self, 
+        hotels: List[ExtractedRMSData], 
+        booking_engine_id: int,
+        source_name: Optional[str] = None,
+    ) -> int:
         saved = 0
+        source = source_name or self.source_name
         for hotel in hotels:
             try:
                 hotel_id = await self._repo.insert_hotel(
                     name=hotel.name, address=hotel.address, city=hotel.city,
                     state=hotel.state, country=hotel.country, phone=hotel.phone,
                     email=hotel.email, website=hotel.website, external_id=hotel.slug,
-                    source=self.source_name, status=1,
+                    source=source, status=1,
                 )
                 if hotel_id:
                     await self._repo.insert_hotel_booking_engine(
