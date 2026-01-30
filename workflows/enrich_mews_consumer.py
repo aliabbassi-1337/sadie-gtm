@@ -125,10 +125,11 @@ async def process_hotel(context: BrowserContext, hotel_id: int, booking_url: str
             """Sync handler that creates async task for JSON parsing."""
             url = response.url
             # Log API calls we're interested in
-            if "mews.com" in url and "api" in url.lower():
-                api_urls_seen.append(url[:80])
+            if "mews.com" in url and ("api" in url.lower() or "bookingEngine" in url):
+                api_urls_seen.append(url[:100])
             
-            if "configurations/get" in url:
+            # Try multiple endpoint patterns
+            if "configurations" in url or "bookingEngine" in url:
                 async def fetch_json():
                     try:
                         data = await response.json()
@@ -157,7 +158,10 @@ async def process_hotel(context: BrowserContext, hotel_id: int, booking_url: str
         
         if "config" not in captured_data:
             # Include debug info about what APIs we saw
-            debug_info = f"no_api_response (saw {len(api_urls_seen)} api calls)"
+            if api_urls_seen:
+                debug_info = f"no_config (apis: {api_urls_seen[0][:60]})"
+            else:
+                debug_info = "no_api_calls_seen"
             if captured_data.get("error"):
                 debug_info = f"json_error: {captured_data['error'][:50]}"
             return EnrichmentResult(hotel_id=hotel_id, success=False, error=debug_info)
