@@ -27,6 +27,14 @@ API_SERVERS = [
     "bookings8.rmscloud.com",
 ]
 
+# IBE servers for OnlineApi (have richer data)
+IBE_SERVERS = [
+    "ibe12.rmscloud.com",
+    "ibe13.rmscloud.com",
+    "ibe14.rmscloud.com",
+    "betaibe12.rmscloud.com",
+]
+
 
 class RMSApiResponse(BaseModel):
     """Combined response from RMS APIs."""
@@ -41,6 +49,11 @@ class RMSApiResponse(BaseModel):
     features: Optional[str] = None
     travel_directions: Optional[str] = None
     redirect_url: Optional[str] = None
+    
+    # From /OnlineApi/GetSearchOptions (richer data)
+    property_address: Optional[str] = None
+    property_phone: Optional[str] = None
+    property_email: Optional[str] = None
 
 
 class RMSApiClient:
@@ -71,20 +84,37 @@ class RMSApiClient:
                 name=api_data.property_name,
             )
             
-            # First, try to parse structured description (many properties have this format)
+            # Use OnlineApi data first (most reliable)
+            if api_data.property_phone:
+                data.phone = api_data.property_phone
+            if api_data.property_email:
+                data.email = api_data.property_email
+            if api_data.property_address:
+                data.address = api_data.property_address
+                # Parse city/state/country from address
+                parsed = self._parse_address_string(api_data.property_address)
+                data.city = parsed.get("city")
+                data.state = parsed.get("state")
+                data.country = parsed.get("country")
+            
+            # Use redirect URL as website
+            if api_data.redirect_url:
+                data.website = api_data.redirect_url
+            
+            # Fill in missing fields from structured description
             if api_data.property_description:
                 parsed = self._parse_structured_description(api_data.property_description)
-                if parsed["phone"]:
+                if not data.phone and parsed["phone"]:
                     data.phone = parsed["phone"]
-                if parsed["email"]:
+                if not data.email and parsed["email"]:
                     data.email = parsed["email"]
-                if parsed["address"]:
+                if not data.address and parsed["address"]:
                     data.address = parsed["address"]
-                if parsed["city"]:
+                if not data.city and parsed["city"]:
                     data.city = parsed["city"]
-                if parsed["state"]:
+                if not data.state and parsed["state"]:
                     data.state = parsed["state"]
-                if parsed["country"]:
+                if not data.country and parsed["country"]:
                     data.country = parsed["country"]
             
             # Combine all text for fallback extraction
@@ -101,13 +131,13 @@ class RMSApiClient:
             if not data.email:
                 data.email = self._extract_email(all_text)
             if not data.website:
-                data.website = api_data.redirect_url or self._extract_website(all_text)
+                data.website = self._extract_website(all_text)
             
             # Try to extract address from travel directions if not found
             if not data.address and api_data.travel_directions:
                 data.address = self._extract_address(api_data.travel_directions)
             
-            # Parse location from text if not found in structured description
+            # Parse location from text if not found
             if not data.city and not data.state and not data.country:
                 data.city, data.state, data.country = self._extract_location(all_text)
             
@@ -117,26 +147,99 @@ class RMSApiClient:
             logger.debug(f"RMS API error for {slug}: {e}")
             return None
     
+    def _parse_address_string(self, address: str) -> dict:
+        """Parse full address string to extract city, state, country.
+        
+        Handles formats like:
+        - "215 Pacific Highway, Coffs Harbour NSW 2450, Australia"
+        - "850 Main Neerim Road, Drouin West VIC 3818 , Australia"
+        """
+        result = {"city": None, "state": None, "country": None}
+        
+        if not address:
+            return result
+        
+        # Clean up extra whitespace
+        address = re.sub(r'\s+', ' ', address.strip())
+        
+        # Check for country at the end
+        if re.search(r',?\s*Australia\s*$', address, re.IGNORECASE):
+            result["country"] = "AU"
+            address = re.sub(r',?\s*Australia\s*$', '', address, flags=re.IGNORECASE)
+        elif re.search(r',?\s*New Zealand\s*$', address, re.IGNORECASE):
+            result["country"] = "NZ"
+            address = re.sub(r',?\s*New Zealand\s*$', '', address, flags=re.IGNORECASE)
+        
+        # Look for Australian state + postcode pattern: "City STATE Postcode"
+        au_match = re.search(
+            r'([A-Za-z\s\-\']+)\s+(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\s+(\d{4})\s*$',
+            address,
+            re.IGNORECASE
+        )
+        if au_match:
+            result["city"] = au_match.group(1).strip().rstrip(',')
+            result["state"] = au_match.group(2).upper()
+            if not result["country"]:
+                result["country"] = "AU"
+        
+        # US state + ZIP pattern
+        us_states = 'AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC'
+        us_match = re.search(
+            rf'([A-Za-z\s\-\']+),?\s+({us_states})\s+(\d{{5}}(?:-\d{{4}})?)\s*$',
+            address,
+            re.IGNORECASE
+        )
+        if us_match:
+            result["city"] = us_match.group(1).strip().rstrip(',')
+            result["state"] = us_match.group(2).upper()
+            result["country"] = "USA"
+        
+        return result
+    
     async def _fetch_api_data(self, slug: str, server: str) -> Optional[RMSApiResponse]:
         """Fetch data from RMS API endpoints."""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = RMSApiResponse()
             
-            # Fetch Property API
-            try:
-                prop_resp = await client.get(
-                    f"https://{server}/api/Property",
-                    params={"clientId": slug, "languageId": "0"},
-                )
-                if prop_resp.status_code == 200:
-                    data = prop_resp.json()
-                    response.property_name = data.get("sPropertyName")
-                    response.property_description = data.get("sPropertyDescription")
-                    response.client_id = str(data.get("nClientId", ""))
-            except Exception as e:
-                logger.debug(f"Property API failed: {e}")
+            # 1. First try OnlineApi/GetSearchOptions (richest data - has address, phone, email)
+            # Try multiple IBE servers
+            ibe_servers = IBE_SERVERS if server.startswith("bookings") else [server] + IBE_SERVERS
+            for ibe_server in ibe_servers:
+                try:
+                    online_resp = await client.get(
+                        f"https://{ibe_server}/OnlineApi/GetSearchOptions",
+                        params={"clientId": slug, "agentId": "90"},
+                    )
+                    if online_resp.status_code == 200:
+                        data = online_resp.json()
+                        prop_opts = data.get("propertyOptions", {})
+                        if prop_opts.get("propertyName"):
+                            response.property_name = prop_opts.get("propertyName")
+                            response.property_address = prop_opts.get("propertyAddress", "").strip()
+                            response.property_phone = prop_opts.get("propertyPhoneBH")
+                            response.property_email = prop_opts.get("propertyEmail")
+                            response.property_description = prop_opts.get("propertyDescription")
+                            logger.debug(f"OnlineApi success for {slug} via {ibe_server}")
+                            break
+                except Exception as e:
+                    logger.debug(f"OnlineApi failed for {ibe_server}: {e}")
             
-            # Fetch Details API
+            # 2. Try /api/Property for name/description if not found
+            if not response.property_name:
+                try:
+                    prop_resp = await client.get(
+                        f"https://{server}/api/Property",
+                        params={"clientId": slug, "languageId": "0"},
+                    )
+                    if prop_resp.status_code == 200:
+                        data = prop_resp.json()
+                        response.property_name = data.get("sPropertyName")
+                        response.property_description = data.get("sPropertyDescription")
+                        response.client_id = str(data.get("nClientId", ""))
+                except Exception as e:
+                    logger.debug(f"Property API failed: {e}")
+            
+            # 3. Fetch /api/Details for additional info (travel directions, redirect URL)
             try:
                 details_resp = await client.get(
                     f"https://{server}/api/Details",
