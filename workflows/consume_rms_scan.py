@@ -125,7 +125,7 @@ class RMSScanConsumer:
                 )
                 
                 if result:
-                    hotel_id = result["id"]
+                    hotel_id = result  # insert_rms_hotel<! returns scalar int
                     # Link to RMS booking engine
                     await queries.insert_rms_hotel_booking_engine(
                         conn,
