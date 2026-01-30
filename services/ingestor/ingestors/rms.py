@@ -291,22 +291,38 @@ class RMSIngestor:
         booking_engine_id: int,
         source_name: Optional[str] = None,
     ) -> int:
-        saved = 0
+        """
+        Batch save RMS hotels using executemany for efficiency.
+        
+        Uses BATCH_INSERT_CRAWLED_HOTELS which:
+        1. Inserts hotel + booking engine link in single query
+        2. Skips duplicates based on external_id and booking_url
+        3. Runs as executemany in a transaction (single commit)
+        """
+        if not hotels:
+            return 0
+        
         source = source_name or self.source_name
-        for hotel in hotels:
-            try:
-                hotel_id = await self._repo.insert_hotel(
-                    name=hotel.name, address=hotel.address, city=hotel.city,
-                    state=hotel.state, country=hotel.country, phone=hotel.phone,
-                    email=hotel.email, website=hotel.website, external_id=hotel.slug,
-                    source=source, status=1,
-                )
-                if hotel_id:
-                    await self._repo.insert_hotel_booking_engine(
-                        hotel_id=hotel_id, booking_engine_id=booking_engine_id,
-                        booking_url=hotel.booking_url, enrichment_status=1,
-                    )
-                    saved += 1
-            except Exception as e:
-                logger.error(f"Error saving {hotel.name}: {e}")
-        return saved
+        
+        # Format: (name, source, external_id, external_id_type, booking_engine_id, booking_url, slug, detection_method)
+        records = [
+            (
+                hotel.name,
+                source,
+                hotel.slug,  # external_id
+                "rms_client_id",  # external_id_type
+                booking_engine_id,
+                hotel.booking_url,
+                hotel.slug,  # engine_property_id
+                "api" if hotel.website else "scraper",  # detection_method
+            )
+            for hotel in hotels
+        ]
+        
+        try:
+            from services.ingestor import repo
+            saved = await repo.batch_insert_crawled_hotels(records)
+            return saved
+        except Exception as e:
+            logger.error(f"Batch insert failed: {e}")
+            return 0
