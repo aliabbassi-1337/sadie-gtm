@@ -1,13 +1,16 @@
 """Mews API Client for extracting hotel data.
 
-Uses Playwright to load the Mews distributor page and intercept the
-configurations/get API call to get property details.
+Uses a hybrid approach:
+1. Get session token via Playwright (once)
+2. Use fast httpx API calls for all hotels
+3. Refresh session when expired
 
-The API requires a valid session token that is generated client-side,
-so we need to use a browser to make the request.
+The API endpoint is: https://api.mews.com/api/bookingEngine/v1/configurations/get
 """
 
 import asyncio
+import time
+import httpx
 from typing import Optional
 from pydantic import BaseModel
 from loguru import logger
@@ -36,29 +39,43 @@ class MewsHotelData(BaseModel):
         return bool(self.name and self.name != "Unknown")
 
 
+# Session token cache (shared across instances)
+_session_cache = {
+    "session": None,
+    "client": None,
+    "obtained_at": 0,
+    "lock": None,
+}
+
+# Session expires after 30 minutes (conservative estimate)
+SESSION_TTL = 30 * 60
+
+
 class MewsApiClient:
-    """Client for Mews booking engine API using Playwright."""
+    """Client for Mews booking engine API using hybrid Playwright + httpx approach."""
     
     BOOKING_URL_TEMPLATE = "https://app.mews.com/distributor/{slug}"
+    API_URL = "https://api.mews.com/api/bookingEngine/v1/configurations/get"
     
-    def __init__(self, timeout: float = 45.0):
+    def __init__(self, timeout: float = 20.0):
         self.timeout = timeout
+        self._http_client: Optional[httpx.AsyncClient] = None
+        # For session refresh via Playwright
         self._browser = None
-        self._context = None
         self._playwright = None
     
     async def initialize(self):
-        """Initialize browser for API calls."""
-        if self._browser:
-            return
-        
-        from playwright.async_api import async_playwright
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=True)
-        self._context = await self._browser.new_context()
+        """Initialize HTTP client."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=self.timeout)
+        if _session_cache["lock"] is None:
+            _session_cache["lock"] = asyncio.Lock()
     
     async def close(self):
-        """Close browser."""
+        """Close clients."""
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
         if self._browser:
             await self._browser.close()
             self._browser = None
@@ -66,12 +83,88 @@ class MewsApiClient:
             await self._playwright.stop()
             self._playwright = None
     
+    async def _get_session(self) -> tuple[Optional[str], Optional[str]]:
+        """Get or refresh session token."""
+        now = time.time()
+        
+        # Check if cached session is still valid
+        if (_session_cache["session"] 
+            and now - _session_cache["obtained_at"] < SESSION_TTL):
+            return _session_cache["session"], _session_cache["client"]
+        
+        # Need to refresh - use lock to prevent concurrent refreshes
+        async with _session_cache["lock"]:
+            # Double-check after acquiring lock
+            if (_session_cache["session"] 
+                and now - _session_cache["obtained_at"] < SESSION_TTL):
+                return _session_cache["session"], _session_cache["client"]
+            
+            logger.info("Refreshing Mews session token via Playwright...")
+            session, client = await self._fetch_session_via_playwright()
+            
+            if session and client:
+                _session_cache["session"] = session
+                _session_cache["client"] = client
+                _session_cache["obtained_at"] = now
+                logger.info(f"Got new Mews session (client: {client})")
+            
+            return session, client
+    
+    async def _fetch_session_via_playwright(self) -> tuple[Optional[str], Optional[str]]:
+        """Use Playwright to get a valid session token."""
+        from playwright.async_api import async_playwright
+        import json
+        
+        captured = {}
+        
+        try:
+            if not self._playwright:
+                self._playwright = await async_playwright().start()
+            if not self._browser:
+                self._browser = await self._playwright.chromium.launch(headless=True)
+            
+            context = await self._browser.new_context()
+            page = await context.new_page()
+            
+            async def handle_route(route):
+                request = route.request
+                if "configurations/get" in request.url and request.post_data:
+                    captured["body"] = request.post_data
+                await route.continue_()
+            
+            await page.route("**/*", handle_route)
+            
+            # Use a known working hotel to get session
+            await page.goto(
+                "https://app.mews.com/distributor/cb6072cc-1e03-45cc-a6e8-ab0d00ea7979",
+                wait_until="commit",
+                timeout=45000,
+            )
+            
+            # Wait for API call
+            for _ in range(40):
+                if captured.get("body"):
+                    break
+                await asyncio.sleep(0.5)
+            
+            await page.close()
+            await context.close()
+            
+            if captured.get("body"):
+                data = json.loads(captured["body"])
+                return data.get("session"), data.get("client")
+            
+        except Exception as e:
+            logger.warning(f"Failed to get Mews session: {e}")
+        
+        return None, None
+    
     async def extract(self, slug: str) -> Optional[MewsHotelData]:
         """
-        Extract hotel data from Mews by loading the distributor page.
+        Extract hotel data from Mews using fast API call.
         
         Args:
-            slug: The Mews enterprise UUID (e.g., "6c059d24-e493-4c6b-aa0d-a005b1e64356")
+            slug: The Mews enterprise UUID
         
         Returns:
             MewsHotelData if successful, None if failed
@@ -79,53 +172,69 @@ class MewsApiClient:
         await self.initialize()
         
         try:
-            data = await self._fetch_via_browser(slug)
-            if not data:
-                return None
+            # Try fast API first
+            data = await self._fetch_via_api(slug)
             
-            return self._parse_response(slug, data)
+            if data:
+                return self._parse_response(slug, data)
+            
+            # API failed, maybe session expired - force refresh
+            _session_cache["obtained_at"] = 0
+            data = await self._fetch_via_api(slug)
+            
+            if data:
+                return self._parse_response(slug, data)
+            
+            return None
             
         except Exception as e:
             logger.debug(f"Mews extraction error for {slug}: {e}")
             return None
     
-    async def _fetch_via_browser(self, slug: str) -> Optional[dict]:
-        """Load distributor page and capture API response."""
-        captured_data = {}
-        response_tasks = []
+    async def _fetch_via_api(self, slug: str) -> Optional[dict]:
+        """Fetch data via direct API call (fast!)."""
+        session, client = await self._get_session()
         
-        page = await self._context.new_page()
+        if not session or not client:
+            logger.warning("No Mews session available")
+            return None
+        
+        payload = {
+            "ids": [slug],
+            "primaryId": slug,
+            "client": client,
+            "session": session,
+        }
         
         try:
-            def handle_response(response):
-                """Sync handler that creates async task for JSON parsing."""
-                if "configurations/get" in response.url:
-                    async def fetch_json():
-                        try:
-                            data = await response.json()
-                            captured_data["config"] = data
-                        except Exception:
-                            pass
-                    task = asyncio.create_task(fetch_json())
-                    response_tasks.append(task)
+            resp = await self._http_client.post(
+                self.API_URL,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": "https://app.mews.com",
+                    "Referer": "https://app.mews.com/",
+                },
+            )
             
-            page.on("response", handle_response)
-            
-            url = self.BOOKING_URL_TEMPLATE.format(slug=slug)
-            await page.goto(url, wait_until="commit", timeout=int(self.timeout * 1000))
-            
-            # Wait for configurations/get API call (can take up to 15-20s)
-            for _ in range(40):  # 20 second max wait
-                if response_tasks:
-                    await asyncio.gather(*response_tasks, return_exceptions=True)
-                if "config" in captured_data:
-                    break
-                await asyncio.sleep(0.5)
-            
-            return captured_data.get("config")
-            
-        finally:
-            await page.close()
+            if resp.status_code == 200:
+                return resp.json()
+            elif resp.status_code == 400:
+                # Could be invalid ID or expired session
+                text = resp.text
+                if "Invalid" in text and "session" in text.lower():
+                    # Session expired, will retry with fresh session
+                    return None
+                # Invalid hotel ID - log but don't retry
+                logger.debug(f"Invalid Mews ID {slug}: {text[:50]}")
+                return None
+            else:
+                logger.debug(f"Mews API error for {slug}: HTTP {resp.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.debug(f"Mews API request failed for {slug}: {e}")
+            return None
     
     def _parse_response(self, slug: str, data: dict) -> MewsHotelData:
         """Parse Mews API response into hotel data."""
