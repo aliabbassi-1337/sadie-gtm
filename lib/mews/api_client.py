@@ -15,10 +15,10 @@ from typing import Optional
 from pydantic import BaseModel
 from loguru import logger
 
-# Rate limiting - Mews API allows ~2 requests/second
+# Rate limiting - Mews API is strict, ~1 request/second max
 _last_api_call = 0
 _api_lock = None
-API_RATE_LIMIT = 0.5  # 500ms between calls
+API_RATE_LIMIT = 1.0  # 1 second between calls
 
 
 class MewsHotelData(BaseModel):
@@ -238,13 +238,13 @@ class MewsApiClient:
             if resp.status_code == 200:
                 return resp.json()
             elif resp.status_code == 429:
-                # Rate limited - back off and retry
+                # Rate limited - exponential backoff and retry
                 if retry_count < 3:
-                    wait = (retry_count + 1) * 2  # 2s, 4s, 6s
+                    wait = (retry_count + 1) * 5  # 5s, 10s, 15s
                     logger.debug(f"Rate limited, waiting {wait}s...")
                     await asyncio.sleep(wait)
                     return await self._fetch_via_api(slug, retry_count + 1)
-                logger.debug(f"Mews rate limit exceeded for {slug}")
+                logger.warning(f"Mews rate limit exceeded for {slug} after 3 retries")
                 return None
             elif resp.status_code == 400:
                 # Could be invalid ID or expired session
