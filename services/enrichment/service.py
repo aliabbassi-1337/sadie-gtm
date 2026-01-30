@@ -1408,8 +1408,14 @@ class Service(IService):
     # =========================================================================
 
     async def enrich_rms_hotels(self, hotels: List[RMSHotelRecord], concurrency: int = 6) -> EnrichResult:
-        """Enrich RMS hotels by scraping their booking pages."""
+        """Enrich RMS hotels by scraping their booking pages.
+        
+        Uses batch UPDATE at the end for efficiency (single query instead of N queries).
+        """
         processed = enriched = failed = 0
+        batch_updates: List[dict] = []  # Successful enrichments
+        failed_urls: List[str] = []  # Failed enrichments
+        
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             contexts: List[BrowserContext] = []
@@ -1423,40 +1429,60 @@ class Service(IService):
                 scrapers.append(RMSScraper(page))
             semaphore = asyncio.Semaphore(concurrency)
 
-            async def enrich_one(hotel: RMSHotelRecord, idx: int) -> tuple[bool, bool]:
+            async def enrich_one(hotel: RMSHotelRecord, idx: int) -> tuple[bool, bool, Optional[dict]]:
+                """Returns (processed, enriched, update_dict or None)."""
                 async with semaphore:
                     # Rate limit: stagger requests to avoid hammering RMS servers
-                    # With 6 concurrent + 1s delay, we get ~6 requests per 6-7 seconds
-                    await asyncio.sleep(idx % concurrency)  # Stagger initial requests
+                    await asyncio.sleep(idx % concurrency)
                     
                     scraper = scrapers[idx % len(scrapers)]
                     url = hotel.booking_url if hotel.booking_url.startswith("http") else f"https://{hotel.booking_url}"
                     slug = url.split("/")[-1]
                     data = await scraper.extract(url, slug)
                     if data and data.has_data():
-                        await self._rms_repo.update_hotel(hotel_id=hotel.hotel_id, name=data.name, address=data.address, city=data.city, state=data.state, country=data.country, phone=data.phone, email=data.email, website=data.website)
-                        await self._rms_repo.update_enrichment_status(hotel.booking_url, 1)
-                        logger.info(f"Enriched {hotel.hotel_id}: {data.name}")
-                        return (True, True)
+                        logger.info(f"Enriched [scraper] {hotel.hotel_id}: {data.name} | {data.city}, {data.state}")
+                        return (True, True, {
+                            "hotel_id": hotel.hotel_id,
+                            "booking_url": hotel.booking_url,
+                            "name": data.name,
+                            "address": data.address,
+                            "city": data.city,
+                            "state": data.state,
+                            "country": data.country,
+                            "phone": data.phone,
+                            "email": data.email,
+                            "website": data.website,
+                        })
                     else:
-                        await self._rms_repo.update_enrichment_status(hotel.booking_url, -1)
-                        return (True, False)
+                        return (True, False, None)
 
             tasks = [enrich_one(h, i) for i, h in enumerate(hotels)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
+            
+            for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Enrichment error: {result}")
                     failed += 1
+                    failed_urls.append(hotels[i].booking_url)
                 else:
-                    pr, en = result
+                    pr, en, update_dict = result
                     processed += 1 if pr else 0
-                    enriched += 1 if en else 0
-                    if pr and not en:
+                    if en and update_dict:
+                        enriched += 1
+                        batch_updates.append(update_dict)
+                    elif pr:
                         failed += 1
+                        failed_urls.append(hotels[i].booking_url)
+            
             for ctx in contexts:
                 await ctx.close()
             await browser.close()
+        
+        # Batch update all results in a single query
+        if batch_updates or failed_urls:
+            updated = await self._rms_repo.batch_update_enrichment(batch_updates, failed_urls)
+            logger.info(f"Batch update: {updated} hotels updated, {len(failed_urls)} marked failed")
+        
         return EnrichResult(processed=processed, enriched=enriched, failed=failed)
 
     async def enqueue_rms_for_enrichment(self, limit: int = 5000, batch_size: int = 10) -> EnqueueResult:

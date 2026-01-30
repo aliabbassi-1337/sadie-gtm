@@ -147,3 +147,44 @@ WHERE hbe.booking_engine_id = :booking_engine_id
       OR h.phone_website IS NULL 
       OR h.phone_website = ''
   );
+
+-- ============================================================================
+-- BATCH UPDATE QUERIES (used by enrichment consumer for efficiency)
+-- ============================================================================
+
+-- Note: These are raw SQL executed via conn.execute(), not aiosql queries
+-- They use PostgreSQL unnest() for efficient batch operations
+
+-- BATCH_UPDATE_RMS_HOTELS: Updates multiple hotels in a single query
+-- Uses unnest to join arrays of values, only updates NULL/empty fields
+-- SQL:
+-- UPDATE sadie_gtm.hotels h
+-- SET
+--     name = CASE 
+--         WHEN h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%' 
+--              OR h.name = 'Online Bookings' OR h.name LIKE '%rmscloud.com%'
+--         THEN COALESCE(v.name, h.name)
+--         ELSE h.name 
+--     END,
+--     address = CASE WHEN h.address IS NULL OR h.address = '' THEN v.address ELSE h.address END,
+--     city = CASE WHEN h.city IS NULL OR h.city = '' THEN v.city ELSE h.city END,
+--     state = CASE WHEN h.state IS NULL OR h.state = '' THEN v.state ELSE h.state END,
+--     country = CASE WHEN h.country IS NULL OR h.country = '' THEN v.country ELSE h.country END,
+--     phone_website = CASE WHEN h.phone_website IS NULL OR h.phone_website = '' THEN v.phone ELSE h.phone_website END,
+--     email = CASE WHEN h.email IS NULL OR h.email = '' THEN v.email ELSE h.email END,
+--     website = CASE WHEN h.website IS NULL OR h.website = '' THEN v.website ELSE h.website END,
+--     updated_at = NOW()
+-- FROM (
+--     SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
+--     AS t(hotel_id, name, address, city, state, country, phone, email, website)
+-- ) v
+-- WHERE h.id = v.hotel_id
+
+-- BATCH_UPDATE_RMS_ENRICHMENT_STATUS: Updates enrichment status for multiple hotels
+-- SQL:
+-- UPDATE sadie_gtm.hotel_booking_engines
+-- SET enrichment_status = v.status, last_enrichment_attempt = NOW()
+-- FROM (
+--     SELECT * FROM unnest($1::text[], $2::int[]) AS t(booking_url, status)
+-- ) v
+-- WHERE hotel_booking_engines.booking_url = v.booking_url
