@@ -1,7 +1,9 @@
 """Mews enrichment worker - Polls SQS and enriches hotels using Playwright.
 
-Extracts hotel name from page title (format: "Hotel Name - New booking").
-~60% success rate - some pages don't include hotel name in title.
+Uses Mews's hidden API (configurations/get) to extract full hotel data:
+- Name, address, city, country
+- Email, phone
+- Lat/lon coordinates
 
 Usage:
     uv run python -m workflows.enrich_mews_consumer
@@ -17,18 +19,17 @@ import asyncio
 import argparse
 import os
 import signal
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any
 from loguru import logger
-from playwright.async_api import async_playwright, Page
-from playwright_stealth import Stealth
+from playwright.async_api import async_playwright, Page, BrowserContext
 
 from db.client import init_db, close_db
 from services.enrichment import repo
 from infra.sqs import receive_messages, delete_message, get_queue_attributes
 
 QUEUE_URL = os.getenv("SQS_MEWS_ENRICHMENT_QUEUE_URL", "")
-VISIBILITY_TIMEOUT = 120  # 2 minutes per hotel (simpler extraction)
+VISIBILITY_TIMEOUT = 120  # 2 minutes per hotel
 
 shutdown_requested = False
 
@@ -45,47 +46,123 @@ class EnrichmentResult:
     """Result of enriching a hotel."""
     hotel_id: int
     success: bool
-    name: str = None
-    error: str = None
-
-
-async def extract_name_from_page(page: Page) -> str:
-    """Extract hotel name from Mews page title.
+    name: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    error: Optional[str] = None
     
-    Title format: "Hotel Name - New booking"
-    Returns hotel name or None if not found.
-    """
-    try:
-        title = await page.title()
-        
-        # Parse "Hotel Name - New booking"
-        match = re.match(r'^(.+?) - New booking$', title)
-        if match:
-            name = match.group(1).strip()
-            # Filter out generic names
-            if name and name not in ['New booking', 'Booking', 'Reservation']:
-                return name
-        
-        return None
-    except Exception:
-        return None
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dict for batch update."""
+        return {
+            "hotel_id": self.hotel_id,
+            "name": self.name,
+            "address": self.address,
+            "city": self.city,
+            "country": self.country,
+            "email": self.email,
+            "phone": self.phone,
+            "lat": self.lat,
+            "lon": self.lon,
+        }
 
 
-async def process_hotel(page: Page, hotel_id: int, booking_url: str) -> EnrichmentResult:
-    """Process a single hotel."""
+def parse_mews_response(data: dict) -> dict:
+    """Parse Mews API response into hotel data."""
+    result = {}
+    
+    # Get enterprise (property) data - keys can be camelCase or PascalCase
+    enterprises = data.get("enterprises") or data.get("Enterprises", [])
+    if enterprises:
+        enterprise = enterprises[0]
+        
+        # Name - can be dict with language codes
+        name = enterprise.get("name") or enterprise.get("Name")
+        if isinstance(name, dict):
+            # Prefer English, fall back to first available
+            result["name"] = name.get("en-US") or name.get("en-GB") or next(iter(name.values()), None)
+        elif isinstance(name, str):
+            result["name"] = name
+        
+        # Address
+        address = enterprise.get("address") or enterprise.get("Address", {})
+        if address:
+            line1 = address.get("line1") or address.get("Line1")
+            line2 = address.get("line2") or address.get("Line2")
+            result["address"] = line1
+            if line2:
+                result["address"] = f"{result['address']}, {line2}"
+            result["city"] = address.get("city") or address.get("City")
+            result["country"] = address.get("countryCode") or address.get("CountryCode")
+            result["lat"] = address.get("latitude") or address.get("Latitude")
+            result["lon"] = address.get("longitude") or address.get("Longitude")
+        
+        # Contact info
+        result["email"] = enterprise.get("email") or enterprise.get("Email")
+        result["phone"] = enterprise.get("telephone") or enterprise.get("Telephone")
+    
+    # Get chain name as fallback
+    chains = data.get("chains") or data.get("Chains", [])
+    if chains and not result.get("name"):
+        result["name"] = chains[0].get("name") or chains[0].get("Name")
+    
+    return result
+
+
+async def process_hotel(context: BrowserContext, hotel_id: int, booking_url: str) -> EnrichmentResult:
+    """Process a single hotel by loading page and intercepting API call."""
+    page = await context.new_page()
+    captured_data = {}
+    
     try:
+        async def handle_response(response):
+            if "configurations/get" in response.url:
+                try:
+                    data = await response.json()
+                    captured_data["config"] = data
+                except Exception:
+                    pass
+        
+        page.on("response", handle_response)
+        
         await page.goto(booking_url, timeout=20000, wait_until="domcontentloaded")
-        await asyncio.sleep(2)  # Wait for React to render title
         
-        name = await extract_name_from_page(page)
+        # Wait for API response
+        for _ in range(10):
+            if "config" in captured_data:
+                break
+            await asyncio.sleep(0.5)
         
-        if not name:
-            return EnrichmentResult(hotel_id=hotel_id, success=False, error="no_name_in_title")
+        if "config" not in captured_data:
+            return EnrichmentResult(hotel_id=hotel_id, success=False, error="no_api_response")
         
-        return EnrichmentResult(hotel_id=hotel_id, success=True, name=name)
+        # Parse the API response
+        parsed = parse_mews_response(captured_data["config"])
+        
+        if not parsed.get("name"):
+            return EnrichmentResult(hotel_id=hotel_id, success=False, error="no_name_in_response")
+        
+        return EnrichmentResult(
+            hotel_id=hotel_id,
+            success=True,
+            name=parsed.get("name"),
+            address=parsed.get("address"),
+            city=parsed.get("city"),
+            country=parsed.get("country"),
+            email=parsed.get("email"),
+            phone=parsed.get("phone"),
+            lat=parsed.get("lat"),
+            lon=parsed.get("lon"),
+        )
         
     except Exception as e:
         return EnrichmentResult(hotel_id=hotel_id, success=False, error=str(e)[:100])
+    finally:
+        await page.close()
 
 
 async def run_consumer(concurrency: int = 5):
@@ -102,21 +179,17 @@ async def run_consumer(concurrency: int = 5):
     try:
         logger.info(f"Starting Mews enrichment consumer (concurrency={concurrency})")
         
-        async with Stealth().use_async(async_playwright()) as p:
-            # playwright-stealth bypasses headless detection
+        async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             
             # Create browser contexts pool
             contexts = []
-            pages = []
             for _ in range(concurrency):
                 ctx = await browser.new_context(
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1280, "height": 800},
                 )
-                page = await ctx.new_page()
                 contexts.append(ctx)
-                pages.append(page)
             
             logger.info(f"Created {concurrency} browser contexts")
             
@@ -137,7 +210,7 @@ async def run_consumer(concurrency: int = 5):
                     logger.debug("No messages, waiting...")
                     continue
                 
-                # Process messages - one per page
+                # Process messages - one per context
                 valid_messages = []
                 for msg in messages:
                     body = msg["body"]
@@ -156,7 +229,7 @@ async def run_consumer(concurrency: int = 5):
                 
                 for i, (msg, hotel_id, booking_url) in enumerate(valid_messages[:concurrency]):
                     message_map[hotel_id] = msg
-                    tasks.append(process_hotel(pages[i], hotel_id, booking_url))
+                    tasks.append(process_hotel(contexts[i], hotel_id, booking_url))
                 
                 if not tasks:
                     continue
@@ -174,12 +247,9 @@ async def run_consumer(concurrency: int = 5):
                         continue
                     
                     if result.success and result.name:
-                        batch_results.append({
-                            "hotel_id": result.hotel_id,
-                            "name": result.name,
-                        })
+                        batch_results.append(result.to_dict())
                         total_enriched += 1
-                        logger.info(f"  Hotel {result.hotel_id}: name={result.name[:30]}")
+                        logger.info(f"  Hotel {result.hotel_id}: {result.name[:30]} | {result.city}, {result.country}")
                     elif result.error:
                         logger.debug(f"  Hotel {result.hotel_id}: {result.error}")
                     
@@ -204,8 +274,6 @@ async def run_consumer(concurrency: int = 5):
                 logger.info(f"Final batch update: {updated} hotels")
             
             # Cleanup
-            for page in pages:
-                await page.close()
             for ctx in contexts:
                 await ctx.close()
             await browser.close()

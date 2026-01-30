@@ -886,34 +886,74 @@ async def get_mews_hotels_total_count() -> int:
 async def batch_update_mews_enrichment(
     updates: List[Dict],
 ) -> int:
-    """Batch update hotels with Mews enrichment results (name only)."""
+    """Batch update hotels with Mews enrichment results.
+    
+    Supports: name, address, city, country, email, phone, lat, lon
+    """
     if not updates:
         return 0
     
     hotel_ids = []
     names = []
+    addresses = []
+    cities = []
+    countries = []
+    emails = []
+    phones = []
+    lats = []
+    lons = []
     
     for u in updates:
         hotel_ids.append(u["hotel_id"])
         names.append(u.get("name"))
+        addresses.append(u.get("address"))
+        cities.append(u.get("city"))
+        countries.append(u.get("country"))
+        emails.append(u.get("email"))
+        phones.append(u.get("phone"))
+        lats.append(u.get("lat"))
+        lons.append(u.get("lon"))
     
     sql = """
     UPDATE sadie_gtm.hotels h
     SET 
-        name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
+        name = CASE WHEN v.name IS NOT NULL AND v.name != '' AND h.name LIKE 'Unknown (%'
                     THEN v.name ELSE h.name END,
+        address = CASE WHEN v.address IS NOT NULL AND v.address != '' AND h.address IS NULL
+                    THEN v.address ELSE h.address END,
+        city = CASE WHEN v.city IS NOT NULL AND v.city != '' AND h.city IS NULL
+                    THEN v.city ELSE h.city END,
+        country = CASE WHEN v.country IS NOT NULL AND v.country != '' AND h.country IS NULL
+                    THEN v.country ELSE h.country END,
+        email = CASE WHEN v.email IS NOT NULL AND v.email != '' AND h.email IS NULL
+                    THEN v.email ELSE h.email END,
+        phone = CASE WHEN v.phone IS NOT NULL AND v.phone != '' AND h.phone IS NULL
+                    THEN v.phone ELSE h.phone END,
+        lat = CASE WHEN v.lat IS NOT NULL AND h.lat IS NULL
+                    THEN v.lat ELSE h.lat END,
+        lon = CASE WHEN v.lon IS NOT NULL AND h.lon IS NULL
+                    THEN v.lon ELSE h.lon END,
         updated_at = CURRENT_TIMESTAMP
     FROM (
         SELECT * FROM unnest(
             $1::integer[],
-            $2::text[]
-        ) AS t(hotel_id, name)
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[],
+            $6::text[],
+            $7::text[],
+            $8::float[],
+            $9::float[]
+        ) AS t(hotel_id, name, address, city, country, email, phone, lat, lon)
     ) v
     WHERE h.id = v.hotel_id
     """
     
     async with get_conn() as conn:
-        result = await conn.execute(sql, hotel_ids, names)
+        result = await conn.execute(
+            sql, hotel_ids, names, addresses, cities, countries, emails, phones, lats, lons
+        )
         count = int(result.split()[-1]) if result else len(updates)
     
     return count
