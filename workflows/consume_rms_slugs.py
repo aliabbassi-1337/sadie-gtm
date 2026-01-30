@@ -90,15 +90,9 @@ class RMSSlugConsumer:
                     
                     logger.info(f"Processing batch: {len(slugs)} slugs")
                     
-                    # Build slug records for ingestor
-                    slug_records = [
-                        {"slug": slug, "source_url": f"bookings.rmscloud.com/search/index/{slug}", "archive_source": source}
-                        for slug in slugs
-                    ]
-                    
-                    # Ingest
+                    # Ingest - slugs are just strings
                     result = await self.ingestor.ingest_slugs(
-                        slugs=slug_records,
+                        slugs=slugs,
                         source_name=source,
                         concurrency=self.concurrency,
                         use_api=True,
