@@ -889,6 +889,7 @@ async def batch_update_mews_enrichment(
     """Batch update hotels with Mews enrichment results.
     
     Supports: name, address, city, country, email, phone, lat, lon
+    Uses phone_website column and PostGIS location geography.
     """
     if not updates:
         return 0
@@ -927,12 +928,11 @@ async def batch_update_mews_enrichment(
                     THEN v.country ELSE h.country END,
         email = CASE WHEN v.email IS NOT NULL AND v.email != '' AND h.email IS NULL
                     THEN v.email ELSE h.email END,
-        phone = CASE WHEN v.phone IS NOT NULL AND v.phone != '' AND h.phone IS NULL
-                    THEN v.phone ELSE h.phone END,
-        lat = CASE WHEN v.lat IS NOT NULL AND h.lat IS NULL
-                    THEN v.lat ELSE h.lat END,
-        lon = CASE WHEN v.lon IS NOT NULL AND h.lon IS NULL
-                    THEN v.lon ELSE h.lon END,
+        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' AND h.phone_website IS NULL
+                    THEN v.phone ELSE h.phone_website END,
+        location = CASE WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL AND h.location IS NULL
+                    THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography 
+                    ELSE h.location END,
         updated_at = CURRENT_TIMESTAMP
     FROM (
         SELECT * FROM unnest(
