@@ -23,7 +23,8 @@ async def main():
         user=os.getenv('SADIE_DB_USER'),
         password=os.getenv('SADIE_DB_PASSWORD'),
         database=os.getenv('SADIE_DB_NAME'),
-        ssl='require'
+        ssl='require',
+        statement_cache_size=0,  # Disable for pgbouncer compatibility
     )
     
     logger.info("=== FIX CLOUDBEDS HTML ENTITIES ===")
