@@ -15,6 +15,11 @@ from typing import Optional
 from pydantic import BaseModel
 from loguru import logger
 
+# Rate limiting - Mews API allows ~2 requests/second
+_last_api_call = 0
+_api_lock = None
+API_RATE_LIMIT = 0.5  # 500ms between calls
+
 
 class MewsHotelData(BaseModel):
     """Extracted hotel data from Mews API."""
@@ -191,13 +196,26 @@ class MewsApiClient:
             logger.debug(f"Mews extraction error for {slug}: {e}")
             return None
     
-    async def _fetch_via_api(self, slug: str) -> Optional[dict]:
-        """Fetch data via direct API call (fast!)."""
+    async def _fetch_via_api(self, slug: str, retry_count: int = 0) -> Optional[dict]:
+        """Fetch data via direct API call with rate limiting."""
+        global _last_api_call, _api_lock
+        
+        if _api_lock is None:
+            _api_lock = asyncio.Lock()
+        
         session, client = await self._get_session()
         
         if not session or not client:
             logger.warning("No Mews session available")
             return None
+        
+        # Rate limiting - wait between API calls
+        async with _api_lock:
+            now = time.time()
+            wait_time = API_RATE_LIMIT - (now - _last_api_call)
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            _last_api_call = time.time()
         
         payload = {
             "ids": [slug],
@@ -219,6 +237,15 @@ class MewsApiClient:
             
             if resp.status_code == 200:
                 return resp.json()
+            elif resp.status_code == 429:
+                # Rate limited - back off and retry
+                if retry_count < 3:
+                    wait = (retry_count + 1) * 2  # 2s, 4s, 6s
+                    logger.debug(f"Rate limited, waiting {wait}s...")
+                    await asyncio.sleep(wait)
+                    return await self._fetch_via_api(slug, retry_count + 1)
+                logger.debug(f"Mews rate limit exceeded for {slug}")
+                return None
             elif resp.status_code == 400:
                 # Could be invalid ID or expired session
                 text = resp.text
