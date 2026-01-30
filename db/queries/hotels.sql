@@ -275,6 +275,7 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
+  AND h.country = 'USA'
   AND h.status = 1;
 
 -- name: get_leads_for_state_by_source
@@ -306,6 +307,7 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
+  AND h.country = 'USA'
   AND h.status = 1
   AND h.source LIKE :source_pattern;
 
@@ -372,7 +374,8 @@ SELECT
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-WHERE h.state = :state;
+WHERE h.state = :state
+  AND h.country = 'USA';
 
 -- name: get_state_stats_by_source^
 -- Get stats for a state filtered by source pattern (for analytics tab)
@@ -388,6 +391,7 @@ FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
+  AND h.country = 'USA'
   AND h.source LIKE :source_pattern;
 
 -- name: get_top_engines_for_city
@@ -412,6 +416,7 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
+  AND h.country = 'USA'
   AND h.status = 1
 GROUP BY be.name;
 
@@ -424,6 +429,7 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
+  AND h.country = 'USA'
   AND h.status = 1
   AND h.source LIKE :source_pattern
 GROUP BY be.name;
@@ -437,7 +443,7 @@ WITH base AS (
         COUNT(CASE WHEN website IS NOT NULL AND website != '' THEN 1 END) as with_website,
         COUNT(CASE WHEN status = 1 THEN 1 END) as launched
     FROM sadie_gtm.hotels
-    WHERE state = :state
+    WHERE state = :state AND country = 'USA'
 ),
 detection AS (
     SELECT
@@ -448,13 +454,13 @@ detection AS (
     FROM sadie_gtm.hotels h
     JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
     LEFT JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-    WHERE h.state = :state
+    WHERE h.state = :state AND h.country = 'USA'
 ),
 pending AS (
     -- Hotels truly pending: status=0, has website, no HBE record yet
     SELECT COUNT(*) as pending_detection
     FROM sadie_gtm.hotels h
-    WHERE h.state = :state
+    WHERE h.state = :state AND h.country = 'USA'
     AND h.status = 0
     AND h.website IS NOT NULL AND h.website != ''
     AND NOT EXISTS (SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe WHERE hbe.hotel_id = h.id)
@@ -471,7 +477,7 @@ failures AS (
         COUNT(*) FILTER (WHERE detection_method LIKE 'error:exception%') as browser_err
     FROM sadie_gtm.hotel_booking_engines hbe
     JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
-    WHERE h.state = :state
+    WHERE h.state = :state AND h.country = 'USA'
 )
 SELECT
     b.total_hotels,
@@ -500,7 +506,7 @@ WITH base AS (
         COUNT(CASE WHEN website IS NOT NULL AND website != '' THEN 1 END) as with_website,
         COUNT(CASE WHEN status = 1 THEN 1 END) as launched
     FROM sadie_gtm.hotels
-    WHERE state = :state AND source LIKE :source_pattern
+    WHERE state = :state AND country = 'USA' AND source LIKE :source_pattern
 ),
 detection AS (
     SELECT
@@ -511,13 +517,13 @@ detection AS (
     FROM sadie_gtm.hotels h
     JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
     LEFT JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-    WHERE h.state = :state AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = 'USA' AND h.source LIKE :source_pattern
 ),
 pending AS (
     -- Hotels truly pending: status=0, has website, no HBE record yet
     SELECT COUNT(*) as pending_detection
     FROM sadie_gtm.hotels h
-    WHERE h.state = :state AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = 'USA' AND h.source LIKE :source_pattern
     AND h.status = 0
     AND h.website IS NOT NULL AND h.website != ''
     AND NOT EXISTS (SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe WHERE hbe.hotel_id = h.id)
@@ -534,7 +540,7 @@ failures AS (
         COUNT(*) FILTER (WHERE detection_method LIKE 'error:exception%') as browser_err
     FROM sadie_gtm.hotel_booking_engines hbe
     JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
-    WHERE h.state = :state AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = 'USA' AND h.source LIKE :source_pattern
 )
 SELECT
     b.total_hotels,
@@ -560,6 +566,7 @@ FROM base b, detection d, pending p, failures f;
 SELECT DISTINCT city
 FROM sadie_gtm.hotels
 WHERE state = :state
+  AND country = 'USA'
   AND city IS NOT NULL
   AND status = 1;
 
@@ -1071,10 +1078,11 @@ RETURNING id,
 
 
 -- name: get_distinct_states
--- Get all distinct states that have hotels
+-- Get all distinct US states that have hotels
 SELECT DISTINCT state
 FROM sadie_gtm.hotels
 WHERE state IS NOT NULL AND state != ''
+  AND country = 'USA'
 ORDER BY state;
 
 
@@ -1173,6 +1181,7 @@ LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.sta
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 JOIN sadie_gtm.booking_engines bes ON bes.id = hbe.booking_engine_id
 WHERE hbe.booking_engine_id IN (3, 4, 12, 14)  -- Cloudbeds, Mews, RMS Cloud, SiteMinder
+  AND h.country = 'USA'
 GROUP BY bes.name
 ORDER BY total_hotels DESC;
 
@@ -1201,6 +1210,7 @@ LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.sta
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 JOIN sadie_gtm.booking_engines bes ON bes.id = hbe.booking_engine_id
 WHERE hbe.booking_engine_id IN (3, 4, 12, 14)  -- Cloudbeds, Mews, RMS Cloud, SiteMinder
+  AND h.country = 'USA'
   AND h.source LIKE :source_pattern
 GROUP BY bes.name
 ORDER BY total_hotels DESC;
