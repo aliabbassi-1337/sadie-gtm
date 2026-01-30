@@ -18,9 +18,9 @@ SCRAPE_TIMEOUT = 20000
 
 
 def extract_rms_id(url: str) -> Optional[str]:
-    """Extract numeric ID from any RMS URL format.
+    """Extract ID from any RMS URL format.
     
-    Handles:
+    Handles numeric IDs and hex slugs (16 char):
     - ibe12.rmscloud.com/{id}
     - ibe13.rmscloud.com/{id}
     - bookings.rmscloud.com/Search/Index/{id}/...
@@ -29,7 +29,10 @@ def extract_rms_id(url: str) -> Optional[str]:
     """
     patterns = [
         r'ibe1[234]\.rmscloud\.com/(\d+)',  # ibe12, ibe13, ibe14
-        r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/(\d+)',  # bookings format
+        # Hex slugs (16 char) - must check before numeric to avoid partial match
+        r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/([A-Fa-f0-9]{16})',
+        # Numeric IDs
+        r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/(\d+)',
         r'rmscloud\.com/.*?/(\d+)/?',  # fallback - any numeric ID in path
     ]
     for pattern in patterns:
