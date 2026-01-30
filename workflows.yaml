@@ -155,6 +155,19 @@ ec2:
     command: uv run python workflows/ingest_rms_consumer.py --concurrency 6
     type: systemd  # Runs continuously, pulls ranges from SQS
 
+  # RMS slug ingestion (ingest discovered slugs from archives)
+  enqueue_rms_slugs:
+    description: Enqueue discovered RMS slugs to SQS for distributed ingestion
+    command: uv run python -m workflows.enqueue_rms_slugs --s3 crawl-data/rms_archive_discovery_20260130.txt
+    type: cron
+    schedule: "0 */2 * * *"  # Every 2 hours
+    host: primary
+
+  consume_rms_slugs:
+    description: Consume RMS slugs from SQS and ingest (runs on all servers)
+    command: uv run python -m workflows.consume_rms_slugs --concurrency 5
+    type: systemd  # Runs continuously on all EC2 instances
+
   # Serper geocoding (for non-Cloudbeds crawl data - SiteMinder, Mews, etc.)
   geocode_crawl_data:
     description: Geocode crawl hotels by name using Serper Places API
