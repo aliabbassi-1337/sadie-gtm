@@ -3,17 +3,16 @@
 import asyncio
 import re
 import logging
-from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urlparse, unquote
+from urllib.parse import unquote
 
 import httpx
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class BookingEnginePattern:
+class BookingEnginePattern(BaseModel):
     """Pattern configuration for a booking engine."""
 
     name: str
@@ -27,8 +26,7 @@ class BookingEnginePattern:
     slug_type: str = "numeric"
 
 
-@dataclass
-class DiscoveredSlug:
+class DiscoveredSlug(BaseModel):
     """A discovered booking engine slug."""
 
     engine: str
@@ -78,13 +76,12 @@ BOOKING_ENGINE_PATTERNS = [
 ]
 
 
-@dataclass
-class ArchiveSlugDiscovery:
+class ArchiveSlugDiscovery(BaseModel):
     """Discover booking engine slugs from web archives."""
 
     timeout: float = 60.0
     max_results_per_query: int = 10000
-    discovered_slugs: dict = field(default_factory=dict)
+    discovered_slugs: dict = Field(default_factory=dict)
 
     async def discover_all(self) -> dict[str, list[DiscoveredSlug]]:
         """Discover slugs from all sources for all engines."""
