@@ -99,7 +99,7 @@ class RMSSlugConsumer:
                     # Ingest
                     result = await self.ingestor.ingest_slugs(
                         slugs=slug_records,
-                        source=source,
+                        source_name=source,
                         concurrency=self.concurrency,
                         use_api=True,
                         dry_run=False,
