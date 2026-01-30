@@ -1,18 +1,19 @@
 """RMS API Client.
 
 Fast API-based extraction without Playwright.
-Falls back to scraper for missing data.
+Falls back to HTML parsing, then Playwright scraper.
 """
 
 import re
 from typing import Optional
 
 import httpx
+from bs4 import BeautifulSoup
 from loguru import logger
 from pydantic import BaseModel
 
 from lib.rms.models import ExtractedRMSData
-from lib.rms.utils import normalize_country
+from lib.rms.utils import normalize_country, decode_cloudflare_email
 
 
 # API timeout
@@ -248,6 +249,104 @@ class RMSApiClient:
             return "UK"
         return country
     
+    async def extract_from_html(self, slug: str, server: str = "bookings.rmscloud.com") -> Optional[ExtractedRMSData]:
+        """Extract hotel data from HTML page (no JavaScript rendering needed).
+        
+        The RMS booking pages contain all data in the initial HTML response.
+        """
+        url = f"https://{server}/Search/Index/{slug}/90/"
+        
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+                    follow_redirects=True,
+                )
+                
+                if resp.status_code != 200:
+                    return None
+                
+                html = resp.text
+                if len(html) < 1000:
+                    return None
+                
+                return self._parse_html(html, slug, url)
+                
+        except Exception as e:
+            logger.debug(f"HTML fetch error for {slug}: {e}")
+            return None
+    
+    def _parse_html(self, html: str, slug: str, url: str) -> Optional[ExtractedRMSData]:
+        """Parse hotel data from RMS HTML page."""
+        soup = BeautifulSoup(html, "html.parser")
+        
+        data = ExtractedRMSData(slug=slug, booking_url=url)
+        
+        # Extract name from multiple sources
+        # 1. Hidden input field (most reliable)
+        name_input = soup.find("input", {"id": "propertyName"})
+        if name_input and name_input.get("value"):
+            data.name = name_input.get("value").strip()
+        
+        # 2. H1 tag
+        if not data.name:
+            h1 = soup.find("h1")
+            if h1:
+                name = h1.get_text(strip=True)
+                if name and len(name) > 2 and len(name) < 100:
+                    data.name = name
+        
+        # 3. Hidden P input
+        if not data.name:
+            p_input = soup.find("input", {"id": "P"})
+            if p_input and p_input.get("value"):
+                data.name = p_input.get("value").strip()
+        
+        if not data.name:
+            return None
+        
+        # Extract email (Cloudflare protected)
+        cf_email = soup.find("a", {"class": "__cf_email__"})
+        if cf_email and cf_email.get("data-cfemail"):
+            data.email = decode_cloudflare_email(cf_email.get("data-cfemail"))
+        
+        # Extract phone from icon
+        phone_icon = soup.find("i", {"class": "fa-phone"})
+        if phone_icon and phone_icon.parent:
+            parent_text = phone_icon.parent.get_text(strip=True)
+            phone_match = re.search(r'[\+\d][\d\s\-\(\)]{7,20}', parent_text)
+            if phone_match:
+                data.phone = phone_match.group(0).strip()
+        
+        # Get body text for additional extraction
+        body_text = soup.get_text(separator="\n")
+        
+        # Parse structured description if present
+        parsed = self._parse_structured_description(body_text)
+        if not data.phone and parsed["phone"]:
+            data.phone = parsed["phone"]
+        if not data.email and parsed["email"]:
+            data.email = parsed["email"]
+        if parsed["address"]:
+            data.address = parsed["address"]
+        if parsed["city"]:
+            data.city = parsed["city"]
+        if parsed["state"]:
+            data.state = parsed["state"]
+        if parsed["country"]:
+            data.country = parsed["country"]
+        
+        # Extract website from links
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "")
+            if href.startswith("http") and "rmscloud" not in href and "google" not in href:
+                if any(x in href.lower() for x in [".com", ".com.au", ".co.nz", ".co.uk"]):
+                    data.website = href
+                    break
+        
+        return data if data.has_data() else None
+    
     def _extract_phone(self, text: str) -> Optional[str]:
         """Extract phone number from text."""
         if not text:
@@ -358,9 +457,9 @@ class RMSApiClient:
 async def extract_with_fallback(
     slug: str,
     scraper=None,
-    server: str = "bookings12.rmscloud.com",
-) -> Optional[ExtractedRMSData]:
-    """Try API first, fall back to Playwright scraper if needed.
+    server: str = "bookings.rmscloud.com",
+) -> tuple[Optional[ExtractedRMSData], str]:
+    """Try API -> HTML -> Playwright scraper.
     
     Args:
         slug: RMS client ID
@@ -368,50 +467,38 @@ async def extract_with_fallback(
         server: RMS server to use
         
     Returns:
-        ExtractedRMSData or None
+        Tuple of (ExtractedRMSData, method_used) or (None, "none")
+        method_used is one of: "api", "html", "scraper", "none"
     """
-    # Try API first (fast, no browser)
     api_client = RMSApiClient()
-    data = await api_client.extract(slug, server)
     
+    # 1. Try API first (fastest, ~100ms)
+    data = await api_client.extract(slug, server)
     if data and data.name:
-        logger.debug(f"API success for {slug}: {data.name}")
-        
-        # Check if we have enough data or need fallback
         has_contact = data.email or data.phone
         has_location = data.city or data.state or data.country
-        
-        if has_contact and has_location:
-            return data
-        
-        # If we have name but missing contact/location, use scraper to fill gaps
-        if scraper:
-            logger.debug(f"API partial for {slug}, trying scraper for more data")
-            url = f"https://{server}/Search/Index/{slug}/90/"
-            scraped = await scraper.extract(url, slug)
-            if scraped:
-                # Merge: keep API name, fill in missing from scraper
-                if not data.email and scraped.email:
-                    data.email = scraped.email
-                if not data.phone and scraped.phone:
-                    data.phone = scraped.phone
-                if not data.address and scraped.address:
-                    data.address = scraped.address
-                if not data.city and scraped.city:
-                    data.city = scraped.city
-                if not data.state and scraped.state:
-                    data.state = scraped.state
-                if not data.country and scraped.country:
-                    data.country = scraped.country
-                if not data.website and scraped.website:
-                    data.website = scraped.website
-        
-        return data
+        if has_contact or has_location:
+            logger.debug(f"API success for {slug}: {data.name}")
+            return data, "api"
     
-    # API failed, fall back to scraper
+    # 2. Try HTML parsing (fast, ~500ms, no JS needed)
+    html_data = await api_client.extract_from_html(slug, server)
+    if html_data and html_data.name:
+        logger.debug(f"HTML success for {slug}: {html_data.name}")
+        # Merge with API data if we got partial API results
+        if data and data.name:
+            if not html_data.email and data.email:
+                html_data.email = data.email
+            if not html_data.phone and data.phone:
+                html_data.phone = data.phone
+        return html_data, "html"
+    
+    # 3. Fall back to Playwright scraper (slowest, ~5-10s)
     if scraper:
-        logger.debug(f"API failed for {slug}, falling back to scraper")
+        logger.debug(f"API+HTML failed for {slug}, falling back to Playwright")
         url = f"https://{server}/Search/Index/{slug}/90/"
-        return await scraper.extract(url, slug)
+        scraped = await scraper.extract(url, slug)
+        if scraped:
+            return scraped, "scraper"
     
-    return None
+    return None, "none"
