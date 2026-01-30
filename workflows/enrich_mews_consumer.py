@@ -31,7 +31,7 @@ from infra.sqs import receive_messages, delete_message, get_queue_attributes
 from lib.mews.api_client import MewsApiClient
 
 QUEUE_URL = os.getenv("SQS_MEWS_ENRICHMENT_QUEUE_URL", "")
-VISIBILITY_TIMEOUT = 300  # 5 minutes per batch (handles slow pages)
+VISIBILITY_TIMEOUT = 600  # 10 minutes per batch (handles slow pages)
 
 shutdown_requested = False
 
