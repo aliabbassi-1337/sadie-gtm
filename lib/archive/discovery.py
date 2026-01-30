@@ -85,6 +85,77 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.siteminder.com/reservations/*",
         slug_type="alphanumeric",
     ),
+    # Additional booking engines
+    BookingEnginePattern(
+        name="bookonlinenow",
+        wayback_url_pattern="*.book-onlinenow.net/*",
+        slug_regex=r"([a-z0-9_-]+)\.book-onlinenow\.net",
+        commoncrawl_url_pattern="*.book-onlinenow.net/*",
+        slug_type="alphanumeric",
+    ),
+    BookingEnginePattern(
+        name="resnexus",
+        wayback_url_pattern="*.resnexus.com/*",
+        slug_regex=r"([a-z0-9_-]+)\.resnexus\.com",
+        commoncrawl_url_pattern="*.resnexus.com/*",
+        slug_type="alphanumeric",
+    ),
+    BookingEnginePattern(
+        name="webrez",
+        wayback_url_pattern="secure.webrez.com/hotel/*",
+        slug_regex=r"/hotel/(\d+)",
+        commoncrawl_url_pattern="*.webrez.com/hotel/*",
+        slug_type="numeric",
+    ),
+    BookingEnginePattern(
+        name="thinkreservations",
+        wayback_url_pattern="*.thinkreservations.com/book/*",
+        slug_regex=r"([a-z0-9_-]+)\.thinkreservations\.com",
+        commoncrawl_url_pattern="*.thinkreservations.com/*",
+        slug_type="alphanumeric",
+    ),
+    BookingEnginePattern(
+        name="innroad",
+        wayback_url_pattern="*.innroad.com/*",
+        slug_regex=r"([a-z0-9_-]+)\.innroad\.com",
+        commoncrawl_url_pattern="*.innroad.com/*",
+        slug_type="alphanumeric",
+    ),
+    BookingEnginePattern(
+        name="lodgify",
+        wayback_url_pattern="checkout.lodgify.com/*",
+        slug_regex=r"/([A-Za-z0-9_-]+)/",
+        commoncrawl_url_pattern="*.lodgify.com/*",
+        slug_type="alphanumeric",
+    ),
+    BookingEnginePattern(
+        name="hostaway",
+        wayback_url_pattern="*.hostaway.com/listing/*",
+        slug_regex=r"/listing/(\d+)",
+        commoncrawl_url_pattern="*.hostaway.com/listing/*",
+        slug_type="numeric",
+    ),
+    BookingEnginePattern(
+        name="guesty",
+        wayback_url_pattern="*.guesty.com/properties/*",
+        slug_regex=r"/properties/([A-Za-z0-9_-]+)",
+        commoncrawl_url_pattern="*.guesty.com/properties/*",
+        slug_type="alphanumeric",
+    ),
+    BookingEnginePattern(
+        name="streamline",
+        wayback_url_pattern="*.streamlinevrs.com/*",
+        slug_regex=r"([a-z0-9_-]+)\.streamlinevrs\.com",
+        commoncrawl_url_pattern="*.streamlinevrs.com/*",
+        slug_type="alphanumeric",
+    ),
+    BookingEnginePattern(
+        name="escapia",
+        wayback_url_pattern="*.escapia.com/property/*",
+        slug_regex=r"/property/(\d+)",
+        commoncrawl_url_pattern="*.escapia.com/property/*",
+        slug_type="numeric",
+    ),
 ]
 
 
