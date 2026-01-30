@@ -126,7 +126,7 @@ ec2:
   # Mews enrichment (scrape hotel name from Mews booking pages)
   mews_enrichment_consumer:
     description: Poll SQS and enrich Mews hotels via API
-    command: uv run python -m workflows.enrich_mews_consumer --concurrency 2
+    command: uv run python -m workflows.enrich_mews_consumer --concurrency 1
     type: systemd
 
   enqueue_mews_enrichment:
