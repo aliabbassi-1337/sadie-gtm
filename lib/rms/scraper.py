@@ -131,7 +131,10 @@ class RMSScraper(IRMSScraper):
         # Garbage names to reject
         garbage = ['online bookings', 'search', 'book now', 'unknown', 'error', 'loading', 
                    'cart', 'book your accommodation', 'dates', 'check in', 'check out', 'guests',
-                   'looks like we', 'application issues', 'page not found', '404']
+                   'looks like we', 'application issues', 'page not found', '404',
+                   'unhandled exception', 'exception occurred', 'processing the request',
+                   'server error', 'internal server error', 'something went wrong',
+                   'access denied', 'forbidden', 'not authorized', 'object reference']
         
         # Try standard selectors first
         for selector in ['h1', '.property-name', '.header-title']:
