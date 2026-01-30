@@ -110,7 +110,7 @@ class RMSScanConsumer:
             hotel_id = await self._repo.insert_hotel(
                 name=hotel.get("name", f"Unknown ({slug})"),
                 address=hotel.get("address"),
-                phone=hotel.get("phone"),
+                phone_website=hotel.get("phone"),
                 email=hotel.get("email"),
                 source="rms_scan",
                 status=0,  # Pending verification
