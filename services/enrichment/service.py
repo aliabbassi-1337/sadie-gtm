@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Optional, List, Dict, Callable, Any
 import asyncio
+import html
 import json
 import os
 import re
@@ -126,7 +127,7 @@ class BookingPageEnricher:
         country = None
         
         if "name" in json_ld:
-            name = json_ld["name"].strip()
+            name = html.unescape(json_ld["name"].strip())
         
         addr_data = json_ld.get("address", {})
         if isinstance(addr_data, str):
@@ -157,7 +158,7 @@ class BookingPageEnricher:
         if not match:
             match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']', html, re.IGNORECASE)
         if match:
-            raw = match.group(1).strip()
+            raw = html.unescape(match.group(1).strip())
             parts = re.split(r'\s*[-|–]\s*', raw)
             parsed_name = parts[0].strip()
             if parsed_name.lower() not in ['book now', 'reservation', 'booking', 'home', 'unknown']:
@@ -167,7 +168,7 @@ class BookingPageEnricher:
         if not name:
             match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
             if match:
-                raw = match.group(1).strip()
+                raw = html.unescape(match.group(1).strip())
                 parts = re.split(r'\s*[-|–]\s*', raw)
                 parsed_name = parts[0].strip()
                 if parsed_name.lower() not in ['book now', 'reservation', 'booking', 'home', 'unknown']:
