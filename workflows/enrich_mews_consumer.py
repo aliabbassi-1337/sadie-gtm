@@ -29,7 +29,7 @@ from services.enrichment import repo
 from infra.sqs import receive_messages, delete_message, get_queue_attributes
 
 QUEUE_URL = os.getenv("SQS_MEWS_ENRICHMENT_QUEUE_URL", "")
-VISIBILITY_TIMEOUT = 120  # 2 minutes per hotel
+VISIBILITY_TIMEOUT = 300  # 5 minutes per batch (handles slow pages)
 
 shutdown_requested = False
 
@@ -142,10 +142,10 @@ async def process_hotel(context: BrowserContext, hotel_id: int, booking_url: str
         page.on("response", handle_response)
         
         # Load page - use commit to get callback early, then wait for API calls
-        await page.goto(booking_url, timeout=30000, wait_until="commit")
+        await page.goto(booking_url, timeout=45000, wait_until="commit")
         
-        # Wait for configurations/get API call (usually comes within 5s)
-        for _ in range(20):  # 10 second max wait
+        # Wait for configurations/get API call (can take up to 15-20s on slow connections)
+        for _ in range(40):  # 20 second max wait
             if response_tasks:
                 await asyncio.gather(*response_tasks, return_exceptions=True)
             if "config" in captured_data:
