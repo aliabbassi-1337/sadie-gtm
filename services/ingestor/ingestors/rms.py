@@ -16,6 +16,7 @@ from playwright_stealth import Stealth
 from services.ingestor.registry import register
 from services.ingestor.rms_repo import RMSRepo
 from lib.rms import RMSScanner, RMSScraper, ExtractedRMSData
+from lib.rms.api_client import RMSApiClient, extract_with_fallback
 
 
 # =============================================================================
@@ -151,25 +152,38 @@ class RMSIngestor:
         concurrency: int = 6,
         dry_run: bool = False,
         source_name: str = "rms_archive_discovery",
+        use_api: bool = True,
     ) -> RMSIngestResult:
         """Ingest hotels from a list of known slugs (numeric or hex).
         
-        Unlike ingest() which scans a range, this takes pre-discovered slugs
-        and scrapes/saves each one.
+        Uses API first (fast, no browser), falls back to Playwright scraper.
+        
+        Args:
+            slugs: List of RMS client IDs (numeric or hex)
+            concurrency: Number of concurrent requests
+            dry_run: If True, don't save to database
+            source_name: Source name for hotel records
+            use_api: If True, try API first before Playwright
         """
         booking_engine_id = await self._repo.get_booking_engine_id()
         logger.info(f"RMS Cloud booking engine ID: {booking_engine_id}")
-        logger.info(f"Ingesting {len(slugs)} slugs (source: {source_name})")
+        logger.info(f"Ingesting {len(slugs)} slugs (source: {source_name}, use_api: {use_api})")
         
         found_hotels: List[ExtractedRMSData] = []
         total_saved = 0
         total_scanned = 0
+        api_hits = 0
+        scraper_hits = 0
+        
+        # API client for fast extraction
+        api_client = RMSApiClient() if use_api else None
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             contexts: List[BrowserContext] = []
             scrapers: List[RMSScraper] = []
             
+            # Only create browser contexts if we might need fallback
             for _ in range(concurrency):
                 ctx = await browser.new_context(
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -182,11 +196,47 @@ class RMSIngestor:
             
             semaphore = asyncio.Semaphore(concurrency)
             
-            async def scrape_slug(slug: str, idx: int) -> Optional[ExtractedRMSData]:
+            async def extract_slug(slug: str, idx: int) -> tuple[Optional[ExtractedRMSData], str]:
+                """Extract hotel data, returns (data, method_used)."""
                 async with semaphore:
                     scraper = scrapers[idx % len(scrapers)]
+                    
+                    if use_api and api_client:
+                        # Try API first
+                        data = await api_client.extract(slug)
+                        if data and data.name:
+                            # Check if we need fallback for missing data
+                            has_contact = data.email or data.phone
+                            has_location = data.city or data.state or data.country
+                            
+                            if has_contact or has_location:
+                                return data, "api"
+                            
+                            # Partial data - try scraper to fill gaps
+                            url = f"https://bookings.rmscloud.com/Search/Index/{slug}/90/"
+                            scraped = await scraper.extract(url, slug)
+                            if scraped:
+                                # Merge: keep API name, fill missing from scraper
+                                if not data.email:
+                                    data.email = scraped.email
+                                if not data.phone:
+                                    data.phone = scraped.phone
+                                if not data.address:
+                                    data.address = scraped.address
+                                if not data.city:
+                                    data.city = scraped.city
+                                if not data.state:
+                                    data.state = scraped.state
+                                if not data.country:
+                                    data.country = scraped.country
+                                if not data.website:
+                                    data.website = scraped.website
+                            return data, "api+scraper"
+                    
+                    # Fallback to scraper only
                     url = f"https://bookings.rmscloud.com/Search/Index/{slug}/90/"
-                    return await scraper.extract(url, slug)
+                    data = await scraper.extract(url, slug)
+                    return data, "scraper"
             
             batch_size = concurrency * 2
             for batch_start in range(0, len(slugs), batch_size):
@@ -195,14 +245,18 @@ class RMSIngestor:
                 batch_end = min(batch_start + batch_size, len(slugs))
                 batch_slugs = slugs[batch_start:batch_end]
                 
-                tasks = [scrape_slug(slug, i) for i, slug in enumerate(batch_slugs)]
+                tasks = [extract_slug(slug, i) for i, slug in enumerate(batch_slugs)]
                 results = await asyncio.gather(*tasks)
                 total_scanned += len(tasks)
                 
-                for hotel in results:
+                for hotel, method in results:
                     if hotel:
                         found_hotels.append(hotel)
-                        logger.success(f"Found: {hotel.name} ({hotel.booking_url})")
+                        if "api" in method:
+                            api_hits += 1
+                        else:
+                            scraper_hits += 1
+                        logger.success(f"Found [{method}]: {hotel.name}")
                 
                 if len(found_hotels) >= BATCH_SAVE_SIZE and not dry_run:
                     saved = await self._save_batch(found_hotels, booking_engine_id, source_name)
@@ -211,9 +265,9 @@ class RMSIngestor:
                     found_hotels = []
                 
                 progress = batch_end / len(slugs) * 100
-                logger.info(f"Progress: {progress:.1f}% - Scanned: {total_scanned}, Found: {total_saved + len(found_hotels)}")
+                logger.info(f"Progress: {progress:.1f}% - Scanned: {total_scanned}, Found: {total_saved + len(found_hotels)} (API: {api_hits}, Scraper: {scraper_hits})")
                 
-                await asyncio.sleep(1.0)  # Rate limiting
+                await asyncio.sleep(0.5)  # Rate limiting
             
             if found_hotels and not dry_run:
                 saved = await self._save_batch(found_hotels, booking_engine_id, source_name)
@@ -222,6 +276,8 @@ class RMSIngestor:
             for ctx in contexts:
                 await ctx.close()
             await browser.close()
+        
+        logger.info(f"Extraction stats - API: {api_hits}, Scraper: {scraper_hits}")
         
         return RMSIngestResult(
             total_scanned=total_scanned,
