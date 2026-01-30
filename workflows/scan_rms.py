@@ -114,8 +114,8 @@ async def main():
     if args.dry_run:
         logger.info("Dry run - will scan but not save")
     
-    # Initialize scanner
-    from services.leadgen.booking_engines import RMSScanner
+    # Initialize scanner - use fast API-based scanner
+    from lib.rms.scanner import RMSScanner
     
     found_hotels = []
     

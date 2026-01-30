@@ -133,6 +133,10 @@ class RMSApiClient:
             if not data.website:
                 data.website = self._extract_website(all_text)
             
+            # Extract website from email domain as fallback
+            if not data.website and data.email:
+                data.website = self._website_from_email(data.email)
+            
             # Try to extract address from travel directions if not found
             if not data.address and api_data.travel_directions:
                 data.address = self._extract_address(api_data.travel_directions)
@@ -534,6 +538,29 @@ class RMSApiClient:
                     url = 'https://' + url
                 return url
         return None
+    
+    def _website_from_email(self, email: str) -> Optional[str]:
+        """Extract website domain from email address.
+        
+        e.g., "info@glencromie.com.au" -> "www.glencromie.com.au"
+        """
+        if not email or '@' not in email:
+            return None
+        
+        domain = email.split('@')[1].lower()
+        
+        # Skip generic email domains
+        generic = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 
+                   'icloud.com', 'aol.com', 'live.com', 'msn.com', 'mail.com',
+                   'protonmail.com', 'zoho.com', 'yandex.com', 'gmx.com']
+        if domain in generic:
+            return None
+        
+        # Skip RMS domains
+        if 'rmscloud' in domain:
+            return None
+        
+        return f"www.{domain}"
     
     def _extract_address(self, text: str) -> Optional[str]:
         """Extract address from travel directions."""
