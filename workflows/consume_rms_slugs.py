@@ -71,23 +71,23 @@ class RMSSlugConsumer:
             # Create a new ingestor per batch to avoid state issues
             ingestor = RMSIngestor()
             
-                    result = await ingestor.ingest_slugs(
-                        slugs=slugs,
-                        source_name=source,
-                        concurrency=self.concurrency,
-                        use_api=True,
-                        dry_run=False,
-                    )
-                    
-                    self.messages_processed += 1
-                    self.slugs_processed += len(slugs)
-                    self.hotels_found += result.hotels_found
-                    self.hotels_saved += result.hotels_saved
-                    
-                    logger.success(
-                        f"Batch complete: found={result.hotels_found}, saved={result.hotels_saved} | "
-                        f"Total: {self.hotels_saved} saved from {self.slugs_processed} slugs"
-                    )
+            result = await ingestor.ingest_slugs(
+                slugs=slugs,
+                source_name=source,
+                concurrency=self.concurrency,
+                use_api=True,
+                dry_run=False,
+            )
+            
+            self.messages_processed += 1
+            self.slugs_processed += len(slugs)
+            self.hotels_found += result.hotels_found
+            self.hotels_saved += result.hotels_saved
+            
+            logger.success(
+                f"Batch complete: found={result.hotels_found}, saved={result.hotels_saved} | "
+                f"Total: {self.hotels_saved} saved from {self.slugs_processed} slugs"
+            )
             
             # Delete message on success
             self.sqs.delete_message(
