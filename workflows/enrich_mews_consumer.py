@@ -118,39 +118,49 @@ async def process_hotel(context: BrowserContext, hotel_id: int, booking_url: str
     page = await context.new_page()
     captured_data = {}
     response_tasks = []
+    api_urls_seen = []
     
     try:
         def handle_response(response):
             """Sync handler that creates async task for JSON parsing."""
-            if "configurations/get" in response.url:
+            url = response.url
+            # Log API calls we're interested in
+            if "mews.com" in url and "api" in url.lower():
+                api_urls_seen.append(url[:80])
+            
+            if "configurations/get" in url:
                 async def fetch_json():
                     try:
                         data = await response.json()
                         captured_data["config"] = data
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        captured_data["error"] = str(e)
                 task = asyncio.create_task(fetch_json())
                 response_tasks.append(task)
         
         page.on("response", handle_response)
         
-        await page.goto(booking_url, timeout=20000, wait_until="domcontentloaded")
+        await page.goto(booking_url, timeout=30000, wait_until="domcontentloaded")
         
-        # Wait a bit for API calls to fire
-        await asyncio.sleep(2)
+        # Wait for page to load and JS to execute
+        await asyncio.sleep(3)
         
         # Wait for any pending response tasks
         if response_tasks:
             await asyncio.gather(*response_tasks, return_exceptions=True)
         
         # Additional wait if not captured yet
-        for _ in range(6):
+        for _ in range(8):
             if "config" in captured_data:
                 break
             await asyncio.sleep(0.5)
         
         if "config" not in captured_data:
-            return EnrichmentResult(hotel_id=hotel_id, success=False, error="no_api_response")
+            # Include debug info about what APIs we saw
+            debug_info = f"no_api_response (saw {len(api_urls_seen)} api calls)"
+            if captured_data.get("error"):
+                debug_info = f"json_error: {captured_data['error'][:50]}"
+            return EnrichmentResult(hotel_id=hotel_id, success=False, error=debug_info)
         
         # Parse the API response
         parsed = parse_mews_response(captured_data["config"])
