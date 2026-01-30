@@ -74,7 +74,6 @@ class RMSScanConsumer:
         
         # DB resources
         self._engine_id = None
-        self._repo = None
     
     def request_shutdown(self):
         """Request graceful shutdown."""
@@ -88,47 +87,55 @@ class RMSScanConsumer:
         
         await init_db()
         
-        from services.leadgen import repo
-        self._repo = repo
+        from db.client import queries, get_conn
         
-        engine = await repo.get_booking_engine_by_name("RMS Cloud")
-        if engine:
-            self._engine_id = engine.id
-        else:
-            self._engine_id = await repo.insert_booking_engine(name="RMS Cloud", tier=2)
-            logger.info(f"Created RMS Cloud booking engine with id {self._engine_id}")
+        async with get_conn() as conn:
+            result = await queries.get_rms_booking_engine_id(conn)
+            if result:
+                self._engine_id = result["id"]
+            else:
+                raise ValueError("RMS Cloud booking engine not found in database")
     
     async def _save_hotel(self, hotel: dict):
-        """Save a found hotel to the database."""
-        if not self.save_to_db or not self._repo:
+        """Save a found hotel to the database using RMS-specific insert with proper dedup."""
+        if not self.save_to_db:
             return
         
         try:
-            # Use slug as external_id for deduplication
+            from db.client import queries, get_conn
+            
             slug = hotel.get("slug", str(hotel.get("id", "")))
+            booking_url = hotel.get("booking_url", f"https://bookings.rmscloud.com/Search/Index/{slug}/90/")
             
-            hotel_id = await self._repo.insert_hotel(
-                name=hotel.get("name", f"Unknown ({slug})"),
-                address=hotel.get("address"),
-                phone_website=hotel.get("phone"),
-                email=hotel.get("email"),
-                source="rms_scan",
-                status=0,  # Pending verification
-                external_id=slug,
-                external_id_type="rms_slug",
-            )
-            
-            if hotel_id:
-                await self._repo.insert_hotel_booking_engine(
-                    hotel_id=hotel_id,
-                    booking_engine_id=self._engine_id,
-                    booking_url=hotel.get("booking_url", f"https://bookings.rmscloud.com/Search/Index/{slug}/90/"),
-                    engine_property_id=slug,
-                    detection_method="rms_scan",
-                    status=1,
+            async with get_conn() as conn:
+                # Insert hotel with external_id for dedup
+                result = await queries.insert_rms_hotel(
+                    conn,
+                    name=hotel.get("name", f"Unknown ({slug})"),
+                    address=hotel.get("address"),
+                    city=None,
+                    state=None,
+                    country=None,
+                    phone=hotel.get("phone"),
+                    email=hotel.get("email"),
+                    website=None,
+                    source="rms_scan",
+                    status=0,
+                    external_id=slug,
                 )
-                self.hotels_saved += 1
-                logger.debug(f"Saved: {hotel.get('name')} (slug: {slug})")
+                
+                if result:
+                    hotel_id = result["id"]
+                    # Link to RMS booking engine
+                    await queries.insert_rms_hotel_booking_engine(
+                        conn,
+                        hotel_id=hotel_id,
+                        booking_engine_id=self._engine_id,
+                        booking_url=booking_url,
+                        enrichment_status=0,
+                    )
+                    self.hotels_saved += 1
+                    logger.debug(f"Saved: {hotel.get('name')} (slug: {slug})")
         except Exception as e:
             if "duplicate" not in str(e).lower():
                 logger.error(f"Error saving hotel: {e}")
