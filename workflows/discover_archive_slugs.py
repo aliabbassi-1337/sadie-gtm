@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Discover booking engine slugs from web archives.
 
-Thin workflow - delegates to ArchiveDiscoveryService.
+Thin workflow - delegates to IngestorService.
 
 Usage:
     python -m workflows.discover_archive_slugs
@@ -19,7 +19,7 @@ import asyncio
 import logging
 
 from lib.archive.discovery import BOOKING_ENGINE_PATTERNS
-from services.ingestor.archive_discovery import ArchiveDiscoveryService
+from services.ingestor.service import Service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,11 +41,13 @@ async def main():
     parser.add_argument("--limit", type=int, default=10000, help="Max results per query")
     args = parser.parse_args()
 
-    service = ArchiveDiscoveryService(timeout=args.timeout, max_results=args.limit)
-    results = await service.discover(
+    service = Service()
+    results = await service.discover_archive_slugs(
         engine=args.engine,
         s3_upload=args.s3_upload,
         output_path=args.output,
+        timeout=args.timeout,
+        max_results=args.limit,
     )
 
     print(f"\n{'=' * 50}")
