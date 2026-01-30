@@ -171,14 +171,22 @@ class RMSScraper(IRMSScraper):
     
     def _extract_phone(self, body_text: str) -> Optional[str]:
         patterns = [
-            r'(?:tel|phone|call)[:\s]*([+\d][\d\s\-\(\)]{7,20})',
+            # With prefix
+            r'(?:tel|phone|call|locally|international)[:\s]*([+\d][\d\s\-\(\)]{7,20})',
+            # International format with +
             r'(\+\d{1,3}[\s\-]?\(?\d{2,4}\)?[\s\-]?\d{3,4}[\s\-]?\d{3,4})',
+            # Australian format: XX XXXXXXXX or XXX XXX XXXX
+            r'\b(0\d[\s\-]?\d{4}[\s\-]?\d{4})\b',
+            r'\b(0\d{2}[\s\-]?\d{3}[\s\-]?\d{4})\b',
+            # Standalone phone number on its own line (for ibe pages)
+            r'^\s*(\d{2}\s+\d{8})\s*$',
         ]
         for pattern in patterns:
-            match = re.search(pattern, body_text, re.IGNORECASE)
+            match = re.search(pattern, body_text, re.IGNORECASE | re.MULTILINE)
             if match:
                 phone = match.group(1).strip()
-                if len(re.sub(r'\D', '', phone)) >= 7:
+                # Must have at least 8 digits
+                if len(re.sub(r'\D', '', phone)) >= 8:
                     return phone
         return None
     
@@ -194,6 +202,7 @@ class RMSScraper(IRMSScraper):
         return None
     
     async def _extract_website(self) -> Optional[str]:
+        # First try to find a link element
         try:
             links = await self._page.query_selector_all('a[href^="http"]')
             for link in links[:10]:
@@ -203,17 +212,41 @@ class RMSScraper(IRMSScraper):
                         return href
         except Exception:
             pass
+        
+        # Fallback: look for website text in body
+        try:
+            body_text = await self._page.evaluate("document.body.innerText")
+            # Look for http(s):// URLs or www. URLs
+            patterns = [
+                r'(https?://[^\s\n]+\.(?:com|com\.au|co\.nz|co\.uk|net|org)[^\s\n]*)',
+                r'(www\.[^\s\n]+\.(?:com|com\.au|co\.nz|co\.uk|net|org)[^\s\n]*)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, body_text, re.IGNORECASE)
+                if match:
+                    url = match.group(1).strip()
+                    if 'rmscloud' not in url.lower() and 'google' not in url.lower():
+                        return url
+        except Exception:
+            pass
+        
         return None
     
     def _extract_address(self, body_text: str) -> Optional[str]:
         patterns = [
+            # With prefix
             r'(?:address|location)[:\s]*([^\n]{10,100})',
-            r'(\d+\s+[A-Za-z]+\s+(?:St|Street|Rd|Road|Ave|Avenue)[^\n]{0,50})',
+            # Street address with number (handles multi-word street names)
+            r'(\d+\s+[A-Za-z][A-Za-z\s]+(?:St|Street|Rd|Road|Ave|Avenue|Dr|Drive|Way|Lane|Ln|Blvd|Highway|Hwy|Crescent|Cres|Close|Place|Pl|Court|Ct)[,\s][^\n]{5,60})',
+            # Australian postcode format: any line with state abbreviation and 4-digit postcode
+            r'([^\n]{10,50}\s+(?:VIC|NSW|QLD|SA|WA|TAS|NT|ACT)\s+\d{4}[^\n]{0,30})',
         ]
         for pattern in patterns:
             match = re.search(pattern, body_text, re.IGNORECASE)
             if match:
                 addr = match.group(1).strip()
+                # Clean up common trailing garbage
+                addr = re.sub(r'\s+(?:Phone|Tel|Call|http|www\.).*$', '', addr, flags=re.IGNORECASE)
                 if len(addr) > 10:
                     return addr
         return None
