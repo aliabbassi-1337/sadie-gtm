@@ -14,13 +14,13 @@ from lib.rms.models import ExtractedRMSData
 from lib.rms.utils import decode_cloudflare_email, normalize_country
 
 
-SCRAPE_TIMEOUT = 20000
+SCRAPE_TIMEOUT = 30000  # 30s for slow RMS pages
 
 
 def extract_rms_id(url: str) -> Optional[str]:
-    """Extract numeric ID from any RMS URL format.
+    """Extract ID from any RMS URL format.
     
-    Handles:
+    Handles numeric IDs and hex slugs (16 char):
     - ibe12.rmscloud.com/{id}
     - ibe13.rmscloud.com/{id}
     - bookings.rmscloud.com/Search/Index/{id}/...
@@ -28,8 +28,12 @@ def extract_rms_id(url: str) -> Optional[str]:
     - bookings.rmscloud.com/obookings3/Search/Index/{id}/...
     """
     patterns = [
-        r'ibe1[234]\.rmscloud\.com/(\d+)',  # ibe12, ibe13, ibe14
-        r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/(\d+)',  # bookings format
+        # Hex slugs (16 char) - check first to avoid partial match
+        r'ibe1[234]\.rmscloud\.com/([A-Fa-f0-9]{16})',  # ibe with hex slug
+        r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/([A-Fa-f0-9]{16})',
+        # Numeric IDs
+        r'ibe1[234]\.rmscloud\.com/(\d+)',  # ibe with numeric ID
+        r'bookings\d*\.rmscloud\.com/(?:obookings\d*/)?[Ss]earch/[Ii]ndex/(\d+)',
         r'rmscloud\.com/.*?/(\d+)/?',  # fallback - any numeric ID in path
     ]
     for pattern in patterns:
@@ -83,7 +87,7 @@ class RMSScraper(IRMSScraper):
             data.website = await self._extract_website()
             data.address = self._extract_address(body_text)
             if data.address:
-                data.state, data.country = self._parse_address(data.address)
+                data.city, data.state, data.country = self._parse_address(data.address)
             
             return data if data.has_data() else None
         except Exception as e:
@@ -91,21 +95,46 @@ class RMSScraper(IRMSScraper):
             return None
     
     def _is_valid(self, content: str, body_text: str) -> bool:
+        """Check if page is a valid property page, not an error page."""
+        content_lower = content.lower()
+        body_lower = body_text.lower()
+        
         # Reject error pages
-        if "application issues" in body_text or "application issues" in content:
+        error_patterns = [
+            "application issues",
+            "page not found",
+            "object reference not set",
+            "error page",
+            "does not exist",
+            "no longer available",
+        ]
+        
+        for pattern in error_patterns:
+            if pattern in body_lower or pattern in content_lower[:2000]:
+                logger.debug(f"Rejecting page: found error pattern '{pattern}'")
+                return False
+        
+        if body_text.strip().startswith("Error"):
             return False
-        if "Page Not Found" in content or "404" in content[:1000]:
+        
+        # Check for error title
+        if "<title>error</title>" in content_lower:
             return False
-        if body_text.startswith("Error"):
-            return False
+        
         # Must have substantial content
-        return bool(body_text and len(body_text) >= 100)
+        if not body_text or len(body_text) < 100:
+            return False
+        
+        return True
     
     async def _extract_name(self, body_text: str) -> Optional[str]:
         # Garbage names to reject
         garbage = ['online bookings', 'search', 'book now', 'unknown', 'error', 'loading', 
                    'cart', 'book your accommodation', 'dates', 'check in', 'check out', 'guests',
-                   'looks like we', 'application issues', 'page not found', '404']
+                   'looks like we', 'application issues', 'page not found', '404',
+                   'unhandled exception', 'exception occurred', 'processing the request',
+                   'server error', 'internal server error', 'something went wrong',
+                   'access denied', 'forbidden', 'not authorized', 'object reference']
         
         # Try standard selectors first
         for selector in ['h1', '.property-name', '.header-title']:
@@ -145,14 +174,22 @@ class RMSScraper(IRMSScraper):
     
     def _extract_phone(self, body_text: str) -> Optional[str]:
         patterns = [
-            r'(?:tel|phone|call)[:\s]*([+\d][\d\s\-\(\)]{7,20})',
+            # With prefix
+            r'(?:tel|phone|call|locally|international)[:\s]*([+\d][\d\s\-\(\)]{7,20})',
+            # International format with +
             r'(\+\d{1,3}[\s\-]?\(?\d{2,4}\)?[\s\-]?\d{3,4}[\s\-]?\d{3,4})',
+            # Australian format: XX XXXXXXXX or XXX XXX XXXX
+            r'\b(0\d[\s\-]?\d{4}[\s\-]?\d{4})\b',
+            r'\b(0\d{2}[\s\-]?\d{3}[\s\-]?\d{4})\b',
+            # Standalone phone number on its own line (for ibe pages)
+            r'^\s*(\d{2}\s+\d{8})\s*$',
         ]
         for pattern in patterns:
-            match = re.search(pattern, body_text, re.IGNORECASE)
+            match = re.search(pattern, body_text, re.IGNORECASE | re.MULTILINE)
             if match:
                 phone = match.group(1).strip()
-                if len(re.sub(r'\D', '', phone)) >= 7:
+                # Must have at least 8 digits
+                if len(re.sub(r'\D', '', phone)) >= 8:
                     return phone
         return None
     
@@ -168,6 +205,7 @@ class RMSScraper(IRMSScraper):
         return None
     
     async def _extract_website(self) -> Optional[str]:
+        # First try to find a link element
         try:
             links = await self._page.query_selector_all('a[href^="http"]')
             for link in links[:10]:
@@ -177,28 +215,103 @@ class RMSScraper(IRMSScraper):
                         return href
         except Exception:
             pass
+        
+        # Fallback: look for website text in body
+        try:
+            body_text = await self._page.evaluate("document.body.innerText")
+            # Look for http(s):// URLs or www. URLs
+            patterns = [
+                r'(https?://[^\s\n]+\.(?:com|com\.au|co\.nz|co\.uk|net|org)[^\s\n]*)',
+                r'(www\.[^\s\n]+\.(?:com|com\.au|co\.nz|co\.uk|net|org)[^\s\n]*)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, body_text, re.IGNORECASE)
+                if match:
+                    url = match.group(1).strip()
+                    if 'rmscloud' not in url.lower() and 'google' not in url.lower():
+                        return url
+        except Exception:
+            pass
+        
         return None
     
     def _extract_address(self, body_text: str) -> Optional[str]:
         patterns = [
+            # With prefix
             r'(?:address|location)[:\s]*([^\n]{10,100})',
-            r'(\d+\s+[A-Za-z]+\s+(?:St|Street|Rd|Road|Ave|Avenue)[^\n]{0,50})',
+            # Street address with number (handles multi-word street names)
+            r'(\d+\s+[A-Za-z][A-Za-z\s]+(?:St|Street|Rd|Road|Ave|Avenue|Dr|Drive|Way|Lane|Ln|Blvd|Highway|Hwy|Crescent|Cres|Close|Place|Pl|Court|Ct)[,\s][^\n]{5,60})',
+            # Australian postcode format: any line with state abbreviation and 4-digit postcode
+            r'([^\n]{10,50}\s+(?:VIC|NSW|QLD|SA|WA|TAS|NT|ACT)\s+\d{4}[^\n]{0,30})',
         ]
         for pattern in patterns:
             match = re.search(pattern, body_text, re.IGNORECASE)
             if match:
                 addr = match.group(1).strip()
+                # Clean up common trailing garbage
+                addr = re.sub(r'\s+(?:Phone|Tel|Call|http|www\.).*$', '', addr, flags=re.IGNORECASE)
                 if len(addr) > 10:
                     return addr
         return None
     
-    def _parse_address(self, address: str) -> tuple[Optional[str], Optional[str]]:
+    def _parse_address(self, address: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Parse address to extract city, state, country.
+        
+        Returns (city, state, country).
+        
+        Handles formats:
+        - Australian: "Street, City STATE Postcode, Australia"
+        - US: "Street, City, STATE ZIP"
+        - NZ: "Street, City Postcode, New Zealand"
+        """
+        city = None
         state = None
         country = None
-        state_match = re.search(r',\s*([A-Z]{2,3})\s*(?:\d|$)', address)
+        
+        # Handle None or empty address
+        if not address:
+            return city, state, country
+        
+        # Australian pattern: "City STATE Postcode, Australia" or "City STATE Postcode , Australia"
+        au_match = re.search(
+            r',\s*([A-Za-z\s\-\']+)\s+(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\s+(\d{4})\s*,?\s*Australia',
+            address, re.IGNORECASE
+        )
+        if au_match:
+            city = au_match.group(1).strip()
+            state = au_match.group(2).upper()
+            country = 'AU'
+            return city, state, country
+        
+        # US pattern: "City, STATE ZIP" or "City STATE ZIP"
+        us_states = 'AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC'
+        us_match = re.search(
+            rf',\s*([A-Za-z\s\-\'\.]+)[,\s]+({us_states})\s+(\d{{5}}(?:-\d{{4}})?)',
+            address, re.IGNORECASE
+        )
+        if us_match:
+            city = us_match.group(1).strip().rstrip(',')
+            state = us_match.group(2).upper()
+            country = 'USA'
+            return city, state, country
+        
+        # NZ pattern: "City Postcode, New Zealand"
+        nz_match = re.search(
+            r',\s*([A-Za-z\s\-\']+)\s+(\d{4})\s*,?\s*New Zealand',
+            address, re.IGNORECASE
+        )
+        if nz_match:
+            city = nz_match.group(1).strip()
+            country = 'NZ'
+            return city, state, country
+        
+        # Fallback: try to extract just state code and country name
+        state_match = re.search(r',\s*([A-Z]{2,3})\s+\d', address)
         if state_match:
             state = state_match.group(1)
-        country_match = re.search(r'(?:Australia|USA|Canada|New Zealand|UK)', address, re.IGNORECASE)
+        
+        country_match = re.search(r'(?:Australia|USA|Canada|New Zealand|UK|United States)', address, re.IGNORECASE)
         if country_match:
             country = normalize_country(country_match.group(0))
-        return state, country
+        
+        return city, state, country

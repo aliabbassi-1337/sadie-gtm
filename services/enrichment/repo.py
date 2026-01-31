@@ -886,34 +886,127 @@ async def get_mews_hotels_total_count() -> int:
 async def batch_update_mews_enrichment(
     updates: List[Dict],
 ) -> int:
-    """Batch update hotels with Mews enrichment results (name only)."""
+    """Batch update hotels with Mews enrichment results.
+    
+    Supports: name, address, city, country, email, phone, lat, lon
+    Uses phone_website column and PostGIS location geography.
+    """
     if not updates:
         return 0
     
     hotel_ids = []
     names = []
+    addresses = []
+    cities = []
+    countries = []
+    emails = []
+    phones = []
+    lats = []
+    lons = []
     
     for u in updates:
         hotel_ids.append(u["hotel_id"])
         names.append(u.get("name"))
+        addresses.append(u.get("address"))
+        cities.append(u.get("city"))
+        countries.append(u.get("country"))
+        emails.append(u.get("email"))
+        phones.append(u.get("phone"))
+        lats.append(u.get("lat"))
+        lons.append(u.get("lon"))
     
     sql = """
     UPDATE sadie_gtm.hotels h
     SET 
-        name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
+        name = CASE WHEN v.name IS NOT NULL AND v.name != '' AND h.name LIKE 'Unknown (%'
                     THEN v.name ELSE h.name END,
+        address = CASE WHEN v.address IS NOT NULL AND v.address != '' AND h.address IS NULL
+                    THEN v.address ELSE h.address END,
+        city = CASE WHEN v.city IS NOT NULL AND v.city != '' AND h.city IS NULL
+                    THEN v.city ELSE h.city END,
+        country = CASE WHEN v.country IS NOT NULL AND v.country != '' AND h.country IS NULL
+                    THEN v.country ELSE h.country END,
+        email = CASE WHEN v.email IS NOT NULL AND v.email != '' AND h.email IS NULL
+                    THEN v.email ELSE h.email END,
+        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' AND h.phone_website IS NULL
+                    THEN v.phone ELSE h.phone_website END,
+        location = CASE WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL AND h.location IS NULL
+                    THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography 
+                    ELSE h.location END,
         updated_at = CURRENT_TIMESTAMP
     FROM (
         SELECT * FROM unnest(
             $1::integer[],
-            $2::text[]
-        ) AS t(hotel_id, name)
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[],
+            $6::text[],
+            $7::text[],
+            $8::float[],
+            $9::float[]
+        ) AS t(hotel_id, name, address, city, country, email, phone, lat, lon)
     ) v
     WHERE h.id = v.hotel_id
     """
     
     async with get_conn() as conn:
-        result = await conn.execute(sql, hotel_ids, names)
+        result = await conn.execute(
+            sql, hotel_ids, names, addresses, cities, countries, emails, phones, lats, lons
+        )
         count = int(result.split()[-1]) if result else len(updates)
     
     return count
+
+
+# ============================================================================
+# LOCATION NORMALIZATION FUNCTIONS
+# ============================================================================
+
+async def get_normalization_status() -> dict:
+    """Get counts of data needing location normalization."""
+    async with get_conn() as conn:
+        result = await queries.get_normalization_status(conn)
+        return dict(result) if result else {}
+
+
+async def get_country_counts() -> list:
+    """Get counts of each country code that needs normalization."""
+    async with get_conn() as conn:
+        results = await queries.get_country_counts(conn)
+        return [(r['country'], r['cnt']) for r in results]
+
+
+async def get_states_with_zips() -> list:
+    """Get distinct states that have zip codes attached."""
+    async with get_conn() as conn:
+        results = await queries.get_states_with_zips(conn)
+        return [r['state'] for r in results]
+
+
+async def normalize_country(old_country: str, new_country: str) -> int:
+    """Normalize a country code to full name. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await queries.normalize_country(conn, old_country=old_country, new_country=new_country)
+        return int(result.split()[-1]) if result else 0
+
+
+async def normalize_us_state(old_state: str, new_state: str) -> int:
+    """Normalize a US state code to full name. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await queries.normalize_us_state(conn, old_state=old_state, new_state=new_state)
+        return int(result.split()[-1]) if result else 0
+
+
+async def fix_australian_state(old_state: str, new_state: str) -> int:
+    """Fix Australian state incorrectly in USA. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await queries.fix_australian_state(conn, old_state=old_state, new_state=new_state)
+        return int(result.split()[-1]) if result else 0
+
+
+async def fix_state_with_zip(old_state: str, new_state: str) -> int:
+    """Fix state that has zip code attached. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await queries.fix_state_with_zip(conn, old_state=old_state, new_state=new_state)
+        return int(result.split()[-1]) if result else 0

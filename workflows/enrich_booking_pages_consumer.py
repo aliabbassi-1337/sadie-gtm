@@ -111,8 +111,8 @@ async def process_message(
         return (False, False, False, False)
 
 
-async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fallback: bool = False):
-    """Main worker loop - poll SQS and process messages."""
+async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fallback: bool = False, concurrency: int = 5):
+    """Main worker loop - poll SQS and process messages concurrently."""
     global shutdown_requested
     
     if not QUEUE_URL:
@@ -130,10 +130,10 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
     errors = 0
     dead_urls = 0
     
-    logger.info(f"Starting enrichment worker (delay={delay}s, archive_fallback={use_archive_fallback})")
+    logger.info(f"Starting enrichment worker (delay={delay}s, concurrency={concurrency}, archive_fallback={use_archive_fallback})")
     logger.info(f"Queue: {QUEUE_URL}")
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             while not shutdown_requested:
                 attrs = get_queue_attributes(QUEUE_URL)
@@ -150,7 +150,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
                     QUEUE_URL,
                     max_messages=10,
                     wait_time_seconds=20,
-                    visibility_timeout=3600,  # 1 hour - prevents reprocessing
+                    visibility_timeout=600,  # 10 minutes (reduced from 1 hour)
                 )
                 
                 if not messages:
@@ -158,22 +158,35 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
                 
                 logger.info(f"Processing {len(messages)} messages (pending: {pending}, in_flight: {in_flight})")
                 
-                for msg in messages:
-                    if shutdown_requested:
-                        break
-                    
-                    success, name_up, addr_up, is_dead = await process_message(
-                        service, client, msg, QUEUE_URL, delay, use_archive_fallback
-                    )
-                    processed += 1
-                    if name_up:
-                        names_updated += 1
-                    if addr_up:
-                        addresses_updated += 1
-                    if is_dead:
-                        dead_urls += 1
-                    elif not success:
+                # Process messages concurrently with semaphore for rate limiting
+                semaphore = asyncio.Semaphore(concurrency)
+                
+                async def process_with_semaphore(msg, idx):
+                    async with semaphore:
+                        # Stagger requests slightly to avoid thundering herd
+                        await asyncio.sleep(delay * (idx % concurrency))
+                        return await process_message(
+                            service, client, msg, QUEUE_URL, 0, use_archive_fallback
+                        )
+                
+                tasks = [process_with_semaphore(msg, i) for i, msg in enumerate(messages)]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"Task error: {result}")
                         errors += 1
+                    else:
+                        success, name_up, addr_up, is_dead = result
+                        processed += 1
+                        if name_up:
+                            names_updated += 1
+                        if addr_up:
+                            addresses_updated += 1
+                        if is_dead:
+                            dead_urls += 1
+                        elif not success:
+                            errors += 1
                 
                 if processed % 100 == 0:
                     logger.info(f"Progress: {processed} processed, {names_updated} names, {addresses_updated} addresses, {dead_urls} dead, {errors} errors")
@@ -201,8 +214,9 @@ Environment:
         """
     )
     
-    parser.add_argument("--delay", "-d", type=float, default=0.5)
+    parser.add_argument("--delay", "-d", type=float, default=0.3, help="Delay between requests (default: 0.3s)")
     parser.add_argument("--poll-interval", type=int, default=5)
+    parser.add_argument("--concurrency", "-c", type=int, default=5, help="Concurrent requests (default: 5)")
     parser.add_argument(
         "--archive-fallback", 
         action="store_true",
@@ -214,7 +228,7 @@ Environment:
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
     
-    asyncio.run(run_worker(args.delay, args.poll_interval, args.archive_fallback))
+    asyncio.run(run_worker(args.delay, args.poll_interval, args.archive_fallback, args.concurrency))
 
 
 if __name__ == "__main__":

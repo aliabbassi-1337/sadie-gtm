@@ -110,23 +110,23 @@ ec2:
     type: cron
     host: primary  # Only run on first/primary EC2 instance
 
-  # DEPRECATED: Cloudbeds now uses booking_enrichment_consumer (has archive fallback)
-  # cloudbeds_enrichment_consumer:
-  #   description: Poll SQS and scrape Cloudbeds hotels with Playwright
-  #   command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 6
-  #   type: systemd
-  #
-  # enqueue_cloudbeds_enrichment:
-  #   description: Queue Cloudbeds hotels needing enrichment
-  #   command: uv run python -m workflows.enrich_cloudbeds_enqueue --limit 5000
-  #   schedule: "*/15 * * * *"
-  #   type: cron
-  #   host: primary
+  # Cloudbeds enrichment (Playwright-based for JS rendering + enhanced state extraction)
+  cloudbeds_enrichment_consumer:
+    description: Poll SQS and scrape Cloudbeds hotels with Playwright
+    command: uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 6
+    type: systemd
+
+  enqueue_cloudbeds_enrichment:
+    description: Queue Cloudbeds hotels needing enrichment
+    command: uv run python -m workflows.enrich_cloudbeds_enqueue --limit 5000
+    schedule: "*/15 * * * *"  # Every 15 min
+    type: cron
+    host: primary
 
   # Mews enrichment (scrape hotel name from Mews booking pages)
   mews_enrichment_consumer:
-    description: Poll SQS and scrape Mews hotels with Playwright
-    command: uv run python -m workflows.enrich_mews_consumer --concurrency 6
+    description: Poll SQS and enrich Mews hotels via API (sequential)
+    command: uv run python -m workflows.enrich_mews_consumer
     type: systemd
 
   enqueue_mews_enrichment:
@@ -149,11 +149,25 @@ ec2:
     command: uv run python workflows/enrich_rms_consumer.py --concurrency 6
     type: systemd  # Runs continuously
 
-  # RMS ingestion (discover new RMS hotels by scanning ID ranges)
-  ingest_rms_consumer:
-    description: Scan RMS ID ranges to discover new hotels (distributed across servers)
-    command: uv run python workflows/ingest_rms_consumer.py --concurrency 6
+  # RMS ID scanning (discover new RMS hotels by scanning ID ranges)
+  # Distributed across all 7 servers via SQS
+  rms_scan_consumer:
+    description: Scan RMS ID ranges to discover new hotels (distributed across 7 servers)
+    command: uv run python -m workflows.consume_rms_scan --concurrency 20 --delay 0.1
     type: systemd  # Runs continuously, pulls ranges from SQS
+
+  # RMS slug ingestion (ingest discovered slugs from archives)
+  enqueue_rms_slugs:
+    description: Enqueue discovered RMS slugs to SQS for distributed ingestion
+    command: uv run python -m workflows.enqueue_rms_slugs --s3 crawl-data/rms_archive_discovery_20260130.txt
+    type: cron
+    schedule: "0 */2 * * *"  # Every 2 hours
+    host: primary
+
+  consume_rms_slugs:
+    description: Consume RMS slugs from SQS and ingest (runs on all servers)
+    command: uv run python -m workflows.consume_rms_slugs --concurrency 5
+    type: systemd  # Runs continuously on all EC2 instances
 
   # Serper geocoding (for non-Cloudbeds crawl data - SiteMinder, Mews, etc.)
   geocode_crawl_data:

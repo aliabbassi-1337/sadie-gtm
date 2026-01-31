@@ -36,6 +36,11 @@ async def run(limit: int = 1000, dry_run: bool = False):
             in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
             waiting = int(attrs.get("ApproximateNumberOfMessages", 0))
             logger.info(f"Queue status: {waiting} waiting, {in_flight} in-flight")
+            
+            # Skip if queue already has significant backlog (avoid duplicates)
+            if waiting > 100:
+                logger.info(f"Skipping enqueue - queue already has {waiting} messages")
+                return 0
         
         # Get hotels needing enrichment
         candidates = await repo.get_mews_hotels_needing_enrichment(limit=limit)

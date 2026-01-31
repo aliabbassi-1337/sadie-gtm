@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Optional, List, Dict, Callable, Any
 import asyncio
+import html
 import json
 import os
 import re
@@ -10,8 +11,7 @@ import httpx
 from loguru import logger
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from playwright.async_api import async_playwright, BrowserContext
-from playwright_stealth import Stealth
+from playwright.async_api import async_playwright
 
 from services.enrichment import repo
 from services.enrichment.room_count_enricher import (
@@ -26,7 +26,7 @@ from services.enrichment.website_enricher import WebsiteEnricher
 from services.enrichment.archive_scraper import ArchiveScraper, ExtractedBookingData
 from services.enrichment.rms_repo import RMSRepo
 from services.enrichment.rms_queue import RMSQueue, MockQueue
-from lib.rms import RMSScraper, RMSHotelRecord, QueueStats
+from lib.rms import RMSHotelRecord, QueueStats
 
 load_dotenv()
 
@@ -126,7 +126,7 @@ class BookingPageEnricher:
         country = None
         
         if "name" in json_ld:
-            name = json_ld["name"].strip()
+            name = html.unescape(json_ld["name"].strip())
         
         addr_data = json_ld.get("address", {})
         if isinstance(addr_data, str):
@@ -157,7 +157,7 @@ class BookingPageEnricher:
         if not match:
             match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']', html, re.IGNORECASE)
         if match:
-            raw = match.group(1).strip()
+            raw = html.unescape(match.group(1).strip())
             parts = re.split(r'\s*[-|–]\s*', raw)
             parsed_name = parts[0].strip()
             if parsed_name.lower() not in ['book now', 'reservation', 'booking', 'home', 'unknown']:
@@ -167,7 +167,7 @@ class BookingPageEnricher:
         if not name:
             match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
             if match:
-                raw = match.group(1).strip()
+                raw = html.unescape(match.group(1).strip())
                 parts = re.split(r'\s*[-|–]\s*', raw)
                 parsed_name = parts[0].strip()
                 if parsed_name.lower() not in ['book now', 'reservation', 'booking', 'home', 'unknown']:
@@ -327,19 +327,34 @@ class BookingPageEnricher:
         if len(lines) > 1:
             city = lines[1]
         
-        # Line 2: "State Country" e.g. "Texas US"
-        if len(lines) > 2:
+        # Line 2+: Look for "State Country" pattern e.g. "Texas US", "California USA"
+        # Enhanced regex to properly extract state and country codes
+        state_country_pattern = re.compile(
+            r'^([A-Za-z\s]+)\s+(US|USA|AU|UK|CA|NZ|GB|IE|MX|AR|PR|CO|IT|ES|FR|DE|PT|BR|CL|PE|CR|PA)$',
+            re.IGNORECASE
+        )
+        
+        # Search lines 2-5 for the "State Country" pattern
+        for line in lines[2:6] if len(lines) > 2 else []:
+            match = state_country_pattern.match(line.strip())
+            if match:
+                state = match.group(1).strip()
+                country_code = match.group(2).strip().upper()
+                country = 'USA' if country_code in ['US', 'USA'] else country_code
+                break
+        
+        # Fallback: original rsplit approach for unrecognized patterns
+        if not state and len(lines) > 2:
             state_country = lines[2].strip()
-            # Common patterns: "Texas US", "California USA", "NY US"
-            # Split by last space - country is usually 2-3 chars
             parts = state_country.rsplit(' ', 1)
-            if len(parts) == 2:
+            if len(parts) == 2 and len(parts[1]) <= 4:
                 state = parts[0].strip()
-                country = parts[1].strip()
-                # Normalize country codes
-                if country.upper() in ['US', 'USA']:
+                country_raw = parts[1].strip().upper()
+                if country_raw in ['US', 'USA']:
                     country = 'USA'
-            else:
+                elif len(country_raw) <= 3:
+                    country = country_raw
+            elif len(parts) == 1:
                 state = state_country
         
         # Line 3: Zip code (numeric or alphanumeric like "78006")
@@ -522,6 +537,48 @@ class IService(ABC):
     @abstractmethod
     async def consume_rms_enrichment_queue(self, concurrency: int = 6, max_messages: int = 0, should_stop: Optional[Callable[[], bool]] = None) -> ConsumeResult:
         """Consume and process RMS enrichment queue."""
+        pass
+
+    # Cloudbeds Enrichment
+    @abstractmethod
+    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6, delay: float = 1.0) -> EnrichResult:
+        """Enrich Cloudbeds hotels by scraping their booking pages.
+        
+        Args:
+            limit: Max hotels to process
+            concurrency: Concurrent browser contexts
+            delay: Seconds between batches (rate limiting, default 1.0)
+        """
+        pass
+
+    @abstractmethod
+    async def get_cloudbeds_enrichment_status(self) -> Dict[str, int]:
+        """Get Cloudbeds enrichment status counts."""
+        pass
+
+    @abstractmethod
+    async def get_cloudbeds_hotels_needing_enrichment(self, limit: int = 100) -> List:
+        """Get Cloudbeds hotels needing enrichment for dry-run."""
+        pass
+
+    @abstractmethod
+    async def batch_update_cloudbeds_enrichment(self, results: List[Dict]) -> int:
+        """Batch update Cloudbeds enrichment results."""
+        pass
+
+    @abstractmethod
+    async def batch_mark_cloudbeds_failed(self, hotel_ids: List[int]) -> int:
+        """Mark Cloudbeds hotels as failed (for retry later)."""
+        pass
+
+    @abstractmethod
+    async def consume_cloudbeds_queue(
+        self,
+        queue_url: str,
+        concurrency: int = 5,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> ConsumeResult:
+        """Consume and process Cloudbeds enrichment queue."""
         pass
 
 
@@ -1350,55 +1407,92 @@ class Service(IService):
     # =========================================================================
 
     async def enrich_rms_hotels(self, hotels: List[RMSHotelRecord], concurrency: int = 6) -> EnrichResult:
-        """Enrich RMS hotels by scraping their booking pages."""
+        """Enrich RMS hotels using fast API with adaptive Brightdata fallback.
+        
+        Strategy:
+        1. Try API first (fast, ~100ms per hotel)
+        2. Auto-switch to Brightdata after 3 consecutive failures
+        3. Switch back to direct after success
+        4. Fall back to Playwright only if API completely fails
+        
+        Uses batch UPDATE at the end for efficiency.
+        """
+        from lib.rms.api_client import AdaptiveRMSApiClient
+        
         processed = enriched = failed = 0
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            contexts: List[BrowserContext] = []
-            scrapers: List[RMSScraper] = []
-            for _ in range(concurrency):
-                ctx = await browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-                page = await ctx.new_page()
-                stealth = Stealth()
-                await stealth.apply_stealth_async(page)
-                contexts.append(ctx)
-                scrapers.append(RMSScraper(page))
-            semaphore = asyncio.Semaphore(concurrency)
-
-            async def enrich_one(hotel: RMSHotelRecord, idx: int) -> tuple[bool, bool]:
+        batch_updates: List[dict] = []
+        failed_urls: List[str] = []
+        
+        semaphore = asyncio.Semaphore(concurrency)
+        
+        async with AdaptiveRMSApiClient() as api_client:
+            async def enrich_one(hotel: RMSHotelRecord) -> tuple[bool, bool, Optional[dict]]:
+                """Returns (processed, enriched, update_dict or None)."""
                 async with semaphore:
-                    # Rate limit: stagger requests to avoid hammering RMS servers
-                    # With 6 concurrent + 1s delay, we get ~6 requests per 6-7 seconds
-                    await asyncio.sleep(idx % concurrency)  # Stagger initial requests
-                    
-                    scraper = scrapers[idx % len(scrapers)]
                     url = hotel.booking_url if hotel.booking_url.startswith("http") else f"https://{hotel.booking_url}"
-                    slug = url.split("/")[-1]
-                    data = await scraper.extract(url, slug)
+                    
+                    # Parse slug from URL
+                    parts = url.rstrip("/").split("/")
+                    slug = parts[-1] if parts[-1].isdigit() or len(parts[-1]) > 3 else parts[-2]
+                    
+                    # Determine server from URL
+                    server = "bookings.rmscloud.com"
+                    if "bookings12" in url:
+                        server = "bookings12.rmscloud.com"
+                    elif "bookings10" in url:
+                        server = "bookings10.rmscloud.com"
+                    elif "bookings8" in url:
+                        server = "bookings8.rmscloud.com"
+                    
+                    # Try API first (fast)
+                    data = await api_client.extract(slug, server)
+                    method = "api"
+                    
+                    # Fall back to HTML if API didn't get enough data
+                    if not data or not data.has_data():
+                        data = await api_client.extract_from_html(slug, server)
+                        method = "html"
+                    
                     if data and data.has_data():
-                        await self._rms_repo.update_hotel(hotel_id=hotel.hotel_id, name=data.name, address=data.address, city=data.city, state=data.state, country=data.country, phone=data.phone, email=data.email, website=data.website)
-                        await self._rms_repo.update_enrichment_status(hotel.booking_url, 1)
-                        logger.info(f"Enriched {hotel.hotel_id}: {data.name}")
-                        return (True, True)
+                        logger.debug(f"Enriched [{method}] {hotel.hotel_id}: {data.name} | {data.city}, {data.state}")
+                        return (True, True, {
+                            "hotel_id": hotel.hotel_id,
+                            "booking_url": hotel.booking_url,
+                            "name": data.name,
+                            "address": data.address,
+                            "city": data.city,
+                            "state": data.state,
+                            "country": data.country,
+                            "phone": data.phone,
+                            "email": data.email,
+                            "website": data.website,
+                        })
                     else:
-                        await self._rms_repo.update_enrichment_status(hotel.booking_url, -1)
-                        return (True, False)
-
-            tasks = [enrich_one(h, i) for i, h in enumerate(hotels)]
+                        return (True, False, None)
+            
+            tasks = [enrich_one(h) for h in hotels]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
+            
+            for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    logger.error(f"Enrichment error: {result}")
+                    logger.debug(f"Enrichment error for {hotels[i].hotel_id}: {result}")
                     failed += 1
+                    failed_urls.append(hotels[i].booking_url)
                 else:
-                    pr, en = result
+                    pr, en, update_dict = result
                     processed += 1 if pr else 0
-                    enriched += 1 if en else 0
-                    if pr and not en:
+                    if en and update_dict:
+                        enriched += 1
+                        batch_updates.append(update_dict)
+                    elif pr:
                         failed += 1
-            for ctx in contexts:
-                await ctx.close()
-            await browser.close()
+                        failed_urls.append(hotels[i].booking_url)
+        
+        # Batch update all results
+        if batch_updates or failed_urls:
+            updated = await self._rms_repo.batch_update_enrichment(batch_updates, failed_urls)
+            logger.info(f"Batch update: {updated} hotels updated, {len(failed_urls)} marked failed")
+        
         return EnrichResult(processed=processed, enriched=enriched, failed=failed)
 
     async def enqueue_rms_for_enrichment(self, limit: int = 5000, batch_size: int = 10) -> EnqueueResult:
@@ -1468,3 +1562,368 @@ class Service(IService):
 
     def get_rms_queue_stats(self) -> QueueStats:
         return self._rms_queue.get_stats()
+
+    # =========================================================================
+    # Cloudbeds Enrichment
+    # =========================================================================
+
+    async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6, delay: float = 1.0) -> EnrichResult:
+        """Enrich Cloudbeds hotels by scraping their booking pages.
+        
+        Args:
+            limit: Max hotels to process
+            concurrency: Concurrent browser contexts
+            delay: Seconds between batches (rate limiting, default 1.0)
+        """
+        from lib.browser import BrowserPool
+        from lib.cloudbeds import CloudbedsScraper
+
+        candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
+        hotels = [{"id": c.id, "booking_url": c.booking_url} for c in candidates]
+
+        if not hotels:
+            logger.info("No Cloudbeds hotels need enrichment")
+            return EnrichResult(processed=0, enriched=0, failed=0)
+
+        logger.info(f"Found {len(hotels)} Cloudbeds hotels to enrich")
+
+        total_enriched = 0
+        total_errors = 0
+        results_buffer = []
+
+        async with BrowserPool(concurrency=concurrency) as pool:
+            scrapers = [CloudbedsScraper(page) for page in pool.pages]
+            logger.info(f"Created {concurrency} browser contexts (delay={delay}s between batches)")
+
+            async def process_hotel(page, hotel):
+                scraper = scrapers[pool.pages.index(page)]
+                try:
+                    data = await scraper.extract(hotel["booking_url"])
+                    return (hotel["id"], bool(data), data, None if data else "no_data")
+                except Exception as e:
+                    return (hotel["id"], False, None, str(e)[:100])
+
+            results = await pool.process_batch(hotels, process_hotel, delay_between_batches=delay)
+
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    total_errors += 1
+                    logger.warning(f"  Hotel {hotels[i]['id']}: error - {result}")
+                    continue
+
+                hotel_id, success, data, error = result
+                if success and data and (data.city or data.name):
+                    results_buffer.append({
+                        "hotel_id": hotel_id,
+                        "name": data.name,
+                        "address": data.address,
+                        "city": data.city,
+                        "state": data.state,
+                        "country": data.country,
+                        "phone": data.phone,
+                        "email": data.email,
+                    })
+                    logger.info(f"  Hotel {hotel_id}: {data.name[:25] if data.name else ''}, {data.city}")
+                elif error:
+                    total_errors += 1
+                    logger.warning(f"  Hotel {hotel_id}: {error}")
+
+        if results_buffer:
+            total_enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
+            logger.info(f"Updated {total_enriched} hotels")
+
+        return EnrichResult(processed=len(hotels), enriched=total_enriched, failed=total_errors)
+
+    async def get_cloudbeds_enrichment_status(self) -> Dict[str, int]:
+        """Get Cloudbeds enrichment status counts."""
+        total = await repo.get_cloudbeds_hotels_total_count()
+        needing = await repo.get_cloudbeds_hotels_needing_enrichment_count()
+        return {
+            "total": total,
+            "needing_enrichment": needing,
+            "already_enriched": total - needing,
+        }
+
+    async def get_cloudbeds_hotels_needing_enrichment(self, limit: int = 100) -> List:
+        """Get Cloudbeds hotels needing enrichment for dry-run."""
+        return await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
+
+    async def batch_update_cloudbeds_enrichment(self, results: List[Dict]) -> int:
+        """Batch update Cloudbeds enrichment results."""
+        return await repo.batch_update_cloudbeds_enrichment(results)
+
+    async def batch_mark_cloudbeds_failed(self, hotel_ids: List[int]) -> int:
+        """Mark Cloudbeds hotels as failed (for retry later)."""
+        return await repo.batch_set_last_enrichment_attempt(hotel_ids)
+
+    async def consume_cloudbeds_queue(
+        self,
+        queue_url: str,
+        concurrency: int = 5,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> ConsumeResult:
+        """Consume and process Cloudbeds enrichment queue.
+        
+        This is the main entry point for the SQS consumer workflow.
+        Handles browser lifecycle, message processing, and batch updates.
+        """
+        from lib.browser import BrowserPool
+        from lib.cloudbeds import CloudbedsScraper
+        from infra.sqs import receive_messages, delete_message, get_queue_attributes
+
+        should_stop = should_stop or (lambda: self._shutdown_requested)
+        
+        messages_processed = 0
+        hotels_processed = 0
+        hotels_enriched = 0
+        hotels_failed = 0
+        
+        batch_results = []
+        batch_failed_ids = []
+        BATCH_SIZE = 50
+        VISIBILITY_TIMEOUT = 300
+
+        logger.info(f"Starting Cloudbeds consumer (concurrency={concurrency})")
+
+        async with BrowserPool(concurrency=concurrency) as pool:
+            scrapers = [CloudbedsScraper(page) for page in pool.pages]
+            logger.info(f"Created {concurrency} browser contexts")
+
+            while not should_stop():
+                # Receive messages from SQS
+                messages = receive_messages(
+                    queue_url,
+                    max_messages=min(concurrency, 10),
+                    visibility_timeout=VISIBILITY_TIMEOUT,
+                    wait_time_seconds=10,
+                )
+
+                if not messages:
+                    logger.debug("No messages, waiting...")
+                    continue
+
+                # Parse and validate messages
+                valid_messages = []
+                for msg in messages:
+                    body = msg["body"]
+                    hotel_id = body.get("hotel_id")
+                    booking_url = body.get("booking_url")
+
+                    if not hotel_id or not booking_url:
+                        delete_message(queue_url, msg["receipt_handle"])
+                        continue
+
+                    valid_messages.append((msg, hotel_id, booking_url))
+
+                if not valid_messages:
+                    continue
+
+                # Process hotels in parallel
+                tasks = []
+                message_map = {}
+
+                for i, (msg, hotel_id, booking_url) in enumerate(valid_messages[:concurrency]):
+                    message_map[hotel_id] = msg
+                    tasks.append(self._process_cloudbeds_hotel(scrapers[i], hotel_id, booking_url))
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Rate limit: 1 second delay between batches
+                await asyncio.sleep(1.0)
+
+                # Handle results
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"Task error: {result}")
+                        continue
+
+                    hotel_id, success, data, error = result
+                    msg = message_map.get(hotel_id)
+                    if not msg:
+                        continue
+
+                    if success and data:
+                        batch_results.append({
+                            "hotel_id": hotel_id,
+                            "name": data.name,
+                            "address": data.address,
+                            "city": data.city,
+                            "state": data.state,
+                            "country": data.country,
+                            "phone": data.phone,
+                            "email": data.email,
+                        })
+                        hotels_enriched += 1
+
+                        parts = []
+                        if data.name:
+                            parts.append(f"name={data.name[:20]}")
+                        if data.city:
+                            parts.append(f"city={data.city}")
+                        logger.info(f"  Hotel {hotel_id}: {', '.join(parts)}")
+                    elif error == "404_not_found":
+                        batch_failed_ids.append(hotel_id)
+                        hotels_failed += 1
+                        logger.warning(f"  Hotel {hotel_id}: 404 - will retry")
+                    elif error:
+                        logger.warning(f"  Hotel {hotel_id}: {error}")
+
+                    delete_message(queue_url, msg["receipt_handle"])
+                    hotels_processed += 1
+                    messages_processed += 1
+
+                # Batch update periodically
+                if len(batch_results) >= BATCH_SIZE:
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                    logger.info(f"Batch update: {updated} hotels")
+                    batch_results = []
+
+                if len(batch_failed_ids) >= BATCH_SIZE:
+                    marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                    logger.info(f"Marked {marked} hotels for retry in 7 days")
+                    batch_failed_ids = []
+
+                # Log progress
+                attrs = get_queue_attributes(queue_url)
+                remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
+                logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched, {hotels_failed} failed, ~{remaining} remaining")
+
+            # Final batch flush
+            if batch_results:
+                updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                logger.info(f"Final batch update: {updated} hotels")
+
+            if batch_failed_ids:
+                marked = await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                logger.info(f"Final batch: {marked} hotels marked for retry in 7 days")
+
+        logger.info(f"Consumer stopped. Total: {hotels_processed} processed, {hotels_enriched} enriched")
+        return ConsumeResult(
+            messages_processed=messages_processed,
+            hotels_processed=hotels_processed,
+            hotels_enriched=hotels_enriched,
+            hotels_failed=hotels_failed,
+        )
+
+    async def _process_cloudbeds_hotel(self, scraper, hotel_id: int, booking_url: str):
+        """Process a single Cloudbeds hotel. Returns (hotel_id, success, data, error)."""
+        try:
+            data = await scraper.extract(booking_url)
+
+            if not data:
+                return (hotel_id, False, None, "no_data")
+
+            # Check for garbage data (Cloudbeds homepage or error pages)
+            if data.name and data.name.lower() in ['cloudbeds.com', 'cloudbeds', 'book now', 'reservation']:
+                return (hotel_id, False, None, "404_not_found")
+            if data.city and 'soluções online' in data.city.lower():
+                return (hotel_id, False, None, "404_not_found")
+
+            return (hotel_id, True, data, None)
+
+        except Exception as e:
+            return (hotel_id, False, None, str(e)[:100])
+
+
+    # =========================================================================
+    # LOCATION NORMALIZATION
+    # =========================================================================
+
+    # Country code to full name mapping
+    COUNTRY_NAMES = {
+        "USA": "United States", "US": "United States", "AU": "Australia",
+        "UK": "United Kingdom", "GB": "United Kingdom", "NZ": "New Zealand",
+        "DE": "Germany", "FR": "France", "ES": "Spain", "IT": "Italy",
+        "MX": "Mexico", "JP": "Japan", "CN": "China", "IN": "India",
+        "BR": "Brazil", "AR": "Argentina", "CL": "Chile", "CO": "Colombia",
+        "PE": "Peru", "ZA": "South Africa", "EG": "Egypt", "MA": "Morocco",
+        "KE": "Kenya", "TH": "Thailand", "VN": "Vietnam", "ID": "Indonesia",
+        "MY": "Malaysia", "SG": "Singapore", "PH": "Philippines", "KR": "South Korea",
+        "TW": "Taiwan", "HK": "Hong Kong", "AE": "United Arab Emirates",
+        "IL": "Israel", "TR": "Turkey", "GR": "Greece", "PT": "Portugal",
+        "NL": "Netherlands", "BE": "Belgium", "CH": "Switzerland", "AT": "Austria",
+        "SE": "Sweden", "NO": "Norway", "DK": "Denmark", "FI": "Finland",
+        "PL": "Poland", "CZ": "Czech Republic", "HU": "Hungary", "RO": "Romania",
+        "IE": "Ireland", "PR": "Puerto Rico",
+    }
+
+    # US state codes to full names
+    US_STATE_NAMES = {
+        "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+        "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+        "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+        "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+        "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+        "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+        "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+        "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+        "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+        "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+        "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+        "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+        "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+        "PR": "Puerto Rico", "VI": "Virgin Islands", "GU": "Guam",
+    }
+
+    # Australian state codes to full names
+    AU_STATE_NAMES = {
+        "NSW": "New South Wales", "VIC": "Victoria", "QLD": "Queensland",
+        "WA": "Western Australia", "SA": "South Australia", "TAS": "Tasmania",
+        "ACT": "Australian Capital Territory", "NT": "Northern Territory",
+    }
+
+    async def get_normalization_status(self) -> dict:
+        """Get counts of data needing location normalization."""
+        return await repo.get_normalization_status()
+
+    async def normalize_locations(self, dry_run: bool = False) -> dict:
+        """
+        Normalize all location data (countries, states).
+        
+        Returns dict with counts of fixed records.
+        """
+        stats = {"australian_fixed": 0, "zips_fixed": 0, "countries_fixed": 0, "states_fixed": 0}
+        
+        # Fix Australian hotels incorrectly in USA
+        for code, name in self.AU_STATE_NAMES.items():
+            if dry_run:
+                continue
+            fixed = await repo.fix_australian_state(code, name)
+            if fixed > 0:
+                logger.info(f"Fixed {fixed} hotels: state={code} -> country=Australia, state={name}")
+                stats["australian_fixed"] += fixed
+        
+        # Fix states with zip codes
+        states_with_zips = await repo.get_states_with_zips()
+        for old_state in states_with_zips:
+            code = old_state.split()[0]
+            new_state = self.US_STATE_NAMES.get(code, code)
+            if dry_run:
+                continue
+            fixed = await repo.fix_state_with_zip(old_state, new_state)
+            if fixed > 0:
+                logger.info(f"Fixed {fixed} hotels: '{old_state}' -> '{new_state}'")
+                stats["zips_fixed"] += fixed
+        
+        # Normalize country codes
+        for code, name in self.COUNTRY_NAMES.items():
+            if code in ("CA", "SA"):  # Skip ambiguous codes
+                continue
+            if dry_run:
+                continue
+            fixed = await repo.normalize_country(code, name)
+            if fixed > 0:
+                logger.info(f"Normalized {fixed} hotels: country='{code}' -> '{name}'")
+                stats["countries_fixed"] += fixed
+        
+        # Normalize US state codes
+        for code, name in self.US_STATE_NAMES.items():
+            if dry_run:
+                continue
+            fixed = await repo.normalize_us_state(code, name)
+            if fixed > 0:
+                logger.debug(f"Normalized {fixed} hotels: state='{code}' -> '{name}'")
+                stats["states_fixed"] += fixed
+        
+        stats["total"] = sum(stats.values())
+        return stats

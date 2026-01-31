@@ -581,7 +581,7 @@ WHERE state = :state
 -- Launch criteria (ALL required):
 --   - name (not null, not empty, not 'Unknown')
 --   - email OR phone (at least one)
---   - city, state, country (all required)
+--   - state, country (city optional)
 --   - booking engine detected (hbe.status = 1)
 
 -- name: get_launchable_hotels
@@ -611,8 +611,7 @@ WHERE h.status = 0
   AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
   -- Email OR phone required
   AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-  -- Location required
-  AND h.city IS NOT NULL AND h.city != ''
+  -- Location required (state + country, city optional)
   AND h.state IS NOT NULL AND h.state != ''
   AND h.country IS NOT NULL AND h.country != ''
 LIMIT :limit;
@@ -625,7 +624,6 @@ INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.st
 WHERE h.status = 0
   AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
   AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-  AND h.city IS NOT NULL AND h.city != ''
   AND h.state IS NOT NULL AND h.state != ''
   AND h.country IS NOT NULL AND h.country != '';
 
@@ -643,7 +641,6 @@ WITH claimed AS (
       -- Enrichment requirements
       AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
       AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-      AND h.city IS NOT NULL AND h.city != ''
       AND h.state IS NOT NULL AND h.state != ''
       AND h.country IS NOT NULL AND h.country != ''
     FOR UPDATE OF h SKIP LOCKED
@@ -666,7 +663,6 @@ WITH claimed AS (
       -- Enrichment requirements
       AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
       AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-      AND h.city IS NOT NULL AND h.city != ''
       AND h.state IS NOT NULL AND h.state != ''
       AND h.country IS NOT NULL AND h.country != ''
     FOR UPDATE OF h SKIP LOCKED
@@ -1214,3 +1210,54 @@ WHERE hbe.booking_engine_id IN (3, 4, 12, 14)  -- Cloudbeds, Mews, RMS Cloud, Si
   AND h.source LIKE :source_pattern
 GROUP BY bes.name
 ORDER BY total_hotels DESC;
+
+
+-- ============================================================================
+-- LOCATION NORMALIZATION QUERIES
+-- ============================================================================
+
+-- name: get_normalization_status^
+-- Get counts of data needing location normalization
+SELECT
+    (SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country IN ('USA', 'US', 'AU', 'UK', 'GB', 'NZ', 'DE', 'FR', 'ES', 'IT', 'MX', 'JP', 'CN', 'BR')) AS countries_to_normalize,
+    (SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country IN ('USA', 'United States') AND state IN ('VIC', 'NSW', 'QLD', 'TAS', 'ACT', 'SA', 'NT')) AS australian_in_usa,
+    (SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country IN ('USA', 'United States') AND state ~ '^[A-Z]{2}$' AND state NOT IN ('VIC', 'NSW', 'QLD', 'TAS', 'ACT', 'NT')) AS us_state_codes,
+    (SELECT COUNT(*) FROM sadie_gtm.hotels WHERE state ~ '[0-9]') AS states_with_zips;
+
+-- name: normalize_country!
+-- Normalize a country code to full name
+UPDATE sadie_gtm.hotels 
+SET country = :new_country, updated_at = NOW() 
+WHERE country = :old_country;
+
+-- name: normalize_us_state!
+-- Normalize a US state code to full name
+UPDATE sadie_gtm.hotels 
+SET state = :new_state, updated_at = NOW() 
+WHERE state = :old_state AND country IN ('USA', 'United States');
+
+-- name: fix_australian_state!
+-- Fix Australian state incorrectly in USA - update both country and state
+UPDATE sadie_gtm.hotels 
+SET country = 'Australia', state = :new_state, updated_at = NOW()
+WHERE country IN ('USA', 'United States') AND state = :old_state;
+
+-- name: fix_state_with_zip!
+-- Fix state that has zip code attached (e.g., "WY 83012" -> "Wyoming")
+UPDATE sadie_gtm.hotels 
+SET state = :new_state, updated_at = NOW() 
+WHERE state = :old_state;
+
+-- name: get_states_with_zips
+-- Get distinct states that have zip codes attached
+SELECT DISTINCT state 
+FROM sadie_gtm.hotels 
+WHERE state ~ '^[A-Z]{2} [0-9]+$';
+
+-- name: get_country_counts
+-- Get counts of each country code that needs normalization
+SELECT country, COUNT(*) as cnt 
+FROM sadie_gtm.hotels 
+WHERE country IN ('USA', 'US', 'AU', 'UK', 'GB', 'NZ', 'DE', 'FR', 'ES', 'IT', 'MX', 'JP', 'CN', 'BR', 'IN', 'AR', 'CL', 'CO', 'PE', 'ZA', 'EG', 'MA', 'KE', 'TH', 'VN', 'ID', 'MY', 'SG', 'PH', 'KR', 'TW', 'HK', 'AE', 'IL', 'TR', 'GR', 'PT', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'PL', 'CZ', 'HU', 'RO', 'IE', 'PR')
+GROUP BY country 
+ORDER BY cnt DESC;

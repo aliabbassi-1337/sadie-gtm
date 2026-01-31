@@ -11,6 +11,24 @@ class ScannedURL(BaseModel):
     url: str
     slug: str
     subdomain: str
+    name: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    
+    def to_dict(self) -> dict:
+        """Convert to dict for JSON serialization."""
+        return {
+            "id": self.id_num,
+            "url": self.url,
+            "slug": self.slug,
+            "subdomain": self.subdomain,
+            "name": self.name,
+            "booking_url": self.url,
+            "address": self.address,
+            "phone": self.phone,
+            "email": self.email,
+        }
 
 
 class ExtractedRMSData(BaseModel):

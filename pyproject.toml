@@ -18,6 +18,7 @@ dependencies = [
     "boto3>=1.42.27",
     "pyyaml>=6.0.3",
     "aioboto3>=7.0.0",
+    "beautifulsoup4>=4.14.3",
 ]
 
 [dependency-groups]
@@ -30,7 +31,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["services", "repositories"]
+testpaths = ["services", "repositories", "lib"]
 python_files = "*_test.py"
 python_classes = "Test*"
 python_functions = "test_*"
