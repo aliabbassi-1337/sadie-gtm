@@ -58,6 +58,9 @@ jobs:
               sudo systemctl restart booking-enrichment-consumer || true
               sudo systemctl restart cloudbeds-enrichment-consumer || true
               sudo systemctl restart consume-rms-slugs || true
+              sudo systemctl restart rms-scan-consumer || true
+              sudo systemctl restart mews-enrichment-consumer || true
+              sudo systemctl restart enrich-rms-consumer || true
             "; then
               echo "SUCCESS: $ip"
               return 0
