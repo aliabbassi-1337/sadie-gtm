@@ -116,7 +116,9 @@ class RMSScanner:
                 
                 if resp.status_code == 200:
                     data = resp.json()
-                    prop_opts = data.get("propertyOptions", {})
+                    if not data:
+                        continue
+                    prop_opts = data.get("propertyOptions") or {}
                     name = prop_opts.get("propertyName")
                     
                     if name and len(name) > 2:
