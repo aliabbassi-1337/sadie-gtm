@@ -49,14 +49,16 @@ def get_proxy_url(
     zone_password: Optional[str] = None,
     customer_id: Optional[str] = None,
     country: Optional[str] = None,
+    prefer_cheap: bool = True,
 ) -> str:
     """Build Brightdata proxy URL for httpx/aiohttp.
     
     Args:
-        zone: Zone name (default: BRIGHTDATA_ZONE env var)
-        zone_password: Zone password (default: BRIGHTDATA_ZONE_PASSWORD env var)
+        zone: Zone name (default: auto-select based on prefer_cheap)
+        zone_password: Zone password (default: from env var)
         customer_id: Customer ID (default: BRIGHTDATA_CUSTOMER_ID env var)
         country: Optional country code for geo-targeting (e.g., "us", "gb")
+        prefer_cheap: If True, prefer residential zone (cheaper) over unlocker
     
     Returns:
         Proxy URL in format: http://user:pass@host:port
@@ -66,14 +68,25 @@ def get_proxy_url(
         async with httpx.AsyncClient(proxy=proxy_url) as client:
             resp = await client.get("https://example.com")
     """
-    zone = zone or os.getenv("BRIGHTDATA_ZONE", "")
-    zone_password = zone_password or os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
     customer_id = customer_id or os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    
+    # If no explicit zone, try residential first (cheaper)
+    if zone is None and prefer_cheap:
+        res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
+        res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
+        if res_zone and res_password:
+            zone = res_zone
+            zone_password = res_password
+    
+    # Fall back to unlocker zone
+    if zone is None:
+        zone = os.getenv("BRIGHTDATA_ZONE", "")
+        zone_password = zone_password or os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
     
     if not all([zone, zone_password, customer_id]):
         raise ValueError(
-            "Missing Brightdata proxy credentials. Set BRIGHTDATA_ZONE, "
-            "BRIGHTDATA_ZONE_PASSWORD, and BRIGHTDATA_CUSTOMER_ID environment variables."
+            "Missing Brightdata proxy credentials. Set BRIGHTDATA_RES_ZONE/BRIGHTDATA_RES_PASSWORD "
+            "or BRIGHTDATA_ZONE/BRIGHTDATA_ZONE_PASSWORD, and BRIGHTDATA_CUSTOMER_ID."
         )
     
     # Build username with optional country targeting
