@@ -581,7 +581,7 @@ WHERE state = :state
 -- Launch criteria (ALL required):
 --   - name (not null, not empty, not 'Unknown')
 --   - email OR phone (at least one)
---   - city, state, country (all required)
+--   - state, country (city optional)
 --   - booking engine detected (hbe.status = 1)
 
 -- name: get_launchable_hotels
@@ -611,8 +611,7 @@ WHERE h.status = 0
   AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
   -- Email OR phone required
   AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-  -- Location required
-  AND h.city IS NOT NULL AND h.city != ''
+  -- Location required (state + country, city optional)
   AND h.state IS NOT NULL AND h.state != ''
   AND h.country IS NOT NULL AND h.country != ''
 LIMIT :limit;
@@ -625,7 +624,6 @@ INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.st
 WHERE h.status = 0
   AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
   AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-  AND h.city IS NOT NULL AND h.city != ''
   AND h.state IS NOT NULL AND h.state != ''
   AND h.country IS NOT NULL AND h.country != '';
 
@@ -643,7 +641,6 @@ WITH claimed AS (
       -- Enrichment requirements
       AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
       AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-      AND h.city IS NOT NULL AND h.city != ''
       AND h.state IS NOT NULL AND h.state != ''
       AND h.country IS NOT NULL AND h.country != ''
     FOR UPDATE OF h SKIP LOCKED
@@ -666,7 +663,6 @@ WITH claimed AS (
       -- Enrichment requirements
       AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
       AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-      AND h.city IS NOT NULL AND h.city != ''
       AND h.state IS NOT NULL AND h.state != ''
       AND h.country IS NOT NULL AND h.country != ''
     FOR UPDATE OF h SKIP LOCKED

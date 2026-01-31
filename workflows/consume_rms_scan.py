@@ -50,6 +50,9 @@ def get_queue_url() -> str:
         raise ValueError(f"Queue {SQS_QUEUE_NAME} does not exist. Run enqueue_rms_scan.py first.")
 
 
+BATCH_SIZE = 50  # Batch insert threshold
+
+
 class RMSScanConsumer:
     """Consumes ID ranges from SQS and scans them."""
     
@@ -74,6 +77,9 @@ class RMSScanConsumer:
         
         # DB resources
         self._engine_id = None
+        
+        # Batch buffer for hotels
+        self._hotel_buffer: list = []
     
     def request_shutdown(self):
         """Request graceful shutdown."""
@@ -96,49 +102,48 @@ class RMSScanConsumer:
             else:
                 raise ValueError("RMS Cloud booking engine not found in database")
     
-    async def _save_hotel(self, hotel: dict):
-        """Save a found hotel to the database using RMS-specific insert with proper dedup."""
+    async def _collect_hotel(self, hotel: dict):
+        """Collect a found hotel into the buffer, flush when full."""
         if not self.save_to_db:
             return
         
+        self._hotel_buffer.append(hotel)
+        
+        if len(self._hotel_buffer) >= BATCH_SIZE:
+            await self._flush_buffer()
+    
+    async def _flush_buffer(self):
+        """Batch insert all hotels in buffer."""
+        if not self._hotel_buffer:
+            return
+        
         try:
-            from db.client import queries, get_conn
+            from services.ingestor import repo
             
-            slug = hotel.get("slug", str(hotel.get("id", "")))
-            booking_url = hotel.get("booking_url", f"https://bookings.rmscloud.com/Search/Index/{slug}/90/")
+            # Format: (name, source, external_id, external_id_type, booking_engine_id, booking_url, slug, detection_method)
+            records = []
+            for hotel in self._hotel_buffer:
+                slug = hotel.get("slug", str(hotel.get("id", "")))
+                booking_url = hotel.get("url") or f"https://bookings.rmscloud.com/Search/Index/{slug}/90/"
+                records.append((
+                    hotel.get("name", f"Unknown ({slug})"),
+                    "rms_scan",
+                    slug,  # external_id
+                    "rms_scan",  # external_id_type
+                    self._engine_id,
+                    booking_url,
+                    slug,  # engine_property_id
+                    "api",  # detection_method
+                ))
             
-            async with get_conn() as conn:
-                # Insert hotel with external_id for dedup
-                result = await queries.insert_rms_hotel(
-                    conn,
-                    name=hotel.get("name", f"Unknown ({slug})"),
-                    address=hotel.get("address"),
-                    city=None,
-                    state=None,
-                    country=None,
-                    phone=hotel.get("phone"),
-                    email=hotel.get("email"),
-                    website=None,
-                    source="rms_scan",
-                    status=0,
-                    external_id=slug,
-                )
-                
-                if result:
-                    hotel_id = result  # insert_rms_hotel<! returns scalar int
-                    # Link to RMS booking engine
-                    await queries.insert_rms_hotel_booking_engine(
-                        conn,
-                        hotel_id=hotel_id,
-                        booking_engine_id=self._engine_id,
-                        booking_url=booking_url,
-                        enrichment_status=0,
-                    )
-                    self.hotels_saved += 1
-                    logger.debug(f"Saved: {hotel.get('name')} (slug: {slug})")
+            saved = await repo.batch_insert_crawled_hotels(records)
+            self.hotels_saved += saved
+            logger.info(f"Batch inserted {saved} hotels (buffer had {len(self._hotel_buffer)})")
+            
         except Exception as e:
-            if "duplicate" not in str(e).lower():
-                logger.error(f"Error saving hotel: {e}")
+            logger.error(f"Batch insert failed: {e}")
+        finally:
+            self._hotel_buffer = []
     
     async def _scan_range(self, start_id: int, end_id: int) -> int:
         """Scan an ID range and return count of hotels found."""
@@ -151,9 +156,12 @@ class RMSScanConsumer:
             results = await scanner.scan_range(
                 start_id=start_id,
                 end_id=end_id,
-                on_found=self._save_hotel if self.save_to_db else None,
+                on_found=self._collect_hotel if self.save_to_db else None,
             )
             found = len(results)
+        
+        # Flush remaining hotels in buffer
+        await self._flush_buffer()
         
         return found
     
