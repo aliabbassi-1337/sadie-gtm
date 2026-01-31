@@ -352,6 +352,7 @@ class Service(IService):
             "cloudbeds": 3,
             "mews": 4,
             "siteminder": 14,
+            "ipms247": 22,  # JEHS / iPMS / Yanolja Cloud Solution
         }
 
         existing: dict[str, set[str]] = {}
@@ -431,6 +432,10 @@ class Service(IService):
                 return url.split("/reservations/")[-1].split("/")[0].split("?")[0]
             elif "/properties/" in url:
                 return url.split("/properties/")[-1].split("/")[0].split("?")[0]
+        elif engine == "ipms247":
+            # ipms247/Yanolja: /booking/book-rooms-SLUG
+            if "/booking/book-rooms-" in url:
+                return url.split("/booking/book-rooms-")[-1].split("/")[0].split("?")[0]
 
         return None
 

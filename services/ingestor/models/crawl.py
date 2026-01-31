@@ -16,6 +16,7 @@ URL_PATTERNS = {
     "mews": "https://app.mews.com/distributor/{slug}",
     "rms": "https://bookings.rmscloud.com/{slug}",
     "siteminder": "https://{slug}.book-onlinenow.net/",
+    "ipms247": "https://live.ipms247.com/booking/book-rooms-{slug}",
 }
 
 
