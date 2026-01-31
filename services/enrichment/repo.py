@@ -957,3 +957,56 @@ async def batch_update_mews_enrichment(
         count = int(result.split()[-1]) if result else len(updates)
     
     return count
+
+
+# ============================================================================
+# LOCATION NORMALIZATION FUNCTIONS
+# ============================================================================
+
+async def get_normalization_status() -> dict:
+    """Get counts of data needing location normalization."""
+    async with get_conn() as conn:
+        result = await queries.get_normalization_status(conn)
+        return dict(result) if result else {}
+
+
+async def get_country_counts() -> list:
+    """Get counts of each country code that needs normalization."""
+    async with get_conn() as conn:
+        results = await queries.get_country_counts(conn)
+        return [(r['country'], r['cnt']) for r in results]
+
+
+async def get_states_with_zips() -> list:
+    """Get distinct states that have zip codes attached."""
+    async with get_conn() as conn:
+        results = await queries.get_states_with_zips(conn)
+        return [r['state'] for r in results]
+
+
+async def normalize_country(old_country: str, new_country: str) -> int:
+    """Normalize a country code to full name. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await queries.normalize_country(conn, old_country=old_country, new_country=new_country)
+        return int(result.split()[-1]) if result else 0
+
+
+async def normalize_us_state(old_state: str, new_state: str) -> int:
+    """Normalize a US state code to full name. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await queries.normalize_us_state(conn, old_state=old_state, new_state=new_state)
+        return int(result.split()[-1]) if result else 0
+
+
+async def fix_australian_state(old_state: str, new_state: str) -> int:
+    """Fix Australian state incorrectly in USA. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await queries.fix_australian_state(conn, old_state=old_state, new_state=new_state)
+        return int(result.split()[-1]) if result else 0
+
+
+async def fix_state_with_zip(old_state: str, new_state: str) -> int:
+    """Fix state that has zip code attached. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await queries.fix_state_with_zip(conn, old_state=old_state, new_state=new_state)
+        return int(result.split()[-1]) if result else 0

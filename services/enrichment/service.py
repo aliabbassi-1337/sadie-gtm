@@ -1823,3 +1823,107 @@ class Service(IService):
 
         except Exception as e:
             return (hotel_id, False, None, str(e)[:100])
+
+
+    # =========================================================================
+    # LOCATION NORMALIZATION
+    # =========================================================================
+
+    # Country code to full name mapping
+    COUNTRY_NAMES = {
+        "USA": "United States", "US": "United States", "AU": "Australia",
+        "UK": "United Kingdom", "GB": "United Kingdom", "NZ": "New Zealand",
+        "DE": "Germany", "FR": "France", "ES": "Spain", "IT": "Italy",
+        "MX": "Mexico", "JP": "Japan", "CN": "China", "IN": "India",
+        "BR": "Brazil", "AR": "Argentina", "CL": "Chile", "CO": "Colombia",
+        "PE": "Peru", "ZA": "South Africa", "EG": "Egypt", "MA": "Morocco",
+        "KE": "Kenya", "TH": "Thailand", "VN": "Vietnam", "ID": "Indonesia",
+        "MY": "Malaysia", "SG": "Singapore", "PH": "Philippines", "KR": "South Korea",
+        "TW": "Taiwan", "HK": "Hong Kong", "AE": "United Arab Emirates",
+        "IL": "Israel", "TR": "Turkey", "GR": "Greece", "PT": "Portugal",
+        "NL": "Netherlands", "BE": "Belgium", "CH": "Switzerland", "AT": "Austria",
+        "SE": "Sweden", "NO": "Norway", "DK": "Denmark", "FI": "Finland",
+        "PL": "Poland", "CZ": "Czech Republic", "HU": "Hungary", "RO": "Romania",
+        "IE": "Ireland", "PR": "Puerto Rico",
+    }
+
+    # US state codes to full names
+    US_STATE_NAMES = {
+        "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+        "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+        "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+        "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+        "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+        "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+        "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+        "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+        "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+        "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+        "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+        "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+        "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+        "PR": "Puerto Rico", "VI": "Virgin Islands", "GU": "Guam",
+    }
+
+    # Australian state codes to full names
+    AU_STATE_NAMES = {
+        "NSW": "New South Wales", "VIC": "Victoria", "QLD": "Queensland",
+        "WA": "Western Australia", "SA": "South Australia", "TAS": "Tasmania",
+        "ACT": "Australian Capital Territory", "NT": "Northern Territory",
+    }
+
+    async def get_normalization_status(self) -> dict:
+        """Get counts of data needing location normalization."""
+        return await repo.get_normalization_status()
+
+    async def normalize_locations(self, dry_run: bool = False) -> dict:
+        """
+        Normalize all location data (countries, states).
+        
+        Returns dict with counts of fixed records.
+        """
+        stats = {"australian_fixed": 0, "zips_fixed": 0, "countries_fixed": 0, "states_fixed": 0}
+        
+        # Fix Australian hotels incorrectly in USA
+        for code, name in self.AU_STATE_NAMES.items():
+            if dry_run:
+                continue
+            fixed = await repo.fix_australian_state(code, name)
+            if fixed > 0:
+                logger.info(f"Fixed {fixed} hotels: state={code} -> country=Australia, state={name}")
+                stats["australian_fixed"] += fixed
+        
+        # Fix states with zip codes
+        states_with_zips = await repo.get_states_with_zips()
+        for old_state in states_with_zips:
+            code = old_state.split()[0]
+            new_state = self.US_STATE_NAMES.get(code, code)
+            if dry_run:
+                continue
+            fixed = await repo.fix_state_with_zip(old_state, new_state)
+            if fixed > 0:
+                logger.info(f"Fixed {fixed} hotels: '{old_state}' -> '{new_state}'")
+                stats["zips_fixed"] += fixed
+        
+        # Normalize country codes
+        for code, name in self.COUNTRY_NAMES.items():
+            if code in ("CA", "SA"):  # Skip ambiguous codes
+                continue
+            if dry_run:
+                continue
+            fixed = await repo.normalize_country(code, name)
+            if fixed > 0:
+                logger.info(f"Normalized {fixed} hotels: country='{code}' -> '{name}'")
+                stats["countries_fixed"] += fixed
+        
+        # Normalize US state codes
+        for code, name in self.US_STATE_NAMES.items():
+            if dry_run:
+                continue
+            fixed = await repo.normalize_us_state(code, name)
+            if fixed > 0:
+                logger.debug(f"Normalized {fixed} hotels: state='{code}' -> '{name}'")
+                stats["states_fixed"] += fixed
+        
+        stats["total"] = sum(stats.values())
+        return stats
