@@ -23,19 +23,24 @@ from db.client import init_db, close_db, get_conn, queries
 from lib.siteminder.api_client import SiteMinderClient, extract_channel_code
 
 
-async def get_pending_siteminder_hotels(limit: int = 1000) -> List[Tuple[int, str, str]]:
+async def get_pending_siteminder_hotels(limit: int = 1000, retry_failed: bool = False) -> List[Tuple[int, str, str]]:
     """Get SiteMinder hotels needing enrichment.
+    
+    Args:
+        limit: Max hotels to return
+        retry_failed: If True, include previously failed hotels (status=-1)
     
     Returns list of (hotel_id, booking_url, current_name).
     """
     async with get_conn() as conn:
-        results = await conn.fetch('''
+        status_filter = "IN (0, -1)" if retry_failed else "= 0"
+        results = await conn.fetch(f'''
             SELECT h.id, hbe.booking_url, h.name
             FROM sadie_gtm.hotels h
             JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
             JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
             WHERE be.name = 'SiteMinder'
-              AND hbe.enrichment_status = 0
+              AND hbe.enrichment_status {status_filter}
               AND hbe.booking_url IS NOT NULL
               AND hbe.booking_url LIKE '%direct-book.com%'
             ORDER BY h.id
@@ -83,13 +88,14 @@ async def run(
     limit: int = 1000,
     concurrency: int = 20,
     batch_size: int = 50,
+    retry_failed: bool = False,
 ):
     """Run SiteMinder enrichment."""
     await init_db()
     
     try:
         # Get pending hotels
-        hotels = await get_pending_siteminder_hotels(limit)
+        hotels = await get_pending_siteminder_hotels(limit, retry_failed=retry_failed)
         
         if not hotels:
             logger.info("No SiteMinder hotels pending enrichment")
@@ -161,6 +167,7 @@ def main():
     parser.add_argument("--limit", "-l", type=int, default=1000, help="Max hotels to process")
     parser.add_argument("--concurrency", "-c", type=int, default=20, help="Concurrent API calls")
     parser.add_argument("--batch-size", "-b", type=int, default=50, help="Batch size for DB updates")
+    parser.add_argument("--retry-failed", "-r", action="store_true", help="Retry previously failed hotels")
     
     args = parser.parse_args()
     
@@ -168,6 +175,7 @@ def main():
         limit=args.limit,
         concurrency=args.concurrency,
         batch_size=args.batch_size,
+        retry_failed=args.retry_failed,
     ))
 
 
