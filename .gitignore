@@ -46,3 +46,4 @@ SADIE-GTM-BLUEPRINT.png
 infra/ec2/generated/
 .claude/
 *.xlsx
+context/prompt.md
