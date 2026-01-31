@@ -44,6 +44,6 @@ CONFIG = CSVIngestorConfig(
     # Defaults
     default_state="DC",
     default_category="hotel",
-    default_country="USA",
+    default_country="United States",
     default_source="dc_gis",
 )

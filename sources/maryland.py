@@ -41,6 +41,6 @@ CONFIG = CSVIngestorConfig(
     # Defaults
     default_state="MD",
     default_category="hotel",
-    default_country="USA",
+    default_country="United States",
     default_source="md_sdat_cama",
 )

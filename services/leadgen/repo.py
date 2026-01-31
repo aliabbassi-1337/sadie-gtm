@@ -30,7 +30,7 @@ async def insert_hotel(
     address: Optional[str] = None,
     city: Optional[str] = None,
     state: Optional[str] = None,
-    country: str = "USA",
+    country: str = "United States",
     rating: Optional[float] = None,
     review_count: Optional[int] = None,
     status: int = 0,

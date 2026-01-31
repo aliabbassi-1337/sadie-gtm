@@ -85,7 +85,7 @@ class CSVIngestorConfig(BaseModel):
     default_county: Optional[str] = Field(
         default=None, description="Default county for all records (if not in CSV)"
     )
-    default_country: str = Field(default="USA", description="Default country")
+    default_country: str = Field(default="United States", description="Default country")
     default_source: Optional[str] = Field(
         default=None, description="Source name (defaults to config name)"
     )

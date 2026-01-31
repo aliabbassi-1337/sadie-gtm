@@ -62,7 +62,7 @@ class TexasHotel(BaseRecord):
     external_id_type: str = "texas_hot"
     source: str = "texas_hot"
     category: str = "hotel"
-    country: str = "USA"
+    country: str = "United States"
 
     @model_validator(mode="after")
     def compute_external_id(self) -> "TexasHotel":

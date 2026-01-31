@@ -45,6 +45,6 @@ CONFIG = CSVIngestorConfig(
     # Defaults
     default_state="NY",
     default_category="hotel",
-    default_country="USA",
+    default_country="United States",
     default_source="nyc_dof",
 )

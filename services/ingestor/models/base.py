@@ -20,7 +20,7 @@ class BaseRecord(BaseModel):
     state: Optional[str] = None
     zip_code: Optional[str] = None
     county: Optional[str] = None
-    country: str = "USA"
+    country: str = "United States"
     lat: Optional[float] = None
     lon: Optional[float] = None
 

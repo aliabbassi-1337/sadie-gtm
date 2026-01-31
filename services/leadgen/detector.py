@@ -1438,7 +1438,7 @@ class HotelProcessor:
                 if len(parts) == 2:
                     result.scraped_state = parts[0].strip()
                     country = parts[1].strip().upper()
-                    result.scraped_country = 'USA' if country in ['US', 'USA'] else country
+                    result.scraped_country='United States' if country in ['US', 'USA'] else country
                 else:
                     result.scraped_state = state_country
             
