@@ -38,11 +38,25 @@ RATE_LIMIT_THRESHOLD = 10  # Consecutive failures before switching to Brightdata
 RATE_LIMIT_WINDOW = 30  # Seconds to track failures
 
 
-def _get_brightdata_proxy() -> Optional[str]:
-    """Build Brightdata proxy URL if credentials are available."""
+def _get_brightdata_proxy(prefer_cheap: bool = True) -> Optional[str]:
+    """Build Brightdata proxy URL if credentials are available.
+    
+    Args:
+        prefer_cheap: If True, prefer residential zone (~$5.5/GB) over unlocker (~$3/request)
+    """
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    
+    # Try residential zone first (cheaper)
+    if prefer_cheap:
+        res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
+        res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
+        if all([res_zone, res_password, customer_id]):
+            username = f"brd-customer-{customer_id}-zone-{res_zone}"
+            return f"http://{username}:{res_password}@brd.superproxy.io:33335"
+    
+    # Fall back to unlocker zone
     zone = os.getenv("BRIGHTDATA_ZONE", "")
     password = os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
-    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
     
     if all([zone, password, customer_id]):
         username = f"brd-customer-{customer_id}-zone-{zone}"
