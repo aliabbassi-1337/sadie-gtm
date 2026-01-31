@@ -2,9 +2,14 @@
 
 Scans RMS booking engine IDs to find valid hotel URLs.
 Uses OnlineApi/GetSearchOptions for fast scanning (~100ms per ID vs 15s with Playwright).
+
+Supports optional Brightdata proxy integration for avoiding rate limits:
+    async with RMSScanner(use_brightdata=True) as scanner:
+        results = await scanner.scan_range(1, 50000)
 """
 
 import asyncio
+import os
 import re
 from typing import Optional, Protocol, runtime_checkable, Callable, Awaitable
 
@@ -24,6 +29,18 @@ IBE_SERVERS = [
 ]
 
 
+def _get_brightdata_proxy() -> Optional[str]:
+    """Build Brightdata proxy URL if credentials are available."""
+    zone = os.getenv("BRIGHTDATA_ZONE", "")
+    password = os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    
+    if all([zone, password, customer_id]):
+        username = f"brd-customer-{customer_id}-zone-{zone}"
+        return f"http://{username}:{password}@brd.superproxy.io:33335"
+    return None
+
+
 @runtime_checkable
 class IRMSScanner(Protocol):
     """RMS Scanner interface."""
@@ -34,7 +51,12 @@ class RMSScanner:
     """Fast RMS ID scanner using OnlineApi (no browser needed).
     
     Usage:
+        # Standard scanning
         async with RMSScanner(concurrency=20, delay=0.1) as scanner:
+            results = await scanner.scan_range(1, 50000)
+        
+        # With Brightdata proxy (requires env vars)
+        async with RMSScanner(use_brightdata=True) as scanner:
             results = await scanner.scan_range(1, 50000)
     """
     
@@ -43,15 +65,33 @@ class RMSScanner:
         concurrency: int = 20,
         delay: float = 0.1,
         timeout: float = API_TIMEOUT,
+        use_brightdata: bool = False,
     ):
         self.concurrency = concurrency
         self.delay = delay
         self.timeout = timeout
+        self.use_brightdata = use_brightdata
         self._client: Optional[httpx.AsyncClient] = None
         self._semaphore: Optional[asyncio.Semaphore] = None
+        self._proxy_url: Optional[str] = None
     
     async def __aenter__(self):
-        self._client = httpx.AsyncClient(timeout=self.timeout)
+        # Configure proxy if Brightdata is enabled
+        if self.use_brightdata:
+            self._proxy_url = _get_brightdata_proxy()
+            if self._proxy_url:
+                logger.info("Using Brightdata proxy for RMS scanning")
+                self._client = httpx.AsyncClient(
+                    timeout=self.timeout,
+                    proxy=self._proxy_url,
+                    verify=False,  # Brightdata uses their own SSL cert
+                )
+            else:
+                logger.warning("Brightdata requested but credentials not found, using direct connection")
+                self._client = httpx.AsyncClient(timeout=self.timeout)
+        else:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        
         self._semaphore = asyncio.Semaphore(self.concurrency)
         return self
     

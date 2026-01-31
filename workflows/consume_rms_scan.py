@@ -16,6 +16,14 @@ Usage:
     
     # Single message mode (process one chunk and exit)
     uv run python -m workflows.consume_rms_scan --max-messages 1
+    
+    # Use Brightdata proxy to avoid rate limits
+    uv run python -m workflows.consume_rms_scan --brightdata
+
+Environment variables for Brightdata:
+    BRIGHTDATA_ZONE: Zone name from Brightdata dashboard
+    BRIGHTDATA_ZONE_PASSWORD: Zone password
+    BRIGHTDATA_CUSTOMER_ID: Customer ID
 """
 
 import argparse
@@ -61,10 +69,12 @@ class RMSScanConsumer:
         concurrency: int = 20,
         delay: float = 0.1,
         save_to_db: bool = True,
+        use_brightdata: bool = False,
     ):
         self.concurrency = concurrency
         self.delay = delay
         self.save_to_db = save_to_db
+        self.use_brightdata = use_brightdata
         self.queue_url = get_queue_url()
         self.sqs = boto3.client("sqs", region_name=AWS_REGION)
         self._shutdown = False
@@ -152,6 +162,7 @@ class RMSScanConsumer:
         async with RMSScanner(
             concurrency=self.concurrency,
             delay=self.delay,
+            use_brightdata=self.use_brightdata,
         ) as scanner:
             results = await scanner.scan_range(
                 start_id=start_id,
@@ -252,6 +263,7 @@ async def main():
     parser.add_argument("--delay", type=float, default=0.1, help="Delay between requests (default: 0.1s)")
     parser.add_argument("--max-messages", type=int, default=0, help="Max messages to process (0=infinite)")
     parser.add_argument("--no-db", action="store_true", help="Don't save to database (dry run)")
+    parser.add_argument("--brightdata", action="store_true", help="Use Brightdata proxy (requires env vars)")
     
     args = parser.parse_args()
     
@@ -259,6 +271,7 @@ async def main():
         concurrency=args.concurrency,
         delay=args.delay,
         save_to_db=not args.no_db,
+        use_brightdata=args.brightdata,
     )
     
     # Handle shutdown signals
