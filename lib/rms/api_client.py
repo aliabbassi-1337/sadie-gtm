@@ -2,8 +2,13 @@
 
 Fast API-based extraction without Playwright.
 Falls back to HTML parsing, then Playwright scraper.
+
+Supports optional Brightdata proxy integration:
+    client = RMSApiClient(use_brightdata=True)
+    data = await client.extract(slug)
 """
 
+import os
 import re
 from typing import Optional
 
@@ -18,6 +23,18 @@ from lib.rms.utils import normalize_country, decode_cloudflare_email
 
 # API timeout (increased for slow connections)
 API_TIMEOUT = 20.0
+
+
+def _get_brightdata_proxy() -> Optional[str]:
+    """Build Brightdata proxy URL if credentials are available."""
+    zone = os.getenv("BRIGHTDATA_ZONE", "")
+    password = os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    
+    if all([zone, password, customer_id]):
+        username = f"brd-customer-{customer_id}-zone-{zone}"
+        return f"http://{username}:{password}@brd.superproxy.io:33335"
+    return None
 
 # RMS API base URLs by server
 API_SERVERS = [
@@ -57,10 +74,35 @@ class RMSApiResponse(BaseModel):
 
 
 class RMSApiClient:
-    """Fast RMS data extraction via API (no browser needed)."""
+    """Fast RMS data extraction via API (no browser needed).
     
-    def __init__(self, timeout: float = API_TIMEOUT):
+    Usage:
+        client = RMSApiClient()
+        data = await client.extract(slug)
+        
+        # With Brightdata proxy:
+        client = RMSApiClient(use_brightdata=True)
+        data = await client.extract(slug)
+    """
+    
+    def __init__(self, timeout: float = API_TIMEOUT, use_brightdata: bool = False):
         self.timeout = timeout
+        self.use_brightdata = use_brightdata
+        self._proxy_url: Optional[str] = None
+        if use_brightdata:
+            self._proxy_url = _get_brightdata_proxy()
+            if self._proxy_url:
+                logger.debug("RMS API client using Brightdata proxy")
+            else:
+                logger.warning("Brightdata requested but credentials not found")
+    
+    def _get_client_kwargs(self) -> dict:
+        """Get httpx client kwargs with optional proxy."""
+        kwargs = {"timeout": self.timeout}
+        if self._proxy_url:
+            kwargs["proxy"] = self._proxy_url
+            kwargs["verify"] = False
+        return kwargs
     
     async def extract(self, slug: str, server: str = "bookings12.rmscloud.com") -> Optional[ExtractedRMSData]:
         """Extract hotel data from RMS API.
@@ -202,7 +244,7 @@ class RMSApiClient:
     
     async def _fetch_api_data(self, slug: str, server: str) -> Optional[RMSApiResponse]:
         """Fetch data from RMS API endpoints."""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(**self._get_client_kwargs()) as client:
             response = RMSApiResponse()
             
             # 1. First try OnlineApi/GetSearchOptions (richest data - has address, phone, email)
@@ -364,7 +406,7 @@ class RMSApiClient:
         url = f"https://{server}/Search/Index/{slug}/90/"
         
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(**self._get_client_kwargs()) as client:
                 # First check the redirect without following
                 resp = await client.get(
                     url,

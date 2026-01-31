@@ -5,15 +5,31 @@ Uses a hybrid approach:
 2. Use fast httpx API calls for all hotels
 3. Refresh session when expired
 
+Supports optional Brightdata proxy integration:
+    client = MewsApiClient(use_brightdata=True)
+
 The API endpoint is: https://api.mews.com/api/bookingEngine/v1/configurations/get
 """
 
 import asyncio
+import os
 import time
 import httpx
 from typing import Optional
 from pydantic import BaseModel
 from loguru import logger
+
+
+def _get_brightdata_proxy() -> Optional[str]:
+    """Build Brightdata proxy URL if credentials are available."""
+    zone = os.getenv("BRIGHTDATA_ZONE", "")
+    password = os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    
+    if all([zone, password, customer_id]):
+        username = f"brd-customer-{customer_id}-zone-{zone}"
+        return f"http://{username}:{password}@brd.superproxy.io:33335"
+    return None
 
 # Rate limiting - Mews API is EXTREMELY strict, needs 10+ seconds between calls
 _last_api_call = 0
@@ -57,14 +73,26 @@ SESSION_TTL = 30 * 60
 
 
 class MewsApiClient:
-    """Client for Mews booking engine API using hybrid Playwright + httpx approach."""
+    """Client for Mews booking engine API using hybrid Playwright + httpx approach.
+    
+    Usage:
+        client = MewsApiClient()
+        await client.initialize()
+        data = await client.extract(slug)
+        await client.close()
+        
+        # With Brightdata proxy:
+        client = MewsApiClient(use_brightdata=True)
+    """
     
     BOOKING_URL_TEMPLATE = "https://app.mews.com/distributor/{slug}"
     API_URL = "https://api.mews.com/api/bookingEngine/v1/configurations/get"
     
-    def __init__(self, timeout: float = 20.0):
+    def __init__(self, timeout: float = 20.0, use_brightdata: bool = False):
         self.timeout = timeout
+        self.use_brightdata = use_brightdata
         self._http_client: Optional[httpx.AsyncClient] = None
+        self._proxy_url: Optional[str] = None
         # For session refresh via Playwright
         self._browser = None
         self._playwright = None
@@ -72,7 +100,21 @@ class MewsApiClient:
     async def initialize(self):
         """Initialize HTTP client."""
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=self.timeout)
+            # Configure proxy if Brightdata is enabled
+            if self.use_brightdata:
+                self._proxy_url = _get_brightdata_proxy()
+                if self._proxy_url:
+                    logger.debug("Mews client using Brightdata proxy")
+                    self._http_client = httpx.AsyncClient(
+                        timeout=self.timeout,
+                        proxy=self._proxy_url,
+                        verify=False,
+                    )
+                else:
+                    logger.warning("Brightdata requested but credentials not found")
+                    self._http_client = httpx.AsyncClient(timeout=self.timeout)
+            else:
+                self._http_client = httpx.AsyncClient(timeout=self.timeout)
         if _session_cache["lock"] is None:
             _session_cache["lock"] = asyncio.Lock()
     

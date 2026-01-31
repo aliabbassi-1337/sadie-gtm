@@ -89,6 +89,7 @@ async def run(
     concurrency: int = 20,
     batch_size: int = 50,
     retry_failed: bool = False,
+    use_brightdata: bool = False,
 ):
     """Run SiteMinder enrichment."""
     await init_db()
@@ -102,13 +103,15 @@ async def run(
             return
         
         logger.info(f"Found {len(hotels)} SiteMinder hotels to enrich")
+        if use_brightdata:
+            logger.info("Using Brightdata proxy for requests")
         
         # Stats
         enriched = 0
         failed = 0
         updates = []
         
-        async with SiteMinderClient() as client:
+        async with SiteMinderClient(use_brightdata=use_brightdata) as client:
             semaphore = asyncio.Semaphore(concurrency)
             
             async def process_hotel(hotel_id: int, booking_url: str, current_name: str):
@@ -168,6 +171,7 @@ def main():
     parser.add_argument("--concurrency", "-c", type=int, default=20, help="Concurrent API calls")
     parser.add_argument("--batch-size", "-b", type=int, default=50, help="Batch size for DB updates")
     parser.add_argument("--retry-failed", "-r", action="store_true", help="Retry previously failed hotels")
+    parser.add_argument("--brightdata", action="store_true", help="Use Brightdata proxy for requests")
     
     args = parser.parse_args()
     
@@ -176,6 +180,7 @@ def main():
         concurrency=args.concurrency,
         batch_size=args.batch_size,
         retry_failed=args.retry_failed,
+        use_brightdata=args.brightdata,
     ))
 
 

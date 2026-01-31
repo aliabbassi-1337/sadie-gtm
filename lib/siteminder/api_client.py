@@ -7,8 +7,13 @@ Usage:
     async with SiteMinderClient() as client:
         data = await client.get_hotel_data("thehindsheaddirect")
         print(data.name, data.website)
+    
+    # With Brightdata proxy (for bypassing CloudFront blocks):
+    async with SiteMinderClient(use_brightdata=True) as client:
+        data = await client.get_hotel_data("thehindsheaddirect")
 """
 
+import os
 import re
 from typing import Optional
 from urllib.parse import urlparse, quote
@@ -64,6 +69,19 @@ def extract_channel_code(booking_url: str) -> Optional[str]:
     return None
 
 
+def _get_brightdata_proxy() -> Optional[str]:
+    """Build Brightdata proxy URL if credentials are available."""
+    zone = os.getenv("BRIGHTDATA_ZONE", "")
+    zone_password = os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    
+    if not all([zone, zone_password, customer_id]):
+        return None
+    
+    username = f"brd-customer-{customer_id}-zone-{zone}"
+    return f"http://{username}:{zone_password}@brd.superproxy.io:33335"
+
+
 class SiteMinderClient:
     """Async client for SiteMinder GraphQL API.
     
@@ -71,19 +89,33 @@ class SiteMinderClient:
         async with SiteMinderClient() as client:
             data = await client.get_hotel_data("thehindsheaddirect")
             
-        # Or from URL:
-        async with SiteMinderClient() as client:
-            data = await client.get_hotel_data_from_url(
-                "https://direct-book.com/properties/thehindsheaddirect"
-            )
+        # With Brightdata proxy (for bypassing CloudFront blocks):
+        async with SiteMinderClient(use_brightdata=True) as client:
+            data = await client.get_hotel_data("thehindsheaddirect")
     """
     
-    def __init__(self, timeout: float = API_TIMEOUT):
+    def __init__(self, timeout: float = API_TIMEOUT, use_brightdata: bool = False):
         self.timeout = timeout
+        self.use_brightdata = use_brightdata
         self._client: Optional[httpx.AsyncClient] = None
+        self._proxy_url: Optional[str] = None
     
     async def __aenter__(self):
-        self._client = httpx.AsyncClient(timeout=self.timeout)
+        # Configure proxy if requested and available
+        if self.use_brightdata:
+            self._proxy_url = _get_brightdata_proxy()
+            if self._proxy_url:
+                logger.debug("SiteMinder using Brightdata proxy")
+                self._client = httpx.AsyncClient(
+                    timeout=self.timeout,
+                    proxy=self._proxy_url,
+                    verify=False,  # Brightdata uses their own SSL cert
+                )
+            else:
+                logger.warning("Brightdata requested but credentials not found, using direct connection")
+                self._client = httpx.AsyncClient(timeout=self.timeout)
+        else:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
         return self
     
     async def __aexit__(self, *args):
