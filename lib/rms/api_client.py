@@ -25,21 +25,22 @@ from lib.rms.utils import normalize_country, decode_cloudflare_email
 API_TIMEOUT = 20.0
 
 
-def _get_brightdata_proxy(use_datacenter: bool = True) -> Optional[str]:
+def _get_brightdata_proxy(prefer_cheap: bool = True) -> Optional[str]:
     """Build Brightdata proxy URL if credentials are available.
     
     Args:
-        use_datacenter: If True, prefer datacenter zone (cheaper) over unlocker.
+        prefer_cheap: If True, prefer residential zone (cheaper) over unlocker.
+                      Residential: ~$5.5/GB, Unlocker: ~$3/request
     """
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
     
-    # Try datacenter zone first (cheaper for simple API calls)
-    if use_datacenter:
-        dc_zone = os.getenv("BRIGHTDATA_DATACENTER_ZONE", "")
-        dc_password = os.getenv("BRIGHTDATA_DATACENTER_PASSWORD", "")
-        if all([dc_zone, dc_password, customer_id]):
-            username = f"brd-customer-{customer_id}-zone-{dc_zone}"
-            return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
+    # Try residential zone first (cheaper for simple API calls)
+    if prefer_cheap:
+        res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "sadie_res")
+        res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
+        if all([res_password, customer_id]):
+            username = f"brd-customer-{customer_id}-zone-{res_zone}"
+            return f"http://{username}:{res_password}@brd.superproxy.io:33335"
     
     # Fall back to unlocker zone
     zone = os.getenv("BRIGHTDATA_ZONE", "")
