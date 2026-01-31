@@ -1074,11 +1074,21 @@ RETURNING id,
 
 
 -- name: get_distinct_states
--- Get all distinct US states that have hotels
+-- Get all distinct US states that have hotels (50 states + DC + territories)
 SELECT DISTINCT state
 FROM sadie_gtm.hotels
 WHERE state IS NOT NULL AND state != ''
   AND country = 'United States'
+  AND state IN (
+    'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut',
+    'Delaware', 'District of Columbia', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois',
+    'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts',
+    'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada',
+    'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota',
+    'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota',
+    'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia',
+    'Wisconsin', 'Wyoming', 'Puerto Rico'
+  )
 ORDER BY state;
 
 
