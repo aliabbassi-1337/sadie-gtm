@@ -207,7 +207,7 @@ class TestGenericCSVIngestor:
             ],
             external_id_columns=["external_id"],
             default_category="hotel",
-            default_country="USA",
+            default_country="United States",
         )
 
         ingestor = GenericCSVIngestor(config)

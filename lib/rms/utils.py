@@ -11,12 +11,13 @@ def decode_cloudflare_email(encoded: str) -> str:
 
 
 def normalize_country(country: str) -> str:
-    """Normalize country name to 2-letter code."""
+    """Normalize country name to full name."""
     if not country:
         return ""
     country_map = {
-        "united states": "USA", "us": "USA", "usa": "USA",
-        "australia": "AU", "canada": "CA", "new zealand": "NZ",
-        "united kingdom": "GB", "uk": "GB", "mexico": "MX",
+        "united states": "United States", "us": "United States", "usa": "United States",
+        "australia": "Australia", "canada": "Canada", "new zealand": "New Zealand",
+        "united kingdom": "United Kingdom", "uk": "United Kingdom", "gb": "United Kingdom",
+        "mexico": "Mexico",
     }
-    return country_map.get(country.lower().strip(), country.upper()[:2])
+    return country_map.get(country.lower().strip(), country)

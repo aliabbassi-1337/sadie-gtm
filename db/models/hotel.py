@@ -20,7 +20,7 @@ class Hotel(BaseModel):
     # Location
     city: Optional[str] = None
     state: Optional[str] = None
-    country: str = "USA"
+    country: str = "United States"
 
     @field_validator('country', mode='before')
     @classmethod

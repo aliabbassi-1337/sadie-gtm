@@ -42,6 +42,6 @@ CONFIG = CSVIngestorConfig(
     # Defaults
     default_state="CA",
     default_category="hotel",
-    default_country="USA",
+    default_country="United States",
     default_source="sf_assessor",
 )

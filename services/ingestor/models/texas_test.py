@@ -105,7 +105,7 @@ class TestTexasHotel:
         assert hotel.external_id_type == "texas_hot"
         assert hotel.source == "texas_hot"
         assert hotel.category == "hotel"
-        assert hotel.country == "USA"
+        assert hotel.country == "United States"
 
     @pytest.mark.no_db
     def test_from_csv_row(self):

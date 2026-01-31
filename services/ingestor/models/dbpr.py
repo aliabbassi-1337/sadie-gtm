@@ -76,7 +76,7 @@ class DBPRLicense(BaseRecord):
 
     # Override base fields with defaults
     external_id_type: str = "dbpr_license"
-    country: str = "USA"
+    country: str = "United States"
 
     @classmethod
     def from_csv_row(cls, row: dict) -> Optional["DBPRLicense"]:

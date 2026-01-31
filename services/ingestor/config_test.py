@@ -52,10 +52,10 @@ class TestColumnMapping:
         mapping = ColumnMapping(
             column="COUNTRY",
             field="country",
-            default="USA",
+            default="United States",
         )
 
-        assert mapping.default == "USA"
+        assert mapping.default == "United States"
 
 
 class TestCSVIngestorConfig:
@@ -165,7 +165,7 @@ class TestCSVIngestorConfig:
         assert config.delimiter == ","
         assert config.quotechar == '"'
         assert config.external_id_separator == ":"
-        assert config.default_country == "USA"
+        assert config.default_country == "United States"
         assert config.use_cache is True
 
 

@@ -42,6 +42,6 @@ CONFIG = CSVIngestorConfig(
     default_state="CA",
     default_county="Los Angeles",
     default_category="hotel",
-    default_country="USA",
+    default_country="United States",
     default_source="la_county",
 )

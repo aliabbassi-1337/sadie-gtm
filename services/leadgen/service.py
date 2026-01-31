@@ -409,7 +409,7 @@ class Service(IService):
                 "address": h.address,
                 "city": h.city,
                 "state": h.state,
-                "country": "USA",
+                "country": "United States",
                 "rating": h.rating,
                 "review_count": h.review_count,
                 "status": 0,  # scraped status
@@ -1879,7 +1879,7 @@ class Service(IService):
                 
                 slug = hotel.get("slug", "")
                 city = hotel.get("city")
-                country = hotel.get("country", "USA")
+                country = hotel.get("country", "United States")
                 booking_url = hotel.get("booking_url") or f"https://hotels.cloudbeds.com/reservation/{slug}"
                 external_id = hotel.get("external_id") or f"cloudbeds_{slug}"
                 

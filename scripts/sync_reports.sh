@@ -17,7 +17,7 @@ if [ $# -gt 0 ]; then
     STATES="$@"
 else
     # Get all state directories from S3
-    STATES=$(s5cmd ls "$S3_BASE/USA/*" | grep -E '/$' | sed 's|.*/USA/||' | tr -d '/')
+    STATES=$(s5cmd ls "$S3_BASE/USA/" | awk '/DIR/ {print $NF}' | tr -d '/')
 fi
 
 echo "=== Syncing from S3 to OneDrive (using s5cmd) ==="
