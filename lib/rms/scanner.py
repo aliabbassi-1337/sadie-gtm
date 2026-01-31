@@ -3,7 +3,12 @@
 Scans RMS booking engine IDs to find valid hotel URLs.
 Uses OnlineApi/GetSearchOptions for fast scanning (~100ms per ID vs 15s with Playwright).
 
-Supports optional Brightdata proxy integration for avoiding rate limits:
+Supports automatic Brightdata fallback on rate limiting:
+    async with RMSScanner(auto_brightdata=True) as scanner:
+        # Starts direct, switches to Brightdata if blocked
+        results = await scanner.scan_range(1, 50000)
+
+Or force Brightdata from the start:
     async with RMSScanner(use_brightdata=True) as scanner:
         results = await scanner.scan_range(1, 50000)
 """
@@ -28,6 +33,10 @@ IBE_SERVERS = [
     "ibe14.rmscloud.com",
 ]
 
+# Rate limit detection thresholds
+RATE_LIMIT_THRESHOLD = 10  # Consecutive failures before switching to Brightdata
+RATE_LIMIT_WINDOW = 30  # Seconds to track failures
+
 
 def _get_brightdata_proxy() -> Optional[str]:
     """Build Brightdata proxy URL if credentials are available."""
@@ -41,6 +50,20 @@ def _get_brightdata_proxy() -> Optional[str]:
     return None
 
 
+def _is_rate_limit_error(status_code: int, error: Optional[Exception] = None) -> bool:
+    """Check if error indicates rate limiting."""
+    # HTTP 429 = Too Many Requests
+    if status_code == 429:
+        return True
+    # HTTP 403 = Forbidden (often used for IP blocking)
+    if status_code == 403:
+        return True
+    # Connection errors often mean IP is blocked
+    if error and isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return True
+    return False
+
+
 @runtime_checkable
 class IRMSScanner(Protocol):
     """RMS Scanner interface."""
@@ -51,12 +74,16 @@ class RMSScanner:
     """Fast RMS ID scanner using OnlineApi (no browser needed).
     
     Usage:
-        # Standard scanning
-        async with RMSScanner(concurrency=20, delay=0.1) as scanner:
+        # Standard scanning (starts direct, auto-switches to Brightdata if blocked)
+        async with RMSScanner(auto_brightdata=True) as scanner:
             results = await scanner.scan_range(1, 50000)
         
-        # With Brightdata proxy (requires env vars)
+        # Force Brightdata from the start
         async with RMSScanner(use_brightdata=True) as scanner:
+            results = await scanner.scan_range(1, 50000)
+        
+        # Direct only (no Brightdata fallback)
+        async with RMSScanner() as scanner:
             results = await scanner.scan_range(1, 50000)
     """
     
@@ -66,31 +93,48 @@ class RMSScanner:
         delay: float = 0.1,
         timeout: float = API_TIMEOUT,
         use_brightdata: bool = False,
+        auto_brightdata: bool = False,
     ):
         self.concurrency = concurrency
         self.delay = delay
         self.timeout = timeout
         self.use_brightdata = use_brightdata
+        self.auto_brightdata = auto_brightdata
         self._client: Optional[httpx.AsyncClient] = None
+        self._brightdata_client: Optional[httpx.AsyncClient] = None
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._proxy_url: Optional[str] = None
+        
+        # Rate limit tracking
+        self._consecutive_failures = 0
+        self._using_brightdata = False
+        self._switched_to_brightdata = False
     
     async def __aenter__(self):
-        # Configure proxy if Brightdata is enabled
-        if self.use_brightdata:
-            self._proxy_url = _get_brightdata_proxy()
-            if self._proxy_url:
-                logger.info("Using Brightdata proxy for RMS scanning")
-                self._client = httpx.AsyncClient(
-                    timeout=self.timeout,
-                    proxy=self._proxy_url,
-                    verify=False,  # Brightdata uses their own SSL cert
-                )
-            else:
-                logger.warning("Brightdata requested but credentials not found, using direct connection")
-                self._client = httpx.AsyncClient(timeout=self.timeout)
-        else:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+        self._proxy_url = _get_brightdata_proxy()
+        
+        # Always create direct client first
+        self._client = httpx.AsyncClient(timeout=self.timeout)
+        
+        # If force Brightdata, switch immediately
+        if self.use_brightdata and self._proxy_url:
+            logger.info("Using Brightdata proxy for RMS scanning (forced)")
+            self._brightdata_client = httpx.AsyncClient(
+                timeout=self.timeout,
+                proxy=self._proxy_url,
+                verify=False,
+            )
+            self._using_brightdata = True
+        elif self.auto_brightdata and self._proxy_url:
+            # Pre-create Brightdata client for quick switching
+            logger.info("Auto-Brightdata enabled, will switch if rate limited")
+            self._brightdata_client = httpx.AsyncClient(
+                timeout=self.timeout,
+                proxy=self._proxy_url,
+                verify=False,
+            )
+        elif self.use_brightdata or self.auto_brightdata:
+            logger.warning("Brightdata requested but credentials not found")
         
         self._semaphore = asyncio.Semaphore(self.concurrency)
         return self
@@ -98,21 +142,65 @@ class RMSScanner:
     async def __aexit__(self, *args):
         if self._client:
             await self._client.aclose()
+        if self._brightdata_client:
+            await self._brightdata_client.aclose()
     
-    async def scan_id(self, id_num: int) -> Optional[ScannedURL]:
+    def _get_active_client(self) -> httpx.AsyncClient:
+        """Get the currently active HTTP client."""
+        if self._using_brightdata and self._brightdata_client:
+            return self._brightdata_client
+        return self._client
+    
+    def _switch_to_brightdata(self):
+        """Switch to Brightdata proxy after rate limiting detected."""
+        if self._brightdata_client and not self._switched_to_brightdata:
+            logger.warning(
+                f"Rate limiting detected ({self._consecutive_failures} consecutive failures). "
+                "Switching to Brightdata proxy..."
+            )
+            self._using_brightdata = True
+            self._switched_to_brightdata = True
+            self._consecutive_failures = 0
+    
+    def _record_success(self):
+        """Record successful request."""
+        self._consecutive_failures = 0
+    
+    def _record_failure(self, is_rate_limit: bool):
+        """Record failed request, switch to Brightdata if threshold reached."""
+        if is_rate_limit:
+            self._consecutive_failures += 1
+            if (self.auto_brightdata 
+                and self._consecutive_failures >= RATE_LIMIT_THRESHOLD 
+                and not self._using_brightdata):
+                self._switch_to_brightdata()
+    
+    async def scan_id(self, id_num: int, retry_count: int = 0) -> Optional[ScannedURL]:
         """Scan a single ID using OnlineApi.
         
         Tries multiple IBE servers until one works.
+        Auto-switches to Brightdata if rate limited (when auto_brightdata=True).
         Returns ScannedURL if valid property found, None otherwise.
         """
         slug = str(id_num)
+        client = self._get_active_client()
         
         for server in IBE_SERVERS:
             try:
-                resp = await self._client.get(
+                resp = await client.get(
                     f"https://{server}/OnlineApi/GetSearchOptions",
                     params={"clientId": slug, "agentId": "90"},
                 )
+                
+                # Check for rate limiting
+                if _is_rate_limit_error(resp.status_code):
+                    self._record_failure(is_rate_limit=True)
+                    logger.debug(f"Rate limit response {resp.status_code} for {id_num} on {server}")
+                    
+                    # If we just switched to Brightdata, retry this ID
+                    if self._switched_to_brightdata and retry_count < 3:
+                        return await self.scan_id(id_num, retry_count + 1)
+                    continue
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -123,6 +211,7 @@ class RMSScanner:
                     
                     if name and len(name) > 2:
                         # Valid property found!
+                        self._record_success()
                         return ScannedURL(
                             id_num=id_num,
                             url=f"https://bookings.rmscloud.com/Search/Index/{slug}/90/",
@@ -133,7 +222,22 @@ class RMSScanner:
                             phone=prop_opts.get("propertyPhoneBH") or None,
                             email=prop_opts.get("propertyEmail") or None,
                         )
+                    else:
+                        # Valid response but no property - not a rate limit
+                        self._record_success()
+                        
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                # Connection errors often mean IP blocking
+                self._record_failure(is_rate_limit=True)
+                logger.debug(f"Connection error for {id_num} on {server}: {e}")
+                
+                # If we just switched to Brightdata, retry this ID
+                if self._switched_to_brightdata and retry_count < 3:
+                    return await self.scan_id(id_num, retry_count + 1)
+                continue
+                
             except Exception as e:
+                # Other errors are not rate limits
                 logger.debug(f"OnlineApi failed for {id_num} on {server}: {e}")
                 continue
         

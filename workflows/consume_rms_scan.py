@@ -17,8 +17,14 @@ Usage:
     # Single message mode (process one chunk and exit)
     uv run python -m workflows.consume_rms_scan --max-messages 1
     
-    # Use Brightdata proxy to avoid rate limits
+    # Force Brightdata proxy from the start
     uv run python -m workflows.consume_rms_scan --brightdata
+    
+    # Disable auto-switch to Brightdata (direct only)
+    uv run python -m workflows.consume_rms_scan --no-auto-brightdata
+
+By default, auto_brightdata is enabled: starts with direct API calls,
+automatically switches to Brightdata proxy after 10 consecutive rate limit errors.
 
 Environment variables for Brightdata:
     BRIGHTDATA_ZONE: Zone name from Brightdata dashboard
@@ -70,11 +76,13 @@ class RMSScanConsumer:
         delay: float = 0.1,
         save_to_db: bool = True,
         use_brightdata: bool = False,
+        auto_brightdata: bool = True,  # Auto-switch to Brightdata on rate limiting
     ):
         self.concurrency = concurrency
         self.delay = delay
         self.save_to_db = save_to_db
         self.use_brightdata = use_brightdata
+        self.auto_brightdata = auto_brightdata
         self.queue_url = get_queue_url()
         self.sqs = boto3.client("sqs", region_name=AWS_REGION)
         self._shutdown = False
@@ -163,6 +171,7 @@ class RMSScanConsumer:
             concurrency=self.concurrency,
             delay=self.delay,
             use_brightdata=self.use_brightdata,
+            auto_brightdata=self.auto_brightdata,
         ) as scanner:
             results = await scanner.scan_range(
                 start_id=start_id,
@@ -263,7 +272,8 @@ async def main():
     parser.add_argument("--delay", type=float, default=0.1, help="Delay between requests (default: 0.1s)")
     parser.add_argument("--max-messages", type=int, default=0, help="Max messages to process (0=infinite)")
     parser.add_argument("--no-db", action="store_true", help="Don't save to database (dry run)")
-    parser.add_argument("--brightdata", action="store_true", help="Use Brightdata proxy (requires env vars)")
+    parser.add_argument("--brightdata", action="store_true", help="Force Brightdata proxy from start")
+    parser.add_argument("--no-auto-brightdata", action="store_true", help="Disable auto-switch to Brightdata on rate limit")
     
     args = parser.parse_args()
     
@@ -272,6 +282,7 @@ async def main():
         delay=args.delay,
         save_to_db=not args.no_db,
         use_brightdata=args.brightdata,
+        auto_brightdata=not args.no_auto_brightdata,
     )
     
     # Handle shutdown signals
