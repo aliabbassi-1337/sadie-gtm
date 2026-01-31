@@ -80,7 +80,7 @@ async def insert_crawled_hotel(
             address=None,
             city=None,
             state=None,
-            country="USA",
+            country="United States",
             phone=None,
             category=None,
             external_id=external_id,
@@ -176,7 +176,7 @@ async def insert_hotel(
     address: Optional[str] = None,
     city: Optional[str] = None,
     state: Optional[str] = None,
-    country: str = "USA",
+    country: str = "United States",
     phone: Optional[str] = None,
     category: Optional[str] = None,
 ) -> Optional[int]:

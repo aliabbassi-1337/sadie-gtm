@@ -14,7 +14,7 @@ class ExistingCustomer(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
-    country: str = "USA"
+    country: str = "United States"
     latitude: Optional[float] = None
     longitude: Optional[float] = None
 

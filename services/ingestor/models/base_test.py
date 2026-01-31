@@ -51,7 +51,7 @@ class TestBaseRecord:
             source="test",
         )
 
-        assert record.country == "USA"
+        assert record.country == "United States"
 
     @pytest.mark.no_db
     def test_raw_defaults_to_empty_dict(self):
@@ -76,7 +76,7 @@ class TestBaseRecord:
             address="123 Main St",
             city="Houston",
             state="TX",
-            country="USA",
+            country="United States",
             phone="555-1234",
             category="hotel",
             lat=29.7604,
@@ -92,7 +92,7 @@ class TestBaseRecord:
             "123 Main St",     # address
             "Houston",         # city
             "TX",              # state
-            "USA",             # country
+            "United States",   # country
             "555-1234",        # phone
             "hotel",           # category
             "test-123",        # external_id
@@ -119,7 +119,7 @@ class TestBaseRecord:
             None,
             None,
             None,
-            "USA",
+            "United States",
             None,
             None,
             "test-123",

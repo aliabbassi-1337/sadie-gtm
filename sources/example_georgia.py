@@ -43,7 +43,7 @@ CONFIG = CSVIngestorConfig(
 
     # Defaults applied to all records
     default_category="hotel",
-    default_country="USA",
+    default_country="United States",
 
     # Optional: only include records from this state
     state_filter="GA",
