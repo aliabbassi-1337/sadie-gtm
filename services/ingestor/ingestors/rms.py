@@ -16,7 +16,7 @@ from playwright_stealth import Stealth
 from services.ingestor.registry import register
 from services.ingestor.rms_repo import RMSRepo
 from lib.rms import RMSScanner, RMSScraper, ExtractedRMSData
-from lib.rms.api_client import RMSApiClient, extract_with_fallback
+from lib.rms.api_client import RMSApiClient, AdaptiveRMSApiClient, extract_with_fallback
 
 
 # =============================================================================
@@ -175,8 +175,8 @@ class RMSIngestor:
         api_hits = 0
         scraper_hits = 0
         
-        # API client for fast extraction
-        api_client = RMSApiClient() if use_api else None
+        # API client for fast extraction (with auto Brightdata fallback)
+        api_client = AdaptiveRMSApiClient() if use_api else None
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
