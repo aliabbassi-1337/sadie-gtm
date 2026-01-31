@@ -11,8 +11,7 @@ import httpx
 from loguru import logger
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from playwright.async_api import async_playwright, BrowserContext
-from playwright_stealth import Stealth
+from playwright.async_api import async_playwright
 
 from services.enrichment import repo
 from services.enrichment.room_count_enricher import (
@@ -27,7 +26,7 @@ from services.enrichment.website_enricher import WebsiteEnricher
 from services.enrichment.archive_scraper import ArchiveScraper, ExtractedBookingData
 from services.enrichment.rms_repo import RMSRepo
 from services.enrichment.rms_queue import RMSQueue, MockQueue
-from lib.rms import RMSScraper, RMSHotelRecord, QueueStats
+from lib.rms import RMSHotelRecord, QueueStats
 
 load_dotenv()
 
@@ -1408,39 +1407,54 @@ class Service(IService):
     # =========================================================================
 
     async def enrich_rms_hotels(self, hotels: List[RMSHotelRecord], concurrency: int = 6) -> EnrichResult:
-        """Enrich RMS hotels by scraping their booking pages.
+        """Enrich RMS hotels using fast API with adaptive Brightdata fallback.
         
-        Uses batch UPDATE at the end for efficiency (single query instead of N queries).
+        Strategy:
+        1. Try API first (fast, ~100ms per hotel)
+        2. Auto-switch to Brightdata after 3 consecutive failures
+        3. Switch back to direct after success
+        4. Fall back to Playwright only if API completely fails
+        
+        Uses batch UPDATE at the end for efficiency.
         """
-        processed = enriched = failed = 0
-        batch_updates: List[dict] = []  # Successful enrichments
-        failed_urls: List[str] = []  # Failed enrichments
+        from lib.rms.api_client import AdaptiveRMSApiClient
         
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            contexts: List[BrowserContext] = []
-            scrapers: List[RMSScraper] = []
-            for _ in range(concurrency):
-                ctx = await browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-                page = await ctx.new_page()
-                stealth = Stealth()
-                await stealth.apply_stealth_async(page)
-                contexts.append(ctx)
-                scrapers.append(RMSScraper(page))
-            semaphore = asyncio.Semaphore(concurrency)
-
-            async def enrich_one(hotel: RMSHotelRecord, idx: int) -> tuple[bool, bool, Optional[dict]]:
+        processed = enriched = failed = 0
+        batch_updates: List[dict] = []
+        failed_urls: List[str] = []
+        
+        semaphore = asyncio.Semaphore(concurrency)
+        
+        async with AdaptiveRMSApiClient() as api_client:
+            async def enrich_one(hotel: RMSHotelRecord) -> tuple[bool, bool, Optional[dict]]:
                 """Returns (processed, enriched, update_dict or None)."""
                 async with semaphore:
-                    # Rate limit: stagger requests to avoid hammering RMS servers
-                    await asyncio.sleep(idx % concurrency)
-                    
-                    scraper = scrapers[idx % len(scrapers)]
                     url = hotel.booking_url if hotel.booking_url.startswith("http") else f"https://{hotel.booking_url}"
-                    slug = url.split("/")[-1]
-                    data = await scraper.extract(url, slug)
+                    
+                    # Parse slug from URL
+                    parts = url.rstrip("/").split("/")
+                    slug = parts[-1] if parts[-1].isdigit() or len(parts[-1]) > 3 else parts[-2]
+                    
+                    # Determine server from URL
+                    server = "bookings.rmscloud.com"
+                    if "bookings12" in url:
+                        server = "bookings12.rmscloud.com"
+                    elif "bookings10" in url:
+                        server = "bookings10.rmscloud.com"
+                    elif "bookings8" in url:
+                        server = "bookings8.rmscloud.com"
+                    
+                    # Try API first (fast)
+                    data = await api_client.extract(slug, server)
+                    method = "api"
+                    
+                    # Fall back to HTML if API didn't get enough data
+                    if not data or not data.has_data():
+                        data = await api_client.extract_from_html(slug, server)
+                        method = "html"
+                    
                     if data and data.has_data():
-                        logger.info(f"Enriched [scraper] {hotel.hotel_id}: {data.name} | {data.city}, {data.state}")
+                        logger.debug(f"Enriched [{method}] {hotel.hotel_id}: {data.name} | {data.city}, {data.state}")
                         return (True, True, {
                             "hotel_id": hotel.hotel_id,
                             "booking_url": hotel.booking_url,
@@ -1455,13 +1469,13 @@ class Service(IService):
                         })
                     else:
                         return (True, False, None)
-
-            tasks = [enrich_one(h, i) for i, h in enumerate(hotels)]
+            
+            tasks = [enrich_one(h) for h in hotels]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    logger.error(f"Enrichment error: {result}")
+                    logger.debug(f"Enrichment error for {hotels[i].hotel_id}: {result}")
                     failed += 1
                     failed_urls.append(hotels[i].booking_url)
                 else:
@@ -1473,12 +1487,8 @@ class Service(IService):
                     elif pr:
                         failed += 1
                         failed_urls.append(hotels[i].booking_url)
-            
-            for ctx in contexts:
-                await ctx.close()
-            await browser.close()
         
-        # Batch update all results in a single query
+        # Batch update all results
         if batch_updates or failed_urls:
             updated = await self._rms_repo.batch_update_enrichment(batch_updates, failed_urls)
             logger.info(f"Batch update: {updated} hotels updated, {len(failed_urls)} marked failed")

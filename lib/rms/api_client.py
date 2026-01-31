@@ -657,6 +657,142 @@ class RMSApiClient:
         return city, state, country
 
 
+# Threshold for switching to Brightdata
+RATE_LIMIT_THRESHOLD = 3
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Check if error indicates rate limiting or blocking."""
+    error_str = str(error).lower()
+    return any(x in error_str for x in [
+        "403", "429", "too many", "rate limit", "blocked",
+        "connection", "timeout", "refused", "reset"
+    ])
+
+
+class AdaptiveRMSApiClient:
+    """RMS API client with adaptive Brightdata fallback.
+    
+    Starts with direct connection, automatically switches to Brightdata
+    after consecutive failures, then switches back on success.
+    
+    Usage:
+        async with AdaptiveRMSApiClient() as client:
+            data = await client.extract(slug)
+    """
+    
+    def __init__(self, timeout: float = API_TIMEOUT):
+        self.timeout = timeout
+        self._direct_client: Optional[RMSApiClient] = None
+        self._brightdata_client: Optional[RMSApiClient] = None
+        self._using_brightdata = False
+        self._consecutive_failures = 0
+        self._brightdata_available = False
+    
+    async def __aenter__(self):
+        """Initialize clients."""
+        self._direct_client = RMSApiClient(timeout=self.timeout, use_brightdata=False)
+        
+        # Check if Brightdata is available
+        proxy_url = _get_brightdata_proxy()
+        if proxy_url:
+            self._brightdata_client = RMSApiClient(timeout=self.timeout, use_brightdata=True)
+            self._brightdata_available = True
+            logger.info("Adaptive RMS client: Brightdata available, will switch if rate limited")
+        else:
+            logger.warning("Adaptive RMS client: Brightdata not available (no credentials)")
+        
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Cleanup."""
+        pass
+    
+    def _get_active_client(self) -> RMSApiClient:
+        """Get the currently active client."""
+        if self._using_brightdata and self._brightdata_client:
+            return self._brightdata_client
+        return self._direct_client
+    
+    def _switch_to_brightdata(self):
+        """Switch to Brightdata proxy."""
+        if not self._brightdata_available:
+            return
+        if not self._using_brightdata:
+            logger.warning(f"Switching to Brightdata after {self._consecutive_failures} failures")
+            self._using_brightdata = True
+            self._consecutive_failures = 0
+    
+    def _switch_to_direct(self):
+        """Switch back to direct connection."""
+        if self._using_brightdata:
+            logger.info("Switching back to direct connection after success")
+            self._using_brightdata = False
+            self._consecutive_failures = 0
+    
+    def _record_success(self):
+        """Record a successful request."""
+        self._consecutive_failures = 0
+        # If we're on Brightdata and succeeded, switch back to direct
+        if self._using_brightdata:
+            self._switch_to_direct()
+    
+    def _record_failure(self, error: Exception):
+        """Record a failed request."""
+        if _is_rate_limit_error(error):
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= RATE_LIMIT_THRESHOLD:
+                self._switch_to_brightdata()
+    
+    async def extract(self, slug: str, server: str = "bookings12.rmscloud.com") -> Optional[ExtractedRMSData]:
+        """Extract hotel data with adaptive Brightdata fallback."""
+        client = self._get_active_client()
+        
+        try:
+            data = await client.extract(slug, server)
+            if data:
+                self._record_success()
+            return data
+        except Exception as e:
+            self._record_failure(e)
+            
+            # If we just switched to Brightdata, retry immediately
+            if self._using_brightdata and self._brightdata_client:
+                try:
+                    data = await self._brightdata_client.extract(slug, server)
+                    if data:
+                        self._record_success()
+                    return data
+                except Exception:
+                    pass
+            
+            return None
+    
+    async def extract_from_html(self, slug: str, server: str = "bookings.rmscloud.com") -> Optional[ExtractedRMSData]:
+        """Extract from HTML with adaptive Brightdata fallback."""
+        client = self._get_active_client()
+        
+        try:
+            data = await client.extract_from_html(slug, server)
+            if data:
+                self._record_success()
+            return data
+        except Exception as e:
+            self._record_failure(e)
+            
+            # If we just switched to Brightdata, retry immediately
+            if self._using_brightdata and self._brightdata_client:
+                try:
+                    data = await self._brightdata_client.extract_from_html(slug, server)
+                    if data:
+                        self._record_success()
+                    return data
+                except Exception:
+                    pass
+            
+            return None
+
+
 async def extract_with_fallback(
     slug: str,
     scraper=None,
