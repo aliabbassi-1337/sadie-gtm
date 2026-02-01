@@ -73,15 +73,24 @@ def _get_brightdata_proxy(prefer_cheap: bool = True) -> Optional[str]:
     """Build Brightdata proxy URL if credentials are available.
     
     Args:
-        prefer_cheap: If True, prefer residential zone (~$5.5/GB) over unlocker (~$3/request)
+        prefer_cheap: If True, prefer datacenter (~$0.11/GB) > residential (~$5.5/GB) > unlocker
     """
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    if not customer_id:
+        return None
     
-    # Try residential zone first (cheaper)
     if prefer_cheap:
+        # Try datacenter first (cheapest ~$0.11/GB)
+        dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+        dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+        if dc_zone and dc_password:
+            username = f"brd-customer-{customer_id}-zone-{dc_zone}"
+            return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
+        
+        # Fall back to residential (~$5.5/GB)
         res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
         res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
-        if all([res_zone, res_password, customer_id]):
+        if res_zone and res_password:
             username = f"brd-customer-{customer_id}-zone-{res_zone}"
             return f"http://{username}:{res_password}@brd.superproxy.io:33335"
     
@@ -89,11 +98,10 @@ def _get_brightdata_proxy(prefer_cheap: bool = True) -> Optional[str]:
     zone = os.getenv("BRIGHTDATA_ZONE", "")
     zone_password = os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
     
-    if not all([zone, zone_password, customer_id]):
-        return None
-    
-    username = f"brd-customer-{customer_id}-zone-{zone}"
-    return f"http://{username}:{zone_password}@brd.superproxy.io:33335"
+    if zone and zone_password:
+        username = f"brd-customer-{customer_id}-zone-{zone}"
+        return f"http://{username}:{zone_password}@brd.superproxy.io:33335"
+    return None
 
 
 class SiteMinderClient:

@@ -58,7 +58,7 @@ def get_proxy_url(
         zone_password: Zone password (default: from env var)
         customer_id: Customer ID (default: BRIGHTDATA_CUSTOMER_ID env var)
         country: Optional country code for geo-targeting (e.g., "us", "gb")
-        prefer_cheap: If True, prefer residential zone (cheaper) over unlocker
+        prefer_cheap: If True, prefer datacenter (cheapest) > residential > unlocker
     
     Returns:
         Proxy URL in format: http://user:pass@host:port
@@ -67,26 +67,39 @@ def get_proxy_url(
         proxy_url = get_proxy_url()
         async with httpx.AsyncClient(proxy=proxy_url) as client:
             resp = await client.get("https://example.com")
+    
+    Cost hierarchy (prefer_cheap=True):
+        1. Datacenter (~$0.11/GB) - BRIGHTDATA_DC_ZONE
+        2. Residential (~$5.5/GB) - BRIGHTDATA_RES_ZONE  
+        3. Unlocker (~$3/request) - BRIGHTDATA_ZONE
     """
     customer_id = customer_id or os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
     
-    # If no explicit zone, try residential first (cheaper)
     if zone is None and prefer_cheap:
-        res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
-        res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
-        if res_zone and res_password:
-            zone = res_zone
-            zone_password = res_password
+        # Try datacenter first (cheapest ~$0.11/GB)
+        dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+        dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+        if dc_zone and dc_password:
+            zone = dc_zone
+            zone_password = dc_password
+        else:
+            # Fall back to residential (~$5.5/GB)
+            res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
+            res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
+            if res_zone and res_password:
+                zone = res_zone
+                zone_password = res_password
     
-    # Fall back to unlocker zone
+    # Fall back to unlocker zone (most expensive)
     if zone is None:
         zone = os.getenv("BRIGHTDATA_ZONE", "")
         zone_password = zone_password or os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
     
     if not all([zone, zone_password, customer_id]):
         raise ValueError(
-            "Missing Brightdata proxy credentials. Set BRIGHTDATA_RES_ZONE/BRIGHTDATA_RES_PASSWORD "
-            "or BRIGHTDATA_ZONE/BRIGHTDATA_ZONE_PASSWORD, and BRIGHTDATA_CUSTOMER_ID."
+            "Missing Brightdata proxy credentials. Set BRIGHTDATA_DC_ZONE/BRIGHTDATA_DC_PASSWORD, "
+            "BRIGHTDATA_RES_ZONE/BRIGHTDATA_RES_PASSWORD, or BRIGHTDATA_ZONE/BRIGHTDATA_ZONE_PASSWORD, "
+            "and BRIGHTDATA_CUSTOMER_ID."
         )
     
     # Build username with optional country targeting
