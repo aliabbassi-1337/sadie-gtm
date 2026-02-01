@@ -1431,9 +1431,11 @@ class Service(IService):
                 async with semaphore:
                     url = hotel.booking_url if hotel.booking_url.startswith("http") else f"https://{hotel.booking_url}"
                     
-                    # Parse slug from URL
-                    parts = url.rstrip("/").split("/")
-                    slug = parts[-1] if parts[-1].isdigit() or len(parts[-1]) > 3 else parts[-2]
+                    # Parse clientId from URL: /Search/Index/{clientId}/{agentId}/
+                    # The clientId is BEFORE the agentId (usually 90)
+                    import re
+                    match = re.search(r'/Search/Index/([^/]+)/\d+/?', url)
+                    slug = match.group(1) if match else url.rstrip("/").split("/")[-2]
                     
                     # Determine server from URL
                     server = "bookings.rmscloud.com"
