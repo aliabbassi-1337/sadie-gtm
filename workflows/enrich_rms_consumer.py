@@ -25,7 +25,7 @@ from services.enrichment.service import Service
 
 def main():
     parser = argparse.ArgumentParser(description="RMS Enrichment Consumer")
-    parser.add_argument("--concurrency", type=int, default=6, help="Concurrent scrapers")
+    parser.add_argument("--concurrency", type=int, default=50, help="Concurrent API requests")
     parser.add_argument("--max-messages", type=int, default=0, help="Max messages (0=infinite)")
     args = parser.parse_args()
     
