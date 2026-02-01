@@ -43,9 +43,14 @@ class ExtractedRMSData(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     website: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     
     def has_data(self) -> bool:
         return bool(self.name and self.name.lower() not in ['online bookings', 'search', 'error', 'loading', ''])
+    
+    def has_location(self) -> bool:
+        return self.latitude is not None and self.longitude is not None
 
 
 class RMSHotelRecord(BaseModel):

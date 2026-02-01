@@ -211,6 +211,15 @@ class RMSApiClient:
             if not data.city and not data.state and not data.country:
                 data.city, data.state, data.country = self._extract_location(all_text)
             
+            # Extract lat/lon from Google Maps URL in BusinessFacilities
+            if api_data.business_facilities:
+                from lib.rms.utils import extract_coordinates_from_google_maps_url
+                lat, lon = extract_coordinates_from_google_maps_url(api_data.business_facilities)
+                if lat is not None and lon is not None:
+                    data.latitude = lat
+                    data.longitude = lon
+                    logger.debug(f"Extracted coordinates from BusinessFacilities: {lat}, {lon}")
+            
             return data if data.has_data() else None
             
         except Exception as e:

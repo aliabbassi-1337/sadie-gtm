@@ -108,6 +108,8 @@ class RMSRepo:
                 phones = [u.get("phone") for u in updates]
                 emails = [u.get("email") for u in updates]
                 websites = [u.get("website") for u in updates]
+                latitudes = [u.get("latitude") for u in updates]
+                longitudes = [u.get("longitude") for u in updates]
                 
                 sql_hotels = """
                 UPDATE sadie_gtm.hotels h
@@ -125,16 +127,21 @@ class RMSRepo:
                     phone_website = CASE WHEN h.phone_website IS NULL OR h.phone_website = '' THEN v.phone ELSE h.phone_website END,
                     email = CASE WHEN h.email IS NULL OR h.email = '' THEN v.email ELSE h.email END,
                     website = CASE WHEN h.website IS NULL OR h.website = '' THEN v.website ELSE h.website END,
+                    location = CASE 
+                        WHEN h.location IS NULL AND v.latitude IS NOT NULL AND v.longitude IS NOT NULL 
+                        THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
+                        ELSE h.location 
+                    END,
                     updated_at = NOW()
                 FROM (
-                    SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
-                    AS t(hotel_id, name, address, city, state, country, phone, email, website)
+                    SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::float[], $11::float[])
+                    AS t(hotel_id, name, address, city, state, country, phone, email, website, latitude, longitude)
                 ) v
                 WHERE h.id = v.hotel_id
                 """
                 result = await conn.execute(
                     sql_hotels,
-                    hotel_ids, names, addresses, cities, states, countries, phones, emails, websites
+                    hotel_ids, names, addresses, cities, states, countries, phones, emails, websites, latitudes, longitudes
                 )
                 updated = int(result.split()[-1]) if result else 0
                 

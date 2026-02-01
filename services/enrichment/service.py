@@ -1454,7 +1454,8 @@ class Service(IService):
                         method = "html"
                     
                     if data and data.has_data():
-                        logger.debug(f"Enriched [{method}] {hotel.hotel_id}: {data.name} | {data.city}, {data.state}")
+                        loc_str = f" @ ({data.latitude}, {data.longitude})" if data.latitude else ""
+                        logger.debug(f"Enriched [{method}] {hotel.hotel_id}: {data.name} | {data.city}, {data.state}{loc_str}")
                         return (True, True, {
                             "hotel_id": hotel.hotel_id,
                             "booking_url": hotel.booking_url,
@@ -1466,6 +1467,8 @@ class Service(IService):
                             "phone": data.phone,
                             "email": data.email,
                             "website": data.website,
+                            "latitude": data.latitude,
+                            "longitude": data.longitude,
                         })
                     else:
                         return (True, False, None)
