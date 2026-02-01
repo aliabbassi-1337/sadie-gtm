@@ -765,6 +765,7 @@ async def batch_update_cloudbeds_enrichment(
     """Batch update hotels with Cloudbeds enrichment results.
     
     For Cloudbeds, scraped data overrides existing (crawl sources often have wrong location).
+    Supports lat/lon from the property_info API.
     """
     if not updates:
         return 0
@@ -777,6 +778,8 @@ async def batch_update_cloudbeds_enrichment(
     countries = []
     phones = []
     emails = []
+    lats = []
+    lons = []
     
     for u in updates:
         hotel_ids.append(u["hotel_id"])
@@ -787,8 +790,10 @@ async def batch_update_cloudbeds_enrichment(
         countries.append(u.get("country"))
         phones.append(u.get("phone"))
         emails.append(u.get("email"))
+        lats.append(u.get("lat"))
+        lons.append(u.get("lon"))
     
-    # Scraped data overrides existing (Cloudbeds page is authoritative)
+    # Scraped/API data overrides existing (Cloudbeds page is authoritative)
     sql = """
     UPDATE sadie_gtm.hotels h
     SET 
@@ -806,6 +811,11 @@ async def batch_update_cloudbeds_enrichment(
                              THEN v.phone ELSE h.phone_website END,
         email = CASE WHEN v.email IS NOT NULL AND v.email != '' 
                      THEN v.email ELSE h.email END,
+        location = CASE 
+            WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL 
+            THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography
+            ELSE h.location 
+        END,
         updated_at = CURRENT_TIMESTAMP
     FROM (
         SELECT * FROM unnest(
@@ -816,8 +826,10 @@ async def batch_update_cloudbeds_enrichment(
             $5::text[],
             $6::text[],
             $7::text[],
-            $8::text[]
-        ) AS t(hotel_id, name, address, city, state, country, phone, email)
+            $8::text[],
+            $9::float[],
+            $10::float[]
+        ) AS t(hotel_id, name, address, city, state, country, phone, email, lat, lon)
     ) v
     WHERE h.id = v.hotel_id
     """
@@ -833,6 +845,8 @@ async def batch_update_cloudbeds_enrichment(
             countries,
             phones,
             emails,
+            lats,
+            lons,
         )
         count = int(result.split()[-1]) if result else len(updates)
     

@@ -1637,6 +1637,92 @@ class Service(IService):
 
         return EnrichResult(processed=len(hotels), enriched=total_enriched, failed=total_errors)
 
+    async def enrich_cloudbeds_hotels_api(self, limit: int = 100, concurrency: int = 20, use_brightdata: bool = True) -> EnrichResult:
+        """Enrich Cloudbeds hotels using property_info API (no Playwright needed).
+        
+        This is MUCH faster than browser scraping. Uses simple HTTP POST to get:
+        - name, address, city, state, country
+        - lat/lng coordinates
+        - phone, email
+        
+        Args:
+            limit: Max hotels to process
+            concurrency: Concurrent HTTP requests (can be much higher than browser, default 20)
+            use_brightdata: Use Brightdata proxy (recommended to avoid blocks)
+        """
+        from lib.cloudbeds.api_client import CloudbedsApiClient, extract_property_code
+
+        candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
+        hotels = [{"id": c.id, "booking_url": c.booking_url} for c in candidates]
+
+        if not hotels:
+            logger.info("No Cloudbeds hotels need enrichment")
+            return EnrichResult(processed=0, enriched=0, failed=0)
+
+        logger.info(f"Found {len(hotels)} Cloudbeds hotels to enrich via API (concurrency={concurrency})")
+
+        client = CloudbedsApiClient(use_brightdata=use_brightdata)
+        semaphore = asyncio.Semaphore(concurrency)
+        
+        results_buffer = []
+        failed_ids = []
+        processed = 0
+
+        async def process_hotel(hotel: dict) -> None:
+            nonlocal processed
+            async with semaphore:
+                hotel_id = hotel["id"]
+                url = hotel["booking_url"]
+                
+                property_code = extract_property_code(url)
+                if not property_code:
+                    logger.debug(f"Hotel {hotel_id}: could not extract property code from {url}")
+                    failed_ids.append(hotel_id)
+                    processed += 1
+                    return
+                
+                try:
+                    data = await client.extract(property_code)
+                    processed += 1
+                    
+                    if data and data.has_data():
+                        results_buffer.append({
+                            "hotel_id": hotel_id,
+                            "name": data.name,
+                            "address": data.address,
+                            "city": data.city,
+                            "state": data.state,
+                            "country": data.country,
+                            "phone": data.phone,
+                            "email": data.email,
+                            "lat": data.latitude,
+                            "lon": data.longitude,
+                        })
+                        loc = f" @ ({data.latitude:.4f}, {data.longitude:.4f})" if data.has_location() else ""
+                        logger.debug(f"Hotel {hotel_id}: {data.name[:30] if data.name else ''} | {data.city}, {data.country}{loc}")
+                    else:
+                        failed_ids.append(hotel_id)
+                        logger.debug(f"Hotel {hotel_id}: no data from API")
+                except Exception as e:
+                    failed_ids.append(hotel_id)
+                    logger.debug(f"Hotel {hotel_id}: API error - {e}")
+                    processed += 1
+
+        # Process all hotels concurrently
+        await asyncio.gather(*[process_hotel(h) for h in hotels])
+        
+        # Batch update results
+        enriched = 0
+        if results_buffer:
+            enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
+            logger.info(f"Updated {enriched} hotels with Cloudbeds API data")
+        
+        if failed_ids:
+            await repo.batch_set_last_enrichment_attempt(failed_ids)
+            logger.info(f"Marked {len(failed_ids)} hotels as failed")
+
+        return EnrichResult(processed=processed, enriched=enriched, failed=len(failed_ids))
+
     async def get_cloudbeds_enrichment_status(self) -> Dict[str, int]:
         """Get Cloudbeds enrichment status counts."""
         total = await repo.get_cloudbeds_hotels_total_count()
