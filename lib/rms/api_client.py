@@ -95,6 +95,8 @@ class RMSApiResponse(BaseModel):
     property_address: Optional[str] = None
     property_phone: Optional[str] = None
     property_email: Optional[str] = None
+    property_website: Optional[str] = None
+    currency_code: Optional[str] = None  # USD, AUD, etc - hints at country
 
 
 class RMSApiClient:
@@ -163,8 +165,10 @@ class RMSApiClient:
                 data.state = parsed.get("state")
                 data.country = parsed.get("country")
             
-            # Use redirect URL as website
-            if api_data.redirect_url:
+            # Use propertyWebsite from OnlineApi (most reliable) or redirect URL as fallback
+            if api_data.property_website:
+                data.website = api_data.property_website
+            elif api_data.redirect_url:
                 data.website = api_data.redirect_url
             
             # Fill in missing fields from structured description
@@ -241,13 +245,28 @@ class RMSApiClient:
         # Clean up extra whitespace
         address = re.sub(r'\s+', ' ', address.strip())
         
-        # Check for country at the end
+        # Check for country at the end (handle various formats including "UnitedStates" with no space)
         if re.search(r',?\s*Australia\s*$', address, re.IGNORECASE):
-            result["country"] = "AU"
+            result["country"] = "Australia"
             address = re.sub(r',?\s*Australia\s*$', '', address, flags=re.IGNORECASE)
-        elif re.search(r',?\s*New Zealand\s*$', address, re.IGNORECASE):
-            result["country"] = "NZ"
-            address = re.sub(r',?\s*New Zealand\s*$', '', address, flags=re.IGNORECASE)
+        elif re.search(r',?\s*New\s*Zealand\s*$', address, re.IGNORECASE):
+            result["country"] = "New Zealand"
+            address = re.sub(r',?\s*New\s*Zealand\s*$', '', address, flags=re.IGNORECASE)
+        elif re.search(r',?\s*United\s*States\s*$', address, re.IGNORECASE):
+            result["country"] = "United States"
+            address = re.sub(r',?\s*United\s*States\s*$', '', address, flags=re.IGNORECASE)
+        elif re.search(r',?\s*(USA|US)\s*$', address, re.IGNORECASE):
+            result["country"] = "United States"
+            address = re.sub(r',?\s*(USA|US)\s*$', '', address, flags=re.IGNORECASE)
+        elif re.search(r',?\s*Canada\s*$', address, re.IGNORECASE):
+            result["country"] = "Canada"
+            address = re.sub(r',?\s*Canada\s*$', '', address, flags=re.IGNORECASE)
+        elif re.search(r',?\s*United\s*Kingdom\s*$', address, re.IGNORECASE):
+            result["country"] = "United Kingdom"
+            address = re.sub(r',?\s*United\s*Kingdom\s*$', '', address, flags=re.IGNORECASE)
+        elif re.search(r',?\s*(UK|GB)\s*$', address, re.IGNORECASE):
+            result["country"] = "United Kingdom"
+            address = re.sub(r',?\s*(UK|GB)\s*$', '', address, flags=re.IGNORECASE)
         
         # Look for Australian state + postcode pattern: "City STATE Postcode"
         au_match = re.search(
@@ -259,7 +278,7 @@ class RMSApiClient:
             result["city"] = au_match.group(1).strip().rstrip(',')
             result["state"] = au_match.group(2).upper()
             if not result["country"]:
-                result["country"] = "AU"
+                result["country"] = "Australia"
         
         # US state + ZIP pattern
         us_states = 'AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC'
@@ -271,7 +290,8 @@ class RMSApiClient:
         if us_match:
             result["city"] = us_match.group(1).strip().rstrip(',')
             result["state"] = us_match.group(2).upper()
-            result["country"] = "USA"
+            if not result["country"]:
+                result["country"] = "United States"
         
         return result
     
@@ -298,6 +318,8 @@ class RMSApiClient:
                             response.property_phone = prop_opts.get("propertyPhoneBH")
                             response.property_email = prop_opts.get("propertyEmail")
                             response.property_description = prop_opts.get("propertyDescription")
+                            response.property_website = prop_opts.get("propertyWebsite")
+                            response.currency_code = prop_opts.get("currencyCode")
                             logger.debug(f"OnlineApi success for {slug} via {ibe_server}")
                             break
                 except Exception as e:
