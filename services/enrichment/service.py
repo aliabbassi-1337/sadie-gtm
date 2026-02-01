@@ -1745,6 +1745,153 @@ class Service(IService):
         """Mark Cloudbeds hotels as failed (for retry later)."""
         return await repo.batch_set_last_enrichment_attempt(hotel_ids)
 
+    async def consume_cloudbeds_queue_api(
+        self,
+        queue_url: str,
+        concurrency: int = 20,
+        use_brightdata: bool = True,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> ConsumeResult:
+        """Consume Cloudbeds queue using fast API (no Playwright).
+        
+        This is MUCH faster than the browser-based consumer:
+        - No Playwright overhead
+        - High concurrency (20+)
+        - Gets lat/lng directly from API
+        
+        Args:
+            queue_url: SQS queue URL
+            concurrency: Concurrent API requests (default 20)
+            use_brightdata: Use Brightdata proxy (recommended)
+            should_stop: Callback to check if we should stop
+        """
+        from lib.cloudbeds.api_client import CloudbedsApiClient, extract_property_code
+        from infra.sqs import receive_messages, delete_message, get_queue_attributes
+
+        should_stop = should_stop or (lambda: self._shutdown_requested)
+        
+        messages_processed = 0
+        hotels_processed = 0
+        hotels_enriched = 0
+        hotels_failed = 0
+        
+        batch_results = []
+        batch_failed_ids = []
+        BATCH_SIZE = 50
+        VISIBILITY_TIMEOUT = 60  # Shorter timeout since API is fast
+
+        client = CloudbedsApiClient(use_brightdata=use_brightdata)
+        semaphore = asyncio.Semaphore(concurrency)
+
+        logger.info(f"Starting Cloudbeds API consumer (concurrency={concurrency}, brightdata={use_brightdata})")
+
+        async def process_message(msg: dict) -> tuple:
+            """Process a single SQS message."""
+            async with semaphore:
+                body = msg["body"]
+                hotel_id = body.get("hotel_id")
+                booking_url = body.get("booking_url")
+
+                if not hotel_id or not booking_url:
+                    return (msg, None, False, None, "invalid_message")
+
+                property_code = extract_property_code(booking_url)
+                if not property_code:
+                    return (msg, hotel_id, False, None, "no_property_code")
+
+                try:
+                    data = await client.extract(property_code)
+                    if data and data.has_data():
+                        return (msg, hotel_id, True, data, None)
+                    else:
+                        return (msg, hotel_id, False, None, "no_data")
+                except Exception as e:
+                    return (msg, hotel_id, False, None, str(e)[:50])
+
+        while not should_stop():
+            # Check queue depth periodically
+            try:
+                attrs = get_queue_attributes(queue_url)
+                pending = int(attrs.get("ApproximateNumberOfMessages", 0))
+                in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
+                if pending == 0 and in_flight == 0:
+                    logger.info("Queue empty, waiting...")
+                    await asyncio.sleep(10)
+                    continue
+            except Exception:
+                pass
+
+            # Receive batch of messages
+            messages = receive_messages(
+                queue_url,
+                max_messages=10,
+                visibility_timeout=VISIBILITY_TIMEOUT,
+                wait_time_seconds=5,
+            )
+
+            if not messages:
+                continue
+
+            # Process all messages concurrently
+            results = await asyncio.gather(*[process_message(m) for m in messages])
+
+            # Handle results
+            for msg, hotel_id, success, data, error in results:
+                if hotel_id is None:
+                    # Invalid message - delete it
+                    delete_message(queue_url, msg["receipt_handle"])
+                    continue
+
+                hotels_processed += 1
+
+                if success and data:
+                    batch_results.append({
+                        "hotel_id": hotel_id,
+                        "name": data.name,
+                        "address": data.address,
+                        "city": data.city,
+                        "state": data.state,
+                        "country": data.country,
+                        "phone": data.phone,
+                        "email": data.email,
+                        "lat": data.latitude,
+                        "lon": data.longitude,
+                    })
+                    hotels_enriched += 1
+                    loc = f" @ ({data.latitude:.2f}, {data.longitude:.2f})" if data.has_location() else ""
+                    logger.debug(f"Hotel {hotel_id}: {data.name[:30] if data.name else ''} | {data.city}{loc}")
+                else:
+                    batch_failed_ids.append(hotel_id)
+                    hotels_failed += 1
+                    logger.debug(f"Hotel {hotel_id}: {error}")
+
+                # Delete message from queue
+                delete_message(queue_url, msg["receipt_handle"])
+                messages_processed += 1
+
+            # Batch update to database
+            if len(batch_results) >= BATCH_SIZE:
+                updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
+                batch_results = []
+
+            if len(batch_failed_ids) >= BATCH_SIZE:
+                await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                batch_failed_ids = []
+
+        # Final batch update
+        if batch_results:
+            await repo.batch_update_cloudbeds_enrichment(batch_results)
+        if batch_failed_ids:
+            await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+
+        return ConsumeResult(
+            messages_processed=messages_processed,
+            hotels_processed=hotels_processed,
+            hotels_enriched=hotels_enriched,
+            hotels_failed=hotels_failed,
+        )
+
     async def consume_cloudbeds_queue(
         self,
         queue_url: str,

@@ -1,11 +1,12 @@
-"""Cloudbeds enrichment consumer - thin wrapper around the enrichment service.
+"""Cloudbeds enrichment consumer - uses fast API (no Playwright needed).
 
-Polls SQS and enriches hotels using Playwright.
+Polls SQS and enriches hotels using the property_info API.
 Run on multiple EC2 instances for parallel processing.
 
 Usage:
     uv run python -m workflows.enrich_cloudbeds_consumer
-    uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 10
+    uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 30
+    uv run python -m workflows.enrich_cloudbeds_consumer --legacy  # Use Playwright
 """
 
 import sys
@@ -36,7 +37,7 @@ def handle_shutdown(signum, frame):
     shutdown_requested = True
 
 
-async def run_consumer(concurrency: int = 5):
+async def run_consumer(concurrency: int = 20, use_legacy: bool = False, use_brightdata: bool = True):
     """Run the SQS consumer."""
     global shutdown_requested
 
@@ -51,11 +52,24 @@ async def run_consumer(concurrency: int = 5):
 
     try:
         service = Service()
-        result = await service.consume_cloudbeds_queue(
-            queue_url=QUEUE_URL,
-            concurrency=concurrency,
-            should_stop=lambda: shutdown_requested,
-        )
+        
+        if use_legacy:
+            # Legacy Playwright-based consumer
+            logger.info("Using legacy Playwright consumer")
+            result = await service.consume_cloudbeds_queue(
+                queue_url=QUEUE_URL,
+                concurrency=concurrency,
+                should_stop=lambda: shutdown_requested,
+            )
+        else:
+            # Fast API-based consumer (default)
+            logger.info("Using fast API consumer")
+            result = await service.consume_cloudbeds_queue_api(
+                queue_url=QUEUE_URL,
+                concurrency=concurrency,
+                use_brightdata=use_brightdata,
+                should_stop=lambda: shutdown_requested,
+            )
 
         print("\n" + "=" * 60)
         print("CONSUMER STOPPED")
@@ -72,10 +86,22 @@ async def run_consumer(concurrency: int = 5):
 
 def main():
     parser = argparse.ArgumentParser(description="Cloudbeds enrichment consumer")
-    parser.add_argument("--concurrency", type=int, default=6, help="Concurrent browser contexts")
+    parser.add_argument("--concurrency", type=int, default=20, help="Concurrent requests (default 20 for API, 6 for legacy)")
+    parser.add_argument("--legacy", action="store_true", help="Use legacy Playwright-based consumer")
+    parser.add_argument("--no-proxy", action="store_true", help="Disable Brightdata proxy")
 
     args = parser.parse_args()
-    asyncio.run(run_consumer(concurrency=args.concurrency))
+    
+    # Adjust default concurrency for legacy mode
+    concurrency = args.concurrency
+    if args.legacy and args.concurrency == 20:
+        concurrency = 6  # Lower for Playwright
+    
+    asyncio.run(run_consumer(
+        concurrency=concurrency,
+        use_legacy=args.legacy,
+        use_brightdata=not args.no_proxy,
+    ))
 
 
 if __name__ == "__main__":
