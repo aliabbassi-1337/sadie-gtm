@@ -120,10 +120,10 @@ class RMSRepo:
                         THEN COALESCE(v.name, h.name)
                         ELSE h.name 
                     END,
-                    address = CASE WHEN h.address IS NULL OR h.address = '' THEN v.address ELSE h.address END,
-                    city = CASE WHEN h.city IS NULL OR h.city = '' THEN v.city ELSE h.city END,
-                    state = CASE WHEN h.state IS NULL OR h.state = '' THEN v.state ELSE h.state END,
-                    country = CASE WHEN h.country IS NULL OR h.country = '' THEN v.country ELSE h.country END,
+                    address = CASE WHEN v.address IS NOT NULL AND v.address != '' THEN v.address ELSE h.address END,
+                    city = CASE WHEN v.city IS NOT NULL AND v.city != '' THEN v.city ELSE h.city END,
+                    state = CASE WHEN v.state IS NOT NULL AND v.state != '' THEN v.state ELSE h.state END,
+                    country = CASE WHEN v.country IS NOT NULL AND v.country != '' THEN v.country ELSE h.country END,
                     phone_website = CASE WHEN h.phone_website IS NULL OR h.phone_website = '' THEN v.phone ELSE h.phone_website END,
                     email = CASE WHEN h.email IS NULL OR h.email = '' THEN v.email ELSE h.email END,
                     website = CASE WHEN h.website IS NULL OR h.website = '' THEN v.website ELSE h.website END,
