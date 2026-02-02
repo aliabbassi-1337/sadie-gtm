@@ -48,6 +48,7 @@ load_dotenv()
 CLOUDBEDS_ID = 3
 RMS_ID = 12
 SITEMINDER_ID = 14
+IPMS247_ID = 22
 
 
 def _get_brightdata_proxy() -> Optional[str]:
@@ -88,10 +89,10 @@ async def show_status() -> None:
                 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON hcp.hotel_id = h.id
                 WHERE hbe.status = 1
                   AND h.status != 99  -- Exclude dead ends only
-                  AND be.id IN ($1, $2, $3)
+                  AND be.id IN ($1, $2, $3, $4)
                 GROUP BY be.id, be.name
                 ORDER BY total DESC
-            ''', CLOUDBEDS_ID, RMS_ID, SITEMINDER_ID)
+            ''', CLOUDBEDS_ID, RMS_ID, SITEMINDER_ID, IPMS247_ID)
             
             logger.info("=" * 70)
             logger.info("BOOKING ENGINE ENRICHMENT STATUS")
@@ -564,6 +565,127 @@ async def enrich_siteminder(limit: int, concurrency: int = 20) -> None:
 
 
 # =============================================================================
+# IPMS247 / EZEE ENRICHMENT
+# =============================================================================
+
+
+async def enrich_ipms247(limit: int, concurrency: int = 10) -> None:
+    """Enrich IPMS247/eZee hotels by scraping booking pages."""
+    from lib.ipms247.scraper import IPMS247Scraper
+    
+    await init_db()
+    try:
+        async with get_conn() as conn:
+            # Get hotels needing enrichment
+            hotels = await conn.fetch('''
+                SELECT h.id, h.name, hbe.booking_url, hbe.engine_property_id as slug,
+                       h.address, h.city, h.state, h.country, h.phone_website, h.email, h.location
+                FROM sadie_gtm.hotel_booking_engines hbe
+                JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
+                WHERE hbe.booking_engine_id = $1
+                  AND hbe.status = 1
+                  AND h.status != 99  -- Exclude dead ends only
+                  AND (
+                      h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%'
+                      OR h.email IS NULL OR h.email = ''
+                      OR h.location IS NULL
+                  )
+                ORDER BY CASE WHEN h.location IS NULL THEN 0 ELSE 1 END
+                LIMIT $2
+            ''', IPMS247_ID, limit)
+        
+        if not hotels:
+            logger.info("No IPMS247 hotels need enrichment")
+            return
+        
+        logger.info(f"Enriching {len(hotels)} IPMS247 hotels...")
+        
+        semaphore = asyncio.Semaphore(concurrency)
+        stats = {'enriched': 0, 'failed': 0}
+        results_to_save = []
+        
+        scraper = IPMS247Scraper(use_proxy=True)
+        
+        async def process_hotel(h):
+            async with semaphore:
+                slug = h['slug'] or h['booking_url'].split('book-rooms-')[-1].split('/')[0].split('?')[0]
+                data = await scraper.extract(slug)
+                results_to_save.append({'hotel': h, 'data': data})
+        
+        await asyncio.gather(*[process_hotel(h) for h in hotels])
+        
+        # Save all results in one connection
+        async with get_conn() as conn:
+            for r in results_to_save:
+                h = r['hotel']
+                data = r['data']
+                
+                if data and data.has_data():
+                    # Build location point if we have lat/lng
+                    location_update = ""
+                    params = [h['id']]
+                    param_idx = 2
+                    
+                    updates = []
+                    if data.name:
+                        updates.append(f"name = COALESCE(NULLIF(${param_idx}, ''), name)")
+                        params.append(data.name)
+                        param_idx += 1
+                    if data.address:
+                        updates.append(f"address = COALESCE(NULLIF(${param_idx}, ''), address)")
+                        params.append(data.address)
+                        param_idx += 1
+                    if data.city:
+                        updates.append(f"city = COALESCE(NULLIF(${param_idx}, ''), city)")
+                        params.append(data.city)
+                        param_idx += 1
+                    if data.state:
+                        updates.append(f"state = COALESCE(NULLIF(${param_idx}, ''), state)")
+                        params.append(data.state)
+                        param_idx += 1
+                    if data.country:
+                        updates.append(f"country = COALESCE(NULLIF(${param_idx}, ''), country)")
+                        params.append(data.country)
+                        param_idx += 1
+                    if data.phone:
+                        updates.append(f"phone_website = COALESCE(NULLIF(${param_idx}, ''), phone_website)")
+                        params.append(data.phone)
+                        param_idx += 1
+                    if data.email:
+                        updates.append(f"email = COALESCE(NULLIF(${param_idx}, ''), email)")
+                        params.append(data.email)
+                        param_idx += 1
+                    if data.latitude and data.longitude:
+                        updates.append(f"location = COALESCE(location, ST_SetSRID(ST_MakePoint(${param_idx}, ${param_idx + 1}), 4326))")
+                        params.append(data.longitude)
+                        params.append(data.latitude)
+                        param_idx += 2
+                    
+                    updates.append("updated_at = NOW()")
+                    
+                    if updates:
+                        await conn.execute(f'''
+                            UPDATE sadie_gtm.hotels SET
+                                {', '.join(updates)}
+                            WHERE id = $1
+                        ''', *params)
+                        
+                        stats['enriched'] += 1
+                        logger.debug(f"{h['name'][:30] if h['name'] else 'Unknown'} | {data.name or ''} | {data.email or ''}")
+                else:
+                    stats['failed'] += 1
+        
+        logger.info("=" * 60)
+        logger.info("IPMS247 ENRICHMENT COMPLETE")
+        logger.info("=" * 60)
+        logger.info(f"Enriched: {stats['enriched']}")
+        logger.info(f"Failed: {stats['failed']}")
+        
+    finally:
+        await close_db()
+
+
+# =============================================================================
 # PROXIMITY CALCULATION
 # =============================================================================
 
@@ -658,6 +780,11 @@ def main():
     sm_parser.add_argument("--limit", type=int, default=100, help="Max hotels")
     sm_parser.add_argument("--concurrency", type=int, default=20, help="Concurrent requests")
     
+    # IPMS247
+    ipms_parser = subparsers.add_parser("ipms247", help="Enrich IPMS247/eZee hotels")
+    ipms_parser.add_argument("--limit", type=int, default=100, help="Max hotels")
+    ipms_parser.add_argument("--concurrency", type=int, default=10, help="Concurrent requests")
+    
     # Proximity
     prox_parser = subparsers.add_parser("proximity", help="Calculate customer proximity")
     prox_parser.add_argument("--limit", type=int, default=500, help="Max hotels")
@@ -673,6 +800,8 @@ def main():
         asyncio.run(enrich_rms(args.limit, args.concurrency))
     elif args.command == "siteminder":
         asyncio.run(enrich_siteminder(args.limit, args.concurrency))
+    elif args.command == "ipms247":
+        asyncio.run(enrich_ipms247(args.limit, args.concurrency))
     elif args.command == "proximity":
         asyncio.run(calculate_proximity(args.limit, args.concurrency))
 
