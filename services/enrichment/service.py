@@ -1431,20 +1431,34 @@ class Service(IService):
                 async with semaphore:
                     url = hotel.booking_url if hotel.booking_url.startswith("http") else f"https://{hotel.booking_url}"
                     
-                    # Parse clientId from URL: /Search/Index/{clientId}/{agentId}/
-                    # The clientId is BEFORE the agentId (usually 90)
+                    # Parse clientId and server from URL
+                    # Format 1: /Search/Index/{id}/90/ (bookings.rmscloud.com)
+                    # Format 2: ibe12.rmscloud.com/{id} (IBE servers)
                     import re
-                    match = re.search(r'/Search/Index/([^/]+)/\d+/?', url)
-                    slug = match.group(1) if match else url.rstrip("/").split("/")[-2]
-                    
-                    # Determine server from URL
+                    slug = None
                     server = "bookings.rmscloud.com"
-                    if "bookings12" in url:
-                        server = "bookings12.rmscloud.com"
-                    elif "bookings10" in url:
-                        server = "bookings10.rmscloud.com"
-                    elif "bookings8" in url:
-                        server = "bookings8.rmscloud.com"
+                    
+                    # Try /Search/Index/ format first
+                    match = re.search(r'/Search/Index/([^/]+)/\d+/?', url)
+                    if match:
+                        slug = match.group(1)
+                        if "bookings12" in url:
+                            server = "bookings12.rmscloud.com"
+                        elif "bookings10" in url:
+                            server = "bookings10.rmscloud.com"
+                        elif "bookings8" in url:
+                            server = "bookings8.rmscloud.com"
+                    else:
+                        # Try IBE format: ibe12.rmscloud.com/{numeric_id}
+                        ibe_match = re.search(r'(ibe\d+\.rmscloud\.com)/(\d+)', url)
+                        if ibe_match:
+                            server = ibe_match.group(1)
+                            slug = ibe_match.group(2)
+                    
+                    # Skip if we couldn't parse the URL
+                    if not slug:
+                        logger.debug(f"Could not parse RMS URL: {url}")
+                        return (True, False, None)
                     
                     # Try API first (fast)
                     data = await api_client.extract(slug, server)
