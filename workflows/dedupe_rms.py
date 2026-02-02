@@ -342,6 +342,15 @@ async def execute_deduplication(
     }
     
     async with conn.transaction():
+        # Phase 0: Clear rms_client_id from ALL hotels that will conflict
+        # This handles orphaned hotels from previous partial runs
+        client_ids = [r['client_id'] for r in numeric_keepers]
+        await conn.execute('''
+            UPDATE sadie_gtm.hotels
+            SET external_id = NULL, external_id_type = NULL
+            WHERE external_id_type = 'rms_client_id' AND external_id = ANY($1)
+        ''', client_ids)
+        
         # Phase 1: Update numeric keepers with merged data and external_id
         for r in numeric_keepers:
             await conn.execute('''
