@@ -1,7 +1,7 @@
 """IPMS247 / eZee scraper.
 
 Extracts hotel data from IPMS247 booking pages.
-Data is server-side rendered in HTML, no API needed.
+Uses Playwright to render page and open hotel info modal.
 
 URL format: https://live.ipms247.com/booking/book-rooms-{slug}
 """
@@ -32,6 +32,7 @@ class ExtractedIPMS247Data(BaseModel):
     website: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    hotel_id: Optional[str] = None
     
     def has_data(self) -> bool:
         """Check if we extracted any useful data."""
@@ -218,6 +219,186 @@ class IPMS247Scraper:
                     data.country = "Canada"
                 elif line and not data.city:
                     data.city = line.rstrip(",")
+    
+    async def extract_with_playwright(self, slug: str) -> Optional[ExtractedIPMS247Data]:
+        """Extract hotel data using Playwright to render JavaScript.
+        
+        This opens the hotel info modal to get full details including
+        address, phone, email, and coordinates.
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.warning("Playwright not installed - falling back to HTTP scraper")
+            return await self.extract(slug)
+        
+        url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
+        
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                
+                # Navigate to booking page
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                
+                # Wait for page to load
+                await page.wait_for_timeout(2000)
+                
+                # Click the hotel info button to open modal
+                # Look for info icon or "Hotel Info" text
+                info_selectors = [
+                    'a[data-target="#propertyinfoModal"]',
+                    'a[onclick*="propertyinfo"]',
+                    '.fa-info-circle',
+                    'a:has-text("Hotel Info")',
+                    'a:has-text("Property Info")',
+                    '[data-type="hotel_info"]',
+                ]
+                
+                clicked = False
+                for selector in info_selectors:
+                    try:
+                        elem = page.locator(selector).first
+                        if await elem.is_visible():
+                            await elem.click()
+                            clicked = True
+                            break
+                    except:
+                        continue
+                
+                if clicked:
+                    # Wait for modal to load
+                    await page.wait_for_timeout(2000)
+                
+                # Get page content
+                html = await page.content()
+                await browser.close()
+                
+                return self._parse_full_html(html, slug, url)
+                
+        except Exception as e:
+            logger.debug(f"Playwright error for {slug}: {e}")
+            return await self.extract(slug)
+    
+    def _parse_full_html(self, html: str, slug: str, url: str) -> Optional[ExtractedIPMS247Data]:
+        """Parse full HTML including modal content."""
+        soup = BeautifulSoup(html, "html.parser")
+        data = ExtractedIPMS247Data(slug=slug, booking_url=url)
+        
+        # Get hotel ID
+        id_match = re.search(r'HotelId["\s:=]+(\d+)', html)
+        if id_match:
+            data.hotel_id = id_match.group(1)
+        
+        # Get name from htl-title (modal) or title tag
+        title_elem = soup.find("h4", class_="htl-title")
+        if title_elem:
+            for small in title_elem.find_all("small"):
+                small.decompose()
+            data.name = title_elem.get_text(strip=True)
+        
+        if not data.name:
+            title_tag = soup.find("title")
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+                if " , " in title:
+                    data.name = title.split(" , ")[0].strip()
+                else:
+                    data.name = title
+        
+        # Parse address from pl-address or cnt-detail
+        addr_elem = soup.find("p", class_="pl-address")
+        if addr_elem:
+            self._parse_address_from_html(addr_elem.get_text(separator="\n"), data)
+        
+        # Parse detail fields
+        for p in soup.find_all("p", class_="cnt-detail"):
+            text = p.get_text(strip=True)
+            
+            if text.startswith("Address"):
+                # Already parsed above
+                pass
+            elif text.startswith("Phone"):
+                phone = re.sub(r'^(Phone|Reservation Phone)\s*:\s*', '', text, flags=re.IGNORECASE)
+                if phone and not data.phone:
+                    data.phone = phone.strip()
+            elif text.startswith("Reservation Phone"):
+                phone = re.sub(r'^Reservation Phone\s*:\s*', '', text, flags=re.IGNORECASE)
+                if phone and not data.phone:
+                    data.phone = phone.strip()
+            elif text.startswith("Email"):
+                email = re.sub(r'^Email\s*:\s*', '', text, flags=re.IGNORECASE)
+                if "@" in email and not data.email:
+                    data.email = email.strip()
+        
+        # Extract lat/lng from JavaScript
+        lat_match = re.search(r"var\s+lat\s*=\s*'([0-9.-]+)'", html)
+        lng_match = re.search(r"var\s+lng\s*=\s*'([0-9.-]+)'", html)
+        if lat_match and lng_match:
+            try:
+                data.latitude = float(lat_match.group(1))
+                data.longitude = float(lng_match.group(1))
+            except ValueError:
+                pass
+        
+        return data if data.has_data() else None
+    
+    def _parse_address_from_html(self, addr_text: str, data: ExtractedIPMS247Data) -> None:
+        """Parse address text to extract components.
+        
+        Handles format like:
+        Address:
+        1219 Atlantic Ave,,
+        Ocean City,
+        MD - 21842, United States of America.
+        """
+        # Clean up whitespace and remove "Address:" label
+        addr_text = re.sub(r'\s+', ' ', addr_text).strip()
+        addr_text = re.sub(r'^Address:\s*', '', addr_text, flags=re.IGNORECASE)
+        
+        # Split by <br/> or commas, filtering empty
+        lines = [l.strip().rstrip(",").rstrip(".") for l in re.split(r'[,\n]', addr_text) if l.strip()]
+        lines = [l for l in lines if l and l.lower() != "address:"]
+        
+        if not lines:
+            return
+        
+        # First line is street address
+        data.address = lines[0]
+        
+        # Join remaining for pattern matching
+        remaining = " ".join(lines[1:])
+        
+        # Extract US state + ZIP (e.g., "MD - 21842" or "MD 21842")
+        us_match = re.search(r'\b([A-Z]{2})\s*[-–]?\s*(\d{5}(?:-\d{4})?)', remaining)
+        if us_match:
+            data.state = us_match.group(1)
+            data.zip_code = us_match.group(2)
+        
+        # Extract country
+        country_map = {
+            "united states of america": "United States",
+            "united states": "United States",
+            "usa": "United States",
+            "australia": "Australia",
+            "canada": "Canada",
+            "new zealand": "New Zealand",
+            "united kingdom": "United Kingdom",
+        }
+        remaining_lower = remaining.lower()
+        for pattern, country in country_map.items():
+            if pattern in remaining_lower:
+                data.country = country
+                break
+        
+        # City is usually second line (before state/zip/country)
+        if len(lines) > 1:
+            city_candidate = lines[1]
+            # Make sure it's not state/zip/country
+            if not re.search(r'\b[A-Z]{2}\s*[-–]?\s*\d{5}', city_candidate):
+                if not any(c in city_candidate.lower() for c in country_map.keys()):
+                    data.city = city_candidate
     
     def _extract_field(self, soup: BeautifulSoup, field_name: str) -> Optional[str]:
         """Extract a field value from the page.
