@@ -127,6 +127,7 @@ class RMSRepo:
                         THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
                         ELSE h.location 
                     END,
+                    status = 1,
                     updated_at = NOW()
                 FROM (
                     SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::float[], $11::float[])
