@@ -604,31 +604,20 @@ async def enrich_ipms247(limit: int, concurrency: int = 10) -> None:
         stats = {'enriched': 0, 'failed': 0}
         results_to_save = []
         
-        scraper = IPMS247Scraper(use_proxy=False)
+        scraper = IPMS247Scraper()
         
         async def process_hotel(h):
             async with semaphore:
                 url = h['booking_url'] or ''
-                slug = h['slug']
-                if not slug:
-                    # Extract slug from various URL patterns
-                    if 'book-rooms-' in url:
-                        slug = url.split('book-rooms-')[-1].split('/')[0].split('?')[0]
-                    elif 'gmap-' in url:
-                        slug = url.split('gmap-')[-1].split('/')[0].split('?')[0]
-                    elif 'reviewslist-' in url:
-                        slug = url.split('reviewslist-')[-1].split('/')[0].split('?')[0]
-                    else:
-                        # Last resort: take last path segment
-                        slug = url.rstrip('/').split('/')[-1].split('?')[0]
+                slug = h['slug'] or IPMS247Scraper.extract_slug_from_url(url)
                 
                 if not slug or slug.startswith('http'):
                     logger.debug(f"Invalid slug for IPMS247: {url}")
                     results_to_save.append({'hotel': h, 'data': None})
                     return
                 
-                # Use Playwright to get full modal data (email, phone, address)
-                data = await scraper.extract_with_playwright(slug)
+                # Use Playwright to get full data (email, phone, address, lat/lng)
+                data = await scraper.scrape(slug)
                 results_to_save.append({'hotel': h, 'data': data})
         
         await asyncio.gather(*[process_hotel(h) for h in hotels])

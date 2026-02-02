@@ -68,9 +68,17 @@ class IPMS247Scraper:
     """Scrape hotel data from IPMS247 booking pages.
     
     Usage:
-        scraper = IPMS247Scraper(use_proxy=True)
+        scraper = IPMS247Scraper()
+        
+        # Full data with Playwright (email, phone, address, lat/lng)
+        data = await scraper.scrape("safarihotelboardwalk")
+        
+        # Quick HTTP-only (name only, for initial discovery)
         data = await scraper.extract("safarihotelboardwalk")
     """
+    
+    # Booking engine ID in database
+    ENGINE_ID = 22
     
     def __init__(self, timeout: float = 15.0, use_proxy: bool = False):
         self.timeout = timeout
@@ -80,6 +88,53 @@ class IPMS247Scraper:
             self._proxy_url = _get_brightdata_proxy()
             if self._proxy_url:
                 logger.debug("IPMS247 scraper using Brightdata proxy")
+    
+    @staticmethod
+    def extract_slug_from_url(url: str) -> Optional[str]:
+        """Extract hotel slug from IPMS247 booking URL.
+        
+        Handles various URL patterns:
+        - book-rooms-{slug}
+        - gmap-{slug}
+        - reviewslist-{slug}
+        """
+        if not url:
+            return None
+        
+        patterns = [
+            (r'book-rooms-([A-Za-z0-9_-]+)', 'book-rooms-'),
+            (r'gmap-([A-Za-z0-9_-]+)', 'gmap-'),
+            (r'reviewslist-([A-Za-z0-9_-]+)', 'reviewslist-'),
+        ]
+        
+        for regex, prefix in patterns:
+            if prefix in url:
+                match = re.search(regex, url)
+                if match:
+                    slug = match.group(1).split('/')[0].split('?')[0]
+                    # Filter out non-hotel slugs
+                    if slug and not slug.endswith('.php') and len(slug) > 3:
+                        return slug
+        
+        return None
+    
+    @staticmethod
+    def build_booking_url(slug: str) -> str:
+        """Build booking URL from slug."""
+        return f"https://live.ipms247.com/booking/book-rooms-{slug}"
+    
+    async def scrape(self, slug: str) -> Optional[ExtractedIPMS247Data]:
+        """Scrape full hotel data using Playwright.
+        
+        This is the primary method - gets all data including:
+        - Name, address, city, state, country, zip
+        - Phone, email
+        - Lat/lng coordinates
+        - Hotel type, check-in/out times, policies
+        
+        Falls back to HTTP-only extract() if Playwright fails.
+        """
+        return await self.extract_with_playwright(slug)
     
     def _get_client_kwargs(self) -> dict:
         """Get httpx client kwargs."""

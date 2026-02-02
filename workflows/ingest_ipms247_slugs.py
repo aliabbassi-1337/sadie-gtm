@@ -64,15 +64,22 @@ async def get_existing_slugs() -> set[str]:
 
 async def ingest_slugs(
     slugs: list[str],
-    concurrency: int = 20,
+    concurrency: int = 5,
     dry_run: bool = False,
+    use_playwright: bool = True,
 ) -> tuple[int, int, int]:
     """
     Ingest IPMS247 hotels from slugs.
     
+    Args:
+        slugs: List of hotel slugs to scrape
+        concurrency: Number of concurrent scrapers (lower for Playwright)
+        dry_run: If True, don't save to database
+        use_playwright: If True, use Playwright for full data; else HTTP-only
+    
     Returns (total, scraped, saved)
     """
-    scraper = IPMS247Scraper(use_proxy=False)  # Direct requests work
+    scraper = IPMS247Scraper()
     semaphore = asyncio.Semaphore(concurrency)
     
     scraped = 0
@@ -83,7 +90,12 @@ async def ingest_slugs(
         nonlocal scraped, errors
         async with semaphore:
             try:
-                data = await scraper.extract(slug)
+                # Use scrape() for full data (Playwright) or extract() for quick HTTP-only
+                if use_playwright:
+                    data = await scraper.scrape(slug)
+                else:
+                    data = await scraper.extract(slug)
+                
                 if data and data.has_data():
                     scraped += 1
                     return {
@@ -146,9 +158,10 @@ async def main():
     parser = argparse.ArgumentParser(description="Ingest IPMS247 hotels from discovered slugs")
     parser.add_argument("--s3-key", type=str, help="S3 key for slug list (e.g., crawl-data/ipms247_archive_discovery_20260202.txt)")
     parser.add_argument("--input", type=str, help="Local file with slugs (one per line)")
-    parser.add_argument("--concurrency", type=int, default=20, help="Concurrent scrapes (default: 20)")
+    parser.add_argument("--concurrency", type=int, default=5, help="Concurrent scrapes (default: 5 for Playwright)")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of slugs (0 = all)")
     parser.add_argument("--dry-run", action="store_true", help="Don't save to database")
+    parser.add_argument("--http-only", action="store_true", help="Use HTTP-only scraping (faster but less data)")
     args = parser.parse_args()
     
     if not args.s3_key and not args.input:
@@ -186,6 +199,7 @@ async def main():
             new_slugs,
             concurrency=args.concurrency,
             dry_run=args.dry_run,
+            use_playwright=not args.http_only,
         )
         
         print(f"\n{'=' * 50}")
