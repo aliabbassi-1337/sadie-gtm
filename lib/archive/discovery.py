@@ -156,6 +156,15 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.escapia.com/property/*",
         slug_type="numeric",
     ),
+    # ipms247 / Yanolja Cloud Solution (formerly eZee)
+    # URL format: live.ipms247.com/booking/book-rooms-{slug}
+    BookingEnginePattern(
+        name="ipms247",
+        wayback_url_pattern="live.ipms247.com/booking/book-rooms-*",
+        slug_regex=r"/booking/book-rooms-([A-Za-z0-9_-]+)",
+        commoncrawl_url_pattern="live.ipms247.com/booking/book-rooms-*",
+        slug_type="alphanumeric",
+    ),
 ]
 
 
