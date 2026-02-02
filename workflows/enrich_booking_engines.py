@@ -609,7 +609,8 @@ async def enrich_ipms247(limit: int, concurrency: int = 10) -> None:
         async def process_hotel(h):
             async with semaphore:
                 slug = h['slug'] or h['booking_url'].split('book-rooms-')[-1].split('/')[0].split('?')[0]
-                data = await scraper.extract(slug)
+                # Use Playwright to bypass 403 blocks and get full modal data
+                data = await scraper.extract_with_playwright(slug)
                 results_to_save.append({'hotel': h, 'data': data})
         
         await asyncio.gather(*[process_hotel(h) for h in hotels])
