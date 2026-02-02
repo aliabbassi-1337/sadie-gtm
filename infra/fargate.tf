@@ -341,6 +341,303 @@ resource "aws_cloudwatch_metric_alarm" "rms_enrichment_queue_low" {
   alarm_actions = [aws_appautoscaling_policy.rms_enrichment_scale_down.arn]
 }
 
+# =============================================================================
+# SCHEDULED ENRICHMENT TASKS (EventBridge -> Fargate)
+# =============================================================================
+
+# IAM Role for EventBridge to run ECS tasks
+resource "aws_iam_role" "eventbridge_ecs" {
+  name = "${var.app_name}-eventbridge-ecs"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "events.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "eventbridge_ecs" {
+  name = "${var.app_name}-eventbridge-ecs-policy"
+  role = aws_iam_role.eventbridge_ecs.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["ecs:RunTask"]
+        Resource = ["arn:aws:ecs:eu-north-1:*:task-definition/${var.app_name}-*"]
+      },
+      {
+        Effect = "Allow"
+        Action = ["iam:PassRole"]
+        Resource = [
+          aws_iam_role.ecs_task_execution.arn,
+          aws_iam_role.ecs_task.arn
+        ]
+      }
+    ]
+  })
+}
+
+# Task Definition - Cloudbeds Enrichment (scheduled)
+resource "aws_ecs_task_definition" "cloudbeds_enrichment" {
+  family                   = "${var.app_name}-cloudbeds-enrichment"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "enrichment"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "cloudbeds", "--limit", "500", "--concurrency", "20"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "BRIGHTDATA_CUSTOMER_ID", valueFrom = "/${var.app_name}/brightdata-customer-id" },
+      { name = "BRIGHTDATA_DC_ZONE", valueFrom = "/${var.app_name}/brightdata-dc-zone" },
+      { name = "BRIGHTDATA_DC_PASSWORD", valueFrom = "/${var.app_name}/brightdata-dc-password" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "cloudbeds-enrichment"
+      }
+    }
+  }])
+}
+
+# Task Definition - RMS API Enrichment (scheduled)
+resource "aws_ecs_task_definition" "rms_api_enrichment" {
+  family                   = "${var.app_name}-rms-api-enrichment"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "enrichment"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "rms", "--limit", "200", "--concurrency", "10"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "BRIGHTDATA_CUSTOMER_ID", valueFrom = "/${var.app_name}/brightdata-customer-id" },
+      { name = "BRIGHTDATA_DC_ZONE", valueFrom = "/${var.app_name}/brightdata-dc-zone" },
+      { name = "BRIGHTDATA_DC_PASSWORD", valueFrom = "/${var.app_name}/brightdata-dc-password" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "rms-api-enrichment"
+      }
+    }
+  }])
+}
+
+# Task Definition - SiteMinder Enrichment (scheduled)
+resource "aws_ecs_task_definition" "siteminder_enrichment" {
+  family                   = "${var.app_name}-siteminder-enrichment"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "enrichment"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "siteminder", "--limit", "200", "--concurrency", "20"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "BRIGHTDATA_CUSTOMER_ID", valueFrom = "/${var.app_name}/brightdata-customer-id" },
+      { name = "BRIGHTDATA_DC_ZONE", valueFrom = "/${var.app_name}/brightdata-dc-zone" },
+      { name = "BRIGHTDATA_DC_PASSWORD", valueFrom = "/${var.app_name}/brightdata-dc-password" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "siteminder-enrichment"
+      }
+    }
+  }])
+}
+
+# Task Definition - Proximity Calculation (scheduled)
+resource "aws_ecs_task_definition" "proximity_enrichment" {
+  family                   = "${var.app_name}-proximity-enrichment"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "enrichment"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "proximity", "--limit", "1000"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "proximity-enrichment"
+      }
+    }
+  }])
+}
+
+# EventBridge Rule - Cloudbeds Enrichment (every 10 min)
+resource "aws_cloudwatch_event_rule" "cloudbeds_enrichment" {
+  name                = "${var.app_name}-cloudbeds-enrichment"
+  description         = "Trigger Cloudbeds enrichment every 10 minutes"
+  schedule_expression = "rate(10 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "cloudbeds_enrichment" {
+  rule      = aws_cloudwatch_event_rule.cloudbeds_enrichment.name
+  target_id = "cloudbeds-enrichment"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.cloudbeds_enrichment.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# EventBridge Rule - RMS API Enrichment (every 15 min)
+resource "aws_cloudwatch_event_rule" "rms_api_enrichment" {
+  name                = "${var.app_name}-rms-api-enrichment"
+  description         = "Trigger RMS API enrichment every 15 minutes"
+  schedule_expression = "rate(15 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "rms_api_enrichment" {
+  rule      = aws_cloudwatch_event_rule.rms_api_enrichment.name
+  target_id = "rms-api-enrichment"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.rms_api_enrichment.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# EventBridge Rule - SiteMinder Enrichment (every 15 min)
+resource "aws_cloudwatch_event_rule" "siteminder_enrichment" {
+  name                = "${var.app_name}-siteminder-enrichment"
+  description         = "Trigger SiteMinder enrichment every 15 minutes"
+  schedule_expression = "rate(15 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "siteminder_enrichment" {
+  rule      = aws_cloudwatch_event_rule.siteminder_enrichment.name
+  target_id = "siteminder-enrichment"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.siteminder_enrichment.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# EventBridge Rule - Proximity Enrichment (every 5 min)
+resource "aws_cloudwatch_event_rule" "proximity_enrichment" {
+  name                = "${var.app_name}-proximity-enrichment"
+  description         = "Trigger proximity calculation every 5 minutes"
+  schedule_expression = "rate(5 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "proximity_enrichment" {
+  rule      = aws_cloudwatch_event_rule.proximity_enrichment.name
+  target_id = "proximity-enrichment"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.proximity_enrichment.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
 # Outputs
 output "cluster_name" {
   value = aws_ecs_cluster.main.name
@@ -352,4 +649,13 @@ output "rms_enrichment_service_name" {
 
 output "rms_scan_service_name" {
   value = aws_ecs_service.rms_scan.name
+}
+
+output "scheduled_tasks" {
+  value = {
+    cloudbeds  = aws_cloudwatch_event_rule.cloudbeds_enrichment.name
+    rms_api    = aws_cloudwatch_event_rule.rms_api_enrichment.name
+    siteminder = aws_cloudwatch_event_rule.siteminder_enrichment.name
+    proximity  = aws_cloudwatch_event_rule.proximity_enrichment.name
+  }
 }
