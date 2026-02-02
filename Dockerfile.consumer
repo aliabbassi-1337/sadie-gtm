@@ -11,6 +11,9 @@ COPY db ./db
 COPY lib ./lib
 COPY services ./services
 COPY workflows ./workflows
+COPY infra ./infra
+COPY sources ./sources
+COPY messages ./messages
 
 # Install dependencies
 RUN uv sync --frozen
