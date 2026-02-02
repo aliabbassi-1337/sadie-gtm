@@ -604,7 +604,7 @@ async def enrich_ipms247(limit: int, concurrency: int = 10) -> None:
         stats = {'enriched': 0, 'failed': 0}
         results_to_save = []
         
-        scraper = IPMS247Scraper(use_proxy=False)  # Direct requests work, DC proxy gets blocked
+        scraper = IPMS247Scraper(use_proxy=False)
         
         async def process_hotel(h):
             async with semaphore:
@@ -627,8 +627,8 @@ async def enrich_ipms247(limit: int, concurrency: int = 10) -> None:
                     results_to_save.append({'hotel': h, 'data': None})
                     return
                 
-                # Use HTTP with Brightdata proxy to avoid rate limits
-                data = await scraper.extract(slug)
+                # Use Playwright to get full modal data (email, phone, address)
+                data = await scraper.extract_with_playwright(slug)
                 results_to_save.append({'hotel': h, 'data': data})
         
         await asyncio.gather(*[process_hotel(h) for h in hotels])
