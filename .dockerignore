@@ -33,8 +33,7 @@ context/
 *.geojson
 *.csv
 
-# Infra (not needed at runtime)
-infra/
+# Not needed at runtime
 .planning/
 scripts/
 
