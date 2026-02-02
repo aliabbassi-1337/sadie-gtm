@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv
+*.egg-info
+.eggs
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+.cursor
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov
+.tox
+
+# Data files (large)
+hotel-sources/
+context/
+*.pdf
+*.geojson
+*.csv
+
+# Infra (not needed at runtime)
+infra/
+.planning/
+scripts/
+
+# Misc
+*.log
+*.tmp
+.env
+.env.*
+*.md
+LICENSE
+Makefile
+docker-compose.yml
+Dockerfile*

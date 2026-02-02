@@ -2,21 +2,20 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install uv
+# Install uv (cached layer)
 RUN pip install uv
 
-# Copy project files
+# Install dependencies FIRST (cached layer - only rebuilds when pyproject.toml/uv.lock change)
 COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
+
+# Copy code LAST (small layer - fast to push on each deploy)
 COPY db ./db
 COPY lib ./lib
 COPY services ./services
 COPY workflows ./workflows
-COPY infra ./infra
 COPY sources ./sources
 COPY messages ./messages
 
-# Install dependencies
-RUN uv sync --frozen
-
-# Default command (overridden by task definition)
+# Default command
 CMD ["uv", "run", "python", "-m", "workflows.enrich_rms_consumer", "--concurrency", "50"]

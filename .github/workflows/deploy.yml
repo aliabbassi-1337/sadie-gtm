@@ -1,98 +1,48 @@
-name: Deploy to EC2
+name: Deploy to Fargate
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-north-1
+  ECR_REPOSITORY: sadie-gtm-consumer
+  ECS_CLUSTER: sadie-gtm-cluster
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: Sadie GTM Ec2
-
+    
     steps:
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" | base64 -d > ~/.ssh/key.pem
-          chmod 600 ~/.ssh/key.pem
+      - uses: actions/checkout@v4
 
-      - name: Deploy to EC2 instances (parallel)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
         env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KEY_PUB: ${{ secrets.DEPLOY_SSH_KEY_PUB }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          IPS="13.61.104.62 13.60.58.185 51.20.9.238 13.60.236.93 16.171.174.5 13.53.197.203 51.20.191.25"
+          docker build -f Dockerfile.consumer -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-          deploy_server() {
-            local ip=$1
-            local is_primary=$2
-            echo "=== Deploying to $ip ==="
-            if ssh -i ~/.ssh/key.pem -o ConnectTimeout=30 -o StrictHostKeyChecking=no ubuntu@$ip "
-              mkdir -p ~/.ssh
-              rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub
-              echo '$DEPLOY_KEY' > ~/.ssh/id_ed25519
-              echo '$DEPLOY_KEY_PUB' > ~/.ssh/id_ed25519.pub
-              chmod 600 ~/.ssh/id_ed25519
-              chmod 644 ~/.ssh/id_ed25519.pub
-              ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
-              cd ~/sadie-gtm
-              git remote set-url origin git@github.com:aliabbassi-1337/sadie-gtm.git
-              git fetch origin main
-              git reset --hard origin/main
-              git clean -fd
-              
-              # Regenerate and deploy systemd/cron from workflows.yaml
-              source ~/.local/bin/env 2>/dev/null || export PATH=\$HOME/.local/bin:\$PATH
-              uv run python scripts/deploy_ec2.py generate
-              sudo cp infra/ec2/generated/*.service /etc/systemd/system/
-              sudo systemctl daemon-reload
-              
-              # Only deploy cron on primary server
-              if [ '$is_primary' = 'true' ]; then
-                sudo cp infra/ec2/generated/sadie-cron /etc/cron.d/sadie-gtm
-              fi
-              
-              # Restart all managed services
-              sudo systemctl restart detection-consumer || true
-              sudo systemctl restart booking-enrichment-consumer || true
-              sudo systemctl restart cloudbeds-enrichment-consumer || true
-              sudo systemctl restart consume-rms-slugs || true
-              sudo systemctl restart rms-scan-consumer || true
-              sudo systemctl restart mews-enrichment-consumer || true
-              sudo systemctl restart enrich-rms-consumer || true
-            "; then
-              echo "SUCCESS: $ip"
-              return 0
-            else
-              echo "FAILED: $ip"
-              return 1
-            fi
-          }
-
-          export -f deploy_server
-          export DEPLOY_KEY DEPLOY_KEY_PUB
-
-          # Run all deployments in parallel
-          # First IP is primary (runs cron jobs)
-          PRIMARY_IP=$(echo $IPS | cut -d' ' -f1)
-          FAILED=""
-          for ip in $IPS; do
-            if [ "$ip" = "$PRIMARY_IP" ]; then
-              deploy_server $ip true &
-            else
-              deploy_server $ip false &
-            fi
+      - name: Force new deployment of ECS services
+        run: |
+          # Update all services to pull the new image
+          for service in sadie-gtm-rms-enrichment; do
+            aws ecs update-service --cluster $ECS_CLUSTER --service $service --force-new-deployment || true
           done
-
-          # Wait for all and collect failures
-          for job in $(jobs -p); do
-            wait $job || FAILED="$FAILED (job)"
-          done
-
-          if [ -n "$FAILED" ]; then
-            echo "::error::Some deployments failed"
-            exit 1
-          fi
-
-          echo "=== All deployments complete ==="
+          echo "Deployment triggered - new tasks will use updated image"
