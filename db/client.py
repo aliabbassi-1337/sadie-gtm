@@ -1,12 +1,29 @@
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 import asyncpg
 import aiosql
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def _parse_database_url():
+    """Parse DATABASE_URL into individual components."""
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        return None
+    
+    parsed = urlparse(url)
+    return {
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
+        "database": parsed.path.lstrip("/"),
+        "user": parsed.username,
+        "password": parsed.password,
+    }
 
 # Load queries from SQL files
 queries = aiosql.from_path(
@@ -27,12 +44,27 @@ async def init_db():
     """Initialize connection pool once at startup."""
     global _pool
     if _pool is None:
+        # Try DATABASE_URL first (Fargate/production), then individual vars (local dev)
+        db_config = _parse_database_url()
+        if db_config:
+            host = db_config["host"]
+            port = db_config["port"]
+            database = db_config["database"]
+            user = db_config["user"]
+            password = db_config["password"]
+        else:
+            host = os.getenv("SADIE_DB_HOST")
+            port = int(os.getenv("SADIE_DB_PORT", "5432"))
+            database = os.getenv("SADIE_DB_NAME")
+            user = os.getenv("SADIE_DB_USER")
+            password = os.getenv("SADIE_DB_PASSWORD")
+        
         _pool = await asyncpg.create_pool(
-            host=os.getenv("SADIE_DB_HOST"),
-            port=int(os.getenv("SADIE_DB_PORT", "5432")),
-            database=os.getenv("SADIE_DB_NAME"),
-            user=os.getenv("SADIE_DB_USER"),
-            password=os.getenv("SADIE_DB_PASSWORD"),
+            host=host,
+            port=port,
+            database=database,
+            user=user,
+            password=password,
             min_size=1,
             max_size=10,  # Transaction pooling mode allows more connections
             command_timeout=60,
