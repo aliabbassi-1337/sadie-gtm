@@ -22,6 +22,7 @@ RUN uv run playwright install chromium
 # Copy code LAST (small layer - fast to push on each deploy)
 COPY db ./db
 COPY lib ./lib
+COPY infra ./infra
 COPY services ./services
 COPY workflows ./workflows
 COPY sources ./sources
