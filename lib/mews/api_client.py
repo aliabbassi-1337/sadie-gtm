@@ -54,10 +54,10 @@ def _get_brightdata_proxy(prefer_cheap: bool = True) -> Optional[str]:
         return f"http://{username}:{password}@brd.superproxy.io:33335"
     return None
 
-# Rate limiting - Mews API is EXTREMELY strict, needs 10+ seconds between calls
-_last_api_call = 0
-_api_lock = None
-API_RATE_LIMIT = 10.0  # 10 seconds between calls to avoid 429s
+# Rate limiting - use semaphore for concurrency control instead of sequential
+_api_semaphore = None
+MAX_CONCURRENT_REQUESTS = 5  # Allow 5 parallel requests
+BASE_RETRY_DELAY = 2.0  # Base delay for exponential backoff on 429
 
 
 class MewsHotelData(BaseModel):
@@ -262,30 +262,22 @@ class MewsApiClient:
             return None
     
     async def _fetch_via_api(self, slug: str, retry_count: int = 0) -> tuple[Optional[dict], bool]:
-        """Fetch data via direct API call with rate limiting.
+        """Fetch data via direct API call with concurrency control.
         
         Returns:
             Tuple of (data, needs_session_refresh). If data is None and needs_refresh
             is True, caller should refresh session and retry.
         """
-        global _last_api_call, _api_lock
+        global _api_semaphore
         
-        if _api_lock is None:
-            _api_lock = asyncio.Lock()
+        if _api_semaphore is None:
+            _api_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         
         session, client = await self._get_session()
         
         if not session or not client:
             logger.warning("No Mews session available")
             return None, True  # No session - need refresh
-        
-        # Rate limiting - wait between API calls
-        async with _api_lock:
-            now = time.time()
-            wait_time = API_RATE_LIMIT - (now - _last_api_call)
-            if wait_time > 0:
-                await asyncio.sleep(wait_time)
-            _last_api_call = time.time()
         
         payload = {
             "ids": [slug],
@@ -294,44 +286,46 @@ class MewsApiClient:
             "session": session,
         }
         
-        try:
-            resp = await self._http_client.post(
-                self.API_URL,
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Origin": "https://app.mews.com",
-                    "Referer": "https://app.mews.com/",
-                },
-            )
-            
-            if resp.status_code == 200:
-                return resp.json(), False
-            elif resp.status_code == 429:
-                # Rate limited - exponential backoff and retry
-                if retry_count < 3:
-                    wait = (retry_count + 1) * 5  # 5s, 10s, 15s
-                    logger.debug(f"Rate limited, waiting {wait}s...")
-                    await asyncio.sleep(wait)
-                    return await self._fetch_via_api(slug, retry_count + 1)
-                logger.warning(f"Mews rate limit exceeded for {slug} after 3 retries")
-                return None, False  # Rate limit - don't refresh session
-            elif resp.status_code == 400:
-                text = resp.text
-                if "session" in text.lower():
-                    # Session expired, need refresh
-                    logger.debug(f"Mews session expired for {slug}")
-                    return None, True
-                # Invalid hotel ID - don't retry or refresh
-                logger.debug(f"Invalid Mews ID {slug}: {text[:50]}")
-                return None, False
-            else:
-                logger.debug(f"Mews API error for {slug}: HTTP {resp.status_code}")
-                return None, False
+        # Use semaphore to limit concurrent requests
+        async with _api_semaphore:
+            try:
+                resp = await self._http_client.post(
+                    self.API_URL,
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": "https://app.mews.com",
+                        "Referer": "https://app.mews.com/",
+                    },
+                )
                 
-        except Exception as e:
-            logger.debug(f"Mews API request failed for {slug}: {e}")
-            return None, False
+                if resp.status_code == 200:
+                    return resp.json(), False
+                elif resp.status_code == 429:
+                    # Rate limited - exponential backoff and retry
+                    if retry_count < 5:
+                        wait = BASE_RETRY_DELAY * (2 ** retry_count)  # 2s, 4s, 8s, 16s, 32s
+                        logger.debug(f"Rate limited, waiting {wait:.1f}s...")
+                        await asyncio.sleep(wait)
+                        return await self._fetch_via_api(slug, retry_count + 1)
+                    logger.warning(f"Mews rate limit exceeded for {slug} after 5 retries")
+                    return None, False  # Rate limit - don't refresh session
+                elif resp.status_code == 400:
+                    text = resp.text
+                    if "session" in text.lower():
+                        # Session expired, need refresh
+                        logger.debug(f"Mews session expired for {slug}")
+                        return None, True
+                    # Invalid hotel ID - don't retry or refresh
+                    logger.debug(f"Invalid Mews ID {slug}: {text[:50]}")
+                    return None, False
+                else:
+                    logger.debug(f"Mews API error for {slug}: HTTP {resp.status_code}")
+                    return None, False
+                    
+            except Exception as e:
+                logger.debug(f"Mews API request failed for {slug}: {e}")
+                return None, False
     
     def _parse_response(self, slug: str, data: dict) -> MewsHotelData:
         """Parse Mews API response into hotel data."""
