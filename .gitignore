@@ -47,3 +47,10 @@ infra/ec2/generated/
 .claude/
 *.xlsx
 context/prompt.md
+
+# Terraform
+infra/.terraform/
+infra/terraform.tfstate
+infra/terraform.tfstate.backup
+*.tfstate
+*.tfstate.backup

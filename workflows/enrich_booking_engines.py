@@ -87,7 +87,7 @@ async def show_status() -> None:
                 LEFT JOIN sadie_gtm.hotel_room_count hrc ON hrc.hotel_id = h.id
                 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON hcp.hotel_id = h.id
                 WHERE hbe.status = 1
-                  AND h.status = 1
+                  AND h.status != 99  -- Exclude dead ends only
                   AND be.id IN ($1, $2, $3)
                 GROUP BY be.id, be.name
                 ORDER BY total DESC
@@ -228,22 +228,27 @@ async def enrich_cloudbeds(limit: int, concurrency: int = 20) -> None:
     try:
         async with get_conn() as conn:
             # Get hotels needing enrichment
+            # Priority: location > email > room_count (need location for proximity)
+            # Include all hotels with booking engine (status >= 0 or -1 crawled)
             hotels = await conn.fetch('''
                 SELECT h.id, h.name, hbe.booking_url,
                        h.email as existing_email,
                        h.location IS NOT NULL as has_location,
-                       hrc.room_count IS NOT NULL as has_room_count
+                       hrc.hotel_id IS NOT NULL as has_room_count
                 FROM sadie_gtm.hotel_booking_engines hbe
                 JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
                 LEFT JOIN sadie_gtm.hotel_room_count hrc ON hrc.hotel_id = h.id
                 WHERE hbe.booking_engine_id = $1
                   AND hbe.status = 1
-                  AND h.status = 1
+                  AND h.status != 99  -- Exclude dead ends only
                   AND (
                       h.location IS NULL
                       OR (h.email IS NULL OR h.email = '')
                       OR hrc.hotel_id IS NULL
                   )
+                ORDER BY 
+                    CASE WHEN h.location IS NULL THEN 0 ELSE 1 END,  -- Location first
+                    h.id
                 LIMIT $2
             ''', CLOUDBEDS_ID, limit)
         
@@ -312,8 +317,8 @@ async def enrich_cloudbeds(limit: int, concurrency: int = 20) -> None:
                 # Update room count if missing
                 if not h['has_room_count'] and result['room_count']:
                     await conn.execute('''
-                        INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status)
-                        VALUES ($1, $2, 'cloudbeds_api', 1)
+                        INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source)
+                        VALUES ($1, $2, 'cloudbeds_api')
                         ON CONFLICT (hotel_id) DO UPDATE SET room_count = $2, source = 'cloudbeds_api'
                     ''', h['id'], result['room_count'])
                     stats['room_count'] += 1
@@ -347,21 +352,27 @@ async def enrich_rms(limit: int, concurrency: int = 10) -> None:
     try:
         async with get_conn() as conn:
             # Get hotels needing enrichment
+            # Priority: location > city > email (need location for proximity)
+            # Include all hotels with booking engine (exclude dead ends only)
             hotels = await conn.fetch('''
                 SELECT h.id, h.name, hbe.booking_url,
                        h.email as existing_email,
                        h.location IS NOT NULL as has_location,
-                       hrc.room_count IS NOT NULL as has_room_count
+                       hrc.hotel_id IS NOT NULL as has_room_count
                 FROM sadie_gtm.hotel_booking_engines hbe
                 JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
                 LEFT JOIN sadie_gtm.hotel_room_count hrc ON hrc.hotel_id = h.id
                 WHERE hbe.booking_engine_id = $1
                   AND hbe.status = 1
-                  AND h.status = 1
+                  AND h.status != 99  -- Exclude dead ends only
                   AND (
-                      h.city IS NULL OR h.city = ''
+                      h.location IS NULL
+                      OR h.city IS NULL OR h.city = ''
                       OR (h.email IS NULL OR h.email = '')
                   )
+                ORDER BY 
+                    CASE WHEN h.location IS NULL THEN 0 ELSE 1 END,  -- Location first
+                    h.id
                 LIMIT $2
             ''', RMS_ID, limit)
         
@@ -382,18 +393,38 @@ async def enrich_rms(limit: int, concurrency: int = 10) -> None:
                     if not url.startswith('http'):
                         url = f'https://{url}'
                     
-                    # Parse clientId from URL
-                    match = re.search(r'/Search/Index/([^/]+)/\d+/?', url)
-                    slug = match.group(1) if match else url.rstrip('/').split('/')[-2]
+                    # Parse clientId and server from URL
+                    # Format 1: /Search/Index/{id}/90/ (bookings.rmscloud.com)
+                    # Format 2: ibe12.rmscloud.com/{id} (IBE servers)
+                    # Format 3: external website with /reservation/ path
                     
-                    # Determine server
+                    slug = None
                     server = 'bookings.rmscloud.com'
-                    if 'bookings12' in url:
-                        server = 'bookings12.rmscloud.com'
-                    elif 'bookings10' in url:
-                        server = 'bookings10.rmscloud.com'
-                    elif 'bookings8' in url:
-                        server = 'bookings8.rmscloud.com'
+                    
+                    # Try /Search/Index/ format first
+                    match = re.search(r'/Search/Index/([^/]+)/\d+/?', url)
+                    if match:
+                        slug = match.group(1)
+                        if 'bookings12' in url:
+                            server = 'bookings12.rmscloud.com'
+                        elif 'bookings10' in url:
+                            server = 'bookings10.rmscloud.com'
+                        elif 'bookings8' in url:
+                            server = 'bookings8.rmscloud.com'
+                    else:
+                        # Try IBE format: ibe12.rmscloud.com/{numeric_id}
+                        ibe_match = re.search(r'(ibe\d+\.rmscloud\.com)/(\d+)', url)
+                        if ibe_match:
+                            server = ibe_match.group(1)
+                            slug = ibe_match.group(2)
+                        else:
+                            # External website - skip (can't extract from API)
+                            results_to_save.append({'hotel': h, 'data': None})
+                            return
+                    
+                    if not slug:
+                        results_to_save.append({'hotel': h, 'data': None})
+                        return
                     
                     data = await api_client.extract(slug, server)
                     
@@ -475,7 +506,7 @@ async def enrich_siteminder(limit: int, concurrency: int = 20) -> None:
                 JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
                 WHERE hbe.booking_engine_id = $1
                   AND hbe.status = 1
-                  AND h.status = 1
+                  AND h.status != 99  -- Exclude dead ends only
                   AND hbe.booking_url LIKE '%direct-book.com%'
                   AND (
                       h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%'
@@ -551,8 +582,8 @@ async def calculate_proximity(limit: int, concurrency: int = 20) -> None:
                 JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
                 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON hcp.hotel_id = h.id
                 WHERE hbe.booking_engine_id IN ($1, $2, $3)
-                  AND h.status = 1
                   AND hbe.status = 1
+                  AND h.status != 99  -- Exclude dead ends only
                   AND h.location IS NOT NULL
                   AND (hcp.hotel_id IS NULL OR hcp.distance_km IS NULL)
                 LIMIT $4

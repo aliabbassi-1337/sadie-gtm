@@ -135,6 +135,14 @@ CREATE TABLE IF NOT EXISTS hotel_booking_engines (
     -- Detection metadata
     booking_url TEXT,
     detection_method TEXT,  -- playwright, regex, manual
+    engine_property_id TEXT,  -- Booking engine's internal property ID
+
+    -- Status: 0 = pending, 1 = active, 2 = invalid, 99 = error
+    status SMALLINT DEFAULT 1,
+
+    -- Enrichment tracking
+    enrichment_status INTEGER DEFAULT 0,  -- 0 = pending, 1 = enriched, 2 = failed
+    last_enrichment_attempt TIMESTAMPTZ,
 
     -- Timestamps
     detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -142,18 +150,21 @@ CREATE TABLE IF NOT EXISTS hotel_booking_engines (
 );
 
 CREATE INDEX IF NOT EXISTS idx_hotel_booking_engines_engine_id ON hotel_booking_engines(booking_engine_id);
+CREATE INDEX IF NOT EXISTS idx_hotel_booking_engines_status ON hotel_booking_engines(status);
+CREATE INDEX IF NOT EXISTS idx_hotel_booking_engines_enrichment_status ON hotel_booking_engines(enrichment_status);
 
 -- ============================================================================
 -- ENRICHMENT TABLES (separate for each enrichment type)
 -- ============================================================================
 
--- Room count (Groq/Google enrichment job)
+-- Room count (Groq/Google/API enrichment job)
 CREATE TABLE IF NOT EXISTS hotel_room_count (
     id SERIAL PRIMARY KEY,
     hotel_id INTEGER NOT NULL UNIQUE REFERENCES hotels(id) ON DELETE CASCADE,
-    room_count INTEGER NOT NULL,
-    source TEXT,  -- groq, google, manual
+    room_count INTEGER,  -- Nullable (some sources don't provide)
+    source TEXT,  -- groq, google, manual, cloudbeds_api, rms_api
     confidence DECIMAL(3,2),  -- 0.00 to 1.00
+    status INTEGER DEFAULT 0,  -- 0 = estimated, 1 = verified, 2 = from_api
     enriched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
