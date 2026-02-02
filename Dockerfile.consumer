@@ -1,0 +1,19 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install uv
+RUN pip install uv
+
+# Copy project files
+COPY pyproject.toml uv.lock ./
+COPY db ./db
+COPY lib ./lib
+COPY services ./services
+COPY workflows ./workflows
+
+# Install dependencies
+RUN uv sync --frozen
+
+# Default command (overridden by task definition)
+CMD ["uv", "run", "python", "-m", "workflows.enrich_rms_consumer", "--concurrency", "50"]
