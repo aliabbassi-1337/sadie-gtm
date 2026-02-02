@@ -2,7 +2,7 @@
 
 This workflow targets Cloudbeds (booking_engine_id=3) hotels in Texas that need:
 1. Location data fixes (state inference from city/address)
-2. Room count enrichment
+2. Room count enrichment (via Cloudbeds API, website scraping, or LLM)
 3. Customer proximity calculation
 
 USAGE:
@@ -12,7 +12,10 @@ USAGE:
     # Fix location data (state inference)
     uv run python workflows/enrich_texas_cloudbeds.py fix-locations
 
-    # Enrich room counts
+    # Enrich room counts via Cloudbeds API (most accurate, requires Brightdata proxy)
+    uv run python workflows/enrich_texas_cloudbeds.py room-counts-api --limit 100
+
+    # Enrich room counts via website scraping + LLM fallback
     uv run python workflows/enrich_texas_cloudbeds.py room-counts --limit 50
 
     # Calculate customer proximity
@@ -26,11 +29,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncio
 import argparse
+import os
+import re
 from loguru import logger
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
+
+import httpx
+from dotenv import load_dotenv
 
 from db.client import init_db, close_db, get_conn
 from services.enrichment.service import Service
+
+load_dotenv()
 
 
 CLOUDBEDS_ENGINE_ID = 3
@@ -143,20 +153,103 @@ async def fix_texas_locations(conn) -> int:
 async def get_texas_cloudbeds_needing_rooms(conn, limit: int) -> List[Dict[str, Any]]:
     """Get Texas Cloudbeds hotels that need room count enrichment."""
     return await conn.fetch('''
-        SELECT h.id, h.name, h.website
+        SELECT h.id, h.name, h.website, hbe.booking_url
         FROM sadie_gtm.hotel_booking_engines hbe
         JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
         LEFT JOIN sadie_gtm.hotel_room_count hrc ON hrc.hotel_id = hbe.hotel_id
         WHERE hbe.booking_engine_id = $1
           AND hbe.status = 1
           AND h.status = 1
-          AND h.email IS NOT NULL AND h.email != ''
-          AND h.country = 'United States'
           AND h.state = 'Texas'
-          AND h.website IS NOT NULL AND h.website != ''
           AND hrc.hotel_id IS NULL
         LIMIT $2
     ''', CLOUDBEDS_ENGINE_ID, limit)
+
+
+def _get_brightdata_proxy() -> Optional[str]:
+    """Get Brightdata datacenter proxy URL."""
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+    dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+    if customer_id and dc_zone and dc_password:
+        username = f"brd-customer-{customer_id}-zone-{dc_zone}"
+        return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
+    return None
+
+
+def _extract_property_code(url: str) -> Optional[str]:
+    """Extract property code from Cloudbeds booking URL."""
+    match = re.search(r'/(?:reservation|booking)/([a-zA-Z0-9]+)', url)
+    return match.group(1) if match else None
+
+
+async def _get_cloudbeds_room_count(
+    client: httpx.AsyncClient, 
+    booking_url: str
+) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+    """Get room count from Cloudbeds API.
+    
+    Returns (room_count, email, phone).
+    """
+    property_code = _extract_property_code(booking_url)
+    if not property_code:
+        return None, None, None
+    
+    try:
+        # Step 1: Get property_id from property_info API
+        resp = await client.post(
+            'https://hotels.cloudbeds.com/booking/property_info',
+            data={
+                'booking_engine_source': 'hosted',
+                'iframe': 'false',
+                'lang': 'en',
+                'property_code': property_code,
+            },
+            timeout=15.0,
+        )
+        
+        if resp.status_code != 200:
+            return None, None, None
+        
+        data = resp.json()
+        if not data.get('success'):
+            return None, None, None
+        
+        props = data.get('data', {})
+        property_id = props.get('property_id')
+        email = props.get('hotel_email')
+        phone = props.get('hotel_phone')
+        
+        if not property_id:
+            return None, email, phone
+        
+        # Step 2: Get rooms from rooms API
+        rooms_resp = await client.post(
+            'https://hotels.cloudbeds.com/booking/rooms',
+            data={
+                'checkin': '1970-01-01',
+                'checkout': '1970-01-02',
+                'widget_property': property_id,
+            },
+            timeout=15.0,
+        )
+        
+        if rooms_resp.status_code != 200:
+            return None, email, phone
+        
+        rooms_data = rooms_resp.json()
+        
+        # Sum up max_rooms from all accommodation types
+        total_rooms = sum(
+            int(rt.get('max_rooms', 0) or 0) 
+            for rt in rooms_data.get('accomodation_types', [])
+        )
+        
+        return total_rooms if total_rooms > 0 else None, email, phone
+        
+    except Exception as e:
+        logger.debug(f"Cloudbeds API error for {property_code}: {e}")
+        return None, None, None
 
 
 async def get_texas_cloudbeds_needing_proximity(conn, limit: int) -> List[Dict[str, Any]]:
@@ -225,12 +318,21 @@ async def run_fix_locations() -> None:
         await close_db()
 
 
-async def run_room_counts(limit: int) -> None:
-    """Run room count enrichment for Texas Cloudbeds hotels."""
+async def run_room_counts_api(limit: int) -> None:
+    """Run room count enrichment via Cloudbeds API (most accurate method).
+    
+    Uses the Cloudbeds /booking/rooms API to get exact room counts.
+    Requires Brightdata proxy to avoid rate limiting.
+    
+    Room count source: 'cloudbeds_api'
+    """
+    proxy = _get_brightdata_proxy()
+    if not proxy:
+        logger.error("Brightdata proxy not configured. Set BRIGHTDATA_CUSTOMER_ID, BRIGHTDATA_DC_ZONE, BRIGHTDATA_DC_PASSWORD")
+        return
+    
     await init_db()
     try:
-        service = Service()
-        
         async with get_conn() as conn:
             hotels = await get_texas_cloudbeds_needing_rooms(conn, limit)
         
@@ -238,7 +340,82 @@ async def run_room_counts(limit: int) -> None:
             logger.info("No Texas Cloudbeds hotels need room count enrichment")
             return
         
-        logger.info(f"Enriching room counts for {len(hotels)} Texas Cloudbeds hotels...")
+        logger.info(f"Enriching room counts for {len(hotels)} hotels via Cloudbeds API...")
+        
+        client_kwargs = {
+            'headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Origin': 'https://hotels.cloudbeds.com',
+            },
+            'timeout': 30.0,
+            'proxy': proxy,
+        }
+        
+        enriched = 0
+        async with get_conn() as conn:
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                for i, h in enumerate(hotels):
+                    room_count, email, phone = await _get_cloudbeds_room_count(
+                        client, h['booking_url']
+                    )
+                    
+                    if room_count:
+                        await conn.execute('''
+                            INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, status)
+                            VALUES ($1, $2, 'cloudbeds_api', 1)
+                            ON CONFLICT (hotel_id) DO UPDATE SET room_count = $2, source = 'cloudbeds_api'
+                        ''', h['id'], room_count)
+                        enriched += 1
+                        logger.info(f"[{i+1}/{len(hotels)}] {h['name'][:30]} | {room_count} rooms")
+                    else:
+                        logger.debug(f"[{i+1}/{len(hotels)}] {h['name'][:30]} | no data")
+                    
+                    # Rate limit
+                    await asyncio.sleep(0.3)
+        
+        logger.info("=" * 60)
+        logger.info("ROOM COUNT ENRICHMENT COMPLETE (Cloudbeds API)")
+        logger.info("=" * 60)
+        logger.info(f"Hotels enriched: {enriched}/{len(hotels)}")
+        logger.info("=" * 60)
+    finally:
+        await close_db()
+
+
+async def run_room_counts(limit: int) -> None:
+    """Run room count enrichment via website scraping + LLM fallback.
+    
+    Uses regex extraction from hotel websites first, then falls back to
+    Groq LLM estimation if regex fails.
+    
+    Room count sources: 'regex' or 'groq'
+    """
+    await init_db()
+    try:
+        service = Service()
+        
+        async with get_conn() as conn:
+            hotels = await conn.fetch('''
+                SELECT h.id, h.name, h.website
+                FROM sadie_gtm.hotel_booking_engines hbe
+                JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
+                LEFT JOIN sadie_gtm.hotel_room_count hrc ON hrc.hotel_id = hbe.hotel_id
+                WHERE hbe.booking_engine_id = $1
+                  AND hbe.status = 1
+                  AND h.status = 1
+                  AND h.state = 'Texas'
+                  AND h.website IS NOT NULL AND h.website != ''
+                  AND hrc.hotel_id IS NULL
+                LIMIT $2
+            ''', CLOUDBEDS_ENGINE_ID, limit)
+        
+        if not hotels:
+            logger.info("No Texas Cloudbeds hotels need room count enrichment")
+            return
+        
+        logger.info(f"Enriching room counts for {len(hotels)} Texas Cloudbeds hotels via website...")
         
         # Use the enrichment service
         count = await service.enrich_room_counts_for_hotels(
@@ -247,7 +424,7 @@ async def run_room_counts(limit: int) -> None:
         )
         
         logger.info("=" * 60)
-        logger.info("ROOM COUNT ENRICHMENT COMPLETE")
+        logger.info("ROOM COUNT ENRICHMENT COMPLETE (Website)")
         logger.info("=" * 60)
         logger.info(f"Hotels enriched: {count}")
         logger.info("=" * 60)
@@ -296,8 +473,18 @@ def main():
     # Fix locations command
     subparsers.add_parser("fix-locations", help="Fix state for Texas hotels")
     
-    # Room counts command
-    room_parser = subparsers.add_parser("room-counts", help="Enrich room counts")
+    # Room counts via Cloudbeds API (recommended)
+    room_api_parser = subparsers.add_parser(
+        "room-counts-api", 
+        help="Enrich room counts via Cloudbeds API (most accurate)"
+    )
+    room_api_parser.add_argument("--limit", type=int, default=100, help="Max hotels to process")
+    
+    # Room counts via website scraping
+    room_parser = subparsers.add_parser(
+        "room-counts", 
+        help="Enrich room counts via website scraping + LLM"
+    )
     room_parser.add_argument("--limit", type=int, default=50, help="Max hotels to process")
     
     # Proximity command
@@ -310,6 +497,8 @@ def main():
         asyncio.run(show_status())
     elif args.command == "fix-locations":
         asyncio.run(run_fix_locations())
+    elif args.command == "room-counts-api":
+        asyncio.run(run_room_counts_api(args.limit))
     elif args.command == "room-counts":
         asyncio.run(run_room_counts(args.limit))
     elif args.command == "proximity":
