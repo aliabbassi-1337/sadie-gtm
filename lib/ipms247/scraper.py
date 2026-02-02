@@ -28,11 +28,25 @@ class ExtractedIPMS247Data(BaseModel):
     country: Optional[str] = None
     zip_code: Optional[str] = None
     phone: Optional[str] = None
+    reservation_phone: Optional[str] = None
     email: Optional[str] = None
     website: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     hotel_id: Optional[str] = None
+    
+    # Additional fields
+    hotel_type: Optional[str] = None  # Hotels, Resorts, B&B, etc.
+    check_in_time: Optional[str] = None
+    check_out_time: Optional[str] = None
+    description: Optional[str] = None  # Hotel Information
+    facilities: Optional[str] = None
+    parking_policy: Optional[str] = None
+    check_in_policy: Optional[str] = None
+    children_policy: Optional[str] = None
+    things_to_do: Optional[str] = None
+    landmarks: Optional[str] = None
+    travel_directions: Optional[str] = None
     
     def has_data(self) -> bool:
         """Check if we extracted any useful data."""
@@ -316,21 +330,71 @@ class IPMS247Scraper:
         for p in soup.find_all("p", class_="cnt-detail"):
             text = p.get_text(strip=True)
             
+            # Skip address (already parsed)
             if text.startswith("Address"):
-                # Already parsed above
-                pass
-            elif text.startswith("Phone"):
-                phone = re.sub(r'^(Phone|Reservation Phone)\s*:\s*', '', text, flags=re.IGNORECASE)
-                if phone and not data.phone:
+                continue
+            
+            # Phone numbers
+            if text.startswith("Phone") and not text.startswith("Reservation"):
+                phone = re.sub(r'^Phone\s*:\s*', '', text, flags=re.IGNORECASE)
+                if phone:
                     data.phone = phone.strip()
             elif text.startswith("Reservation Phone"):
                 phone = re.sub(r'^Reservation Phone\s*:\s*', '', text, flags=re.IGNORECASE)
-                if phone and not data.phone:
-                    data.phone = phone.strip()
+                if phone:
+                    data.reservation_phone = phone.strip()
+                    if not data.phone:
+                        data.phone = phone.strip()
+            
+            # Email
             elif text.startswith("Email"):
                 email = re.sub(r'^Email\s*:\s*', '', text, flags=re.IGNORECASE)
-                if "@" in email and not data.email:
+                if "@" in email:
                     data.email = email.strip()
+            
+            # Hotel Type
+            elif text.startswith("Hotel Type"):
+                data.hotel_type = re.sub(r'^Hotel Type\s*:\s*', '', text, flags=re.IGNORECASE).strip()
+            
+            # Check-In/Out Times
+            elif text.startswith("Check-In Time"):
+                data.check_in_time = re.sub(r'^Check-In Time\s*', '', text, flags=re.IGNORECASE).strip()
+            elif text.startswith("Check-Out Time"):
+                data.check_out_time = re.sub(r'^Check-Out Time\s*', '', text, flags=re.IGNORECASE).strip()
+            
+            # Hotel Information/Description
+            elif text.startswith("Hotel Information"):
+                desc = re.sub(r'^Hotel Information\s*', '', text, flags=re.IGNORECASE).strip()
+                if desc:
+                    data.description = desc
+            
+            # Facilities
+            elif text.startswith("Facilities"):
+                data.facilities = re.sub(r'^Facilities\s*', '', text, flags=re.IGNORECASE).strip()
+            
+            # Parking Policy
+            elif text.startswith("Parking Policy"):
+                data.parking_policy = re.sub(r'^Parking Policy\s*', '', text, flags=re.IGNORECASE).strip()
+            
+            # Check-In Policy
+            elif text.startswith("Check-In Policy"):
+                data.check_in_policy = re.sub(r'^Check-In Policy\s*', '', text, flags=re.IGNORECASE).strip()
+            
+            # Children & Extra Guest Details
+            elif "Children" in text and "Extra" in text:
+                data.children_policy = re.sub(r'^Children\s*&?\s*Extra Guest Details\s*', '', text, flags=re.IGNORECASE).strip()
+            
+            # Things To Do
+            elif text.startswith("Things To Do"):
+                data.things_to_do = re.sub(r'^Things To Do\s*', '', text, flags=re.IGNORECASE).strip()
+            
+            # Important Landmarks Nearby
+            elif text.startswith("Important Landmarks"):
+                data.landmarks = re.sub(r'^Important Landmarks Nearby\s*', '', text, flags=re.IGNORECASE).strip()
+            
+            # Travel Directions
+            elif text.startswith("Travel Directions"):
+                data.travel_directions = re.sub(r'^Travel Directions\s*', '', text, flags=re.IGNORECASE).strip()
         
         # Extract lat/lng from JavaScript
         lat_match = re.search(r"var\s+lat\s*=\s*'([0-9.-]+)'", html)
