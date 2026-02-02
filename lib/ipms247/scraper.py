@@ -68,7 +68,7 @@ class IPMS247Scraper:
     """Scrape hotel data from IPMS247 booking pages.
     
     Usage:
-        scraper = IPMS247Scraper()
+        scraper = IPMS247Scraper(use_proxy=True)
         data = await scraper.extract("safarihotelboardwalk")
     """
     
@@ -78,6 +78,8 @@ class IPMS247Scraper:
         self._proxy_url: Optional[str] = None
         if use_proxy:
             self._proxy_url = _get_brightdata_proxy()
+            if self._proxy_url:
+                logger.debug("IPMS247 scraper using Brightdata proxy")
     
     def _get_client_kwargs(self) -> dict:
         """Get httpx client kwargs."""
@@ -90,33 +92,53 @@ class IPMS247Scraper:
     async def extract(self, slug: str) -> Optional[ExtractedIPMS247Data]:
         """Extract hotel data from IPMS247 booking page.
         
+        Uses two requests:
+        1. Main booking page to get session + hotel ID
+        2. propertyinfo.php to get full hotel details
+        
         Args:
             slug: The hotel slug (e.g., "safarihotelboardwalk")
             
         Returns:
             ExtractedIPMS247Data if successful, None if page not found
         """
-        url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
+        booking_url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
         
         try:
-            async with httpx.AsyncClient(**self._get_client_kwargs()) as client:
-                resp = await client.get(
-                    url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-                    },
-                    follow_redirects=True,
-                )
+            async with httpx.AsyncClient(**self._get_client_kwargs(), follow_redirects=True) as client:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                }
                 
-                if resp.status_code != 200:
-                    logger.debug(f"IPMS247 page not found: {slug} (status {resp.status_code})")
+                # Step 1: Get main page to extract hotel ID and establish session
+                main_resp = await client.get(booking_url, headers=headers)
+                
+                if main_resp.status_code != 200:
+                    logger.debug(f"IPMS247 page not found: {slug} (status {main_resp.status_code})")
                     return None
                 
-                html = resp.text
-                if len(html) < 1000:
+                main_html = main_resp.text
+                if len(main_html) < 1000:
                     return None
                 
-                return self._parse_html(html, slug, url)
+                # Extract hotel ID
+                hotel_id_match = re.search(r'HotelId["\s:=]+(\d+)', main_html)
+                if not hotel_id_match:
+                    # Try to parse from main page only
+                    return self._parse_html(main_html, slug, booking_url)
+                
+                hotel_id = hotel_id_match.group(1)
+                
+                # Step 2: Fetch propertyinfo.php with session (has full hotel details)
+                info_url = f"https://live.ipms247.com/booking/propertyinfo.php?HotelId={hotel_id}"
+                info_resp = await client.get(info_url, headers=headers)
+                
+                if info_resp.status_code == 200 and len(info_resp.text) > 1000:
+                    # Parse the full propertyinfo page
+                    return self._parse_full_html(info_resp.text, slug, booking_url)
+                else:
+                    # Fallback to main page parsing
+                    return self._parse_html(main_html, slug, booking_url)
                 
         except Exception as e:
             logger.debug(f"IPMS247 error for {slug}: {e}")
