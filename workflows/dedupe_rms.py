@@ -4,7 +4,7 @@ RMS has ~7k unique properties but we have ~17k records due to:
 1. Multiple URL formats (numeric vs hex client IDs) for the same property
 2. Same property ingested from different sources
 
-This workflow:
+This workflow marks duplicates with status = -1 (preserves data, won't be launched).
 
 PHASE 1 - Numeric Client ID Deduplication:
 - Extracts numeric RMS client ID from booking URLs
@@ -12,12 +12,12 @@ PHASE 1 - Numeric Client ID Deduplication:
 - Keeps the "best" record (has email, city, etc.)
 - Merges data from duplicates into the keeper
 - Updates external_id to rms_client_id
-- Deletes duplicate records
+- Marks duplicate records with status = -1
 
 PHASE 2 - Hex URL Deduplication (by name matching):
 - Finds hex URLs that match numeric hotels by name
 - Merges data from hex record into numeric record (if hex has better data)
-- Deletes the hex duplicate
+- Marks the hex duplicate with status = -1
 - Hex-only records (no numeric match) are KEPT
 
 USAGE:
@@ -313,7 +313,7 @@ def plan_hex_deduplication(
             if updated:
                 to_update.append(numeric_r)
             
-            # Delete the hex record (it's a duplicate)
+            # Mark the hex record as duplicate
             to_delete.append(hex_r['hotel_id'])
         else:
             # No match - keep the hex record
@@ -325,16 +325,20 @@ def plan_hex_deduplication(
 async def execute_deduplication(
     conn,
     numeric_keepers: List[Dict],
-    numeric_deletes: List[int],
+    numeric_dupes: List[int],
     hex_updates: List[Dict],
-    hex_deletes: List[int],
+    hex_dupes: List[int],
 ) -> Dict[str, int]:
-    """Execute the deduplication in a transaction."""
+    """Execute the deduplication in a transaction.
+    
+    Instead of deleting duplicates, we mark them with status = -1.
+    This preserves the data but ensures they won't be launched.
+    """
     stats = {
         'numeric_updated': 0,
-        'numeric_deleted': 0,
+        'numeric_marked_dupe': 0,
         'hex_merged': 0,
-        'hex_deleted': 0,
+        'hex_marked_dupe': 0,
     }
     
     async with conn.transaction():
@@ -379,45 +383,23 @@ async def execute_deduplication(
                 r.get('state'), r.get('phone_website'))
             stats['hex_merged'] += 1
         
-        # Phase 3: Delete numeric duplicates
-        if numeric_deletes:
+        # Phase 3: Mark numeric duplicates as status = -1 (instead of deleting)
+        if numeric_dupes:
             await conn.execute('''
-                DELETE FROM sadie_gtm.hotel_booking_engines
-                WHERE hotel_id = ANY($1)
-            ''', numeric_deletes)
-            await conn.execute('''
-                DELETE FROM sadie_gtm.hotel_room_count
-                WHERE hotel_id = ANY($1)
-            ''', numeric_deletes)
-            await conn.execute('''
-                DELETE FROM sadie_gtm.hotel_customer_proximity
-                WHERE hotel_id = ANY($1)
-            ''', numeric_deletes)
-            await conn.execute('''
-                DELETE FROM sadie_gtm.hotels
+                UPDATE sadie_gtm.hotels
+                SET status = -1, updated_at = NOW()
                 WHERE id = ANY($1)
-            ''', numeric_deletes)
-            stats['numeric_deleted'] = len(numeric_deletes)
+            ''', numeric_dupes)
+            stats['numeric_marked_dupe'] = len(numeric_dupes)
         
-        # Phase 4: Delete hex duplicates (that matched numeric by name)
-        if hex_deletes:
+        # Phase 4: Mark hex duplicates as status = -1 (instead of deleting)
+        if hex_dupes:
             await conn.execute('''
-                DELETE FROM sadie_gtm.hotel_booking_engines
-                WHERE hotel_id = ANY($1)
-            ''', hex_deletes)
-            await conn.execute('''
-                DELETE FROM sadie_gtm.hotel_room_count
-                WHERE hotel_id = ANY($1)
-            ''', hex_deletes)
-            await conn.execute('''
-                DELETE FROM sadie_gtm.hotel_customer_proximity
-                WHERE hotel_id = ANY($1)
-            ''', hex_deletes)
-            await conn.execute('''
-                DELETE FROM sadie_gtm.hotels
+                UPDATE sadie_gtm.hotels
+                SET status = -1, updated_at = NOW()
                 WHERE id = ANY($1)
-            ''', hex_deletes)
-            stats['hex_deleted'] = len(hex_deletes)
+            ''', hex_dupes)
+            stats['hex_marked_dupe'] = len(hex_dupes)
     
     return stats
 
@@ -446,9 +428,9 @@ async def run_dedupe(dry_run: bool = True) -> None:
             by_client_id = group_by_client_id(numeric_records)
             logger.info(f"Unique numeric client IDs: {len(by_client_id)}")
             
-            numeric_keepers, numeric_deletes = plan_numeric_deduplication(by_client_id)
+            numeric_keepers, numeric_dupes = plan_numeric_deduplication(by_client_id)
             logger.info(f"Records to keep/update: {len(numeric_keepers)}")
-            logger.info(f"Duplicate records to delete: {len(numeric_deletes)}")
+            logger.info(f"Duplicates to mark (status=-1): {len(numeric_dupes)}")
             
             # Phase 2: Plan hex deduplication
             logger.info("")
@@ -456,10 +438,10 @@ async def run_dedupe(dry_run: bool = True) -> None:
             logger.info("PHASE 2: Hex URL Deduplication (by name)")
             logger.info("=" * 60)
             
-            hex_updates, hex_deletes, hex_kept = plan_hex_deduplication(
+            hex_updates, hex_dupes, hex_kept = plan_hex_deduplication(
                 hex_records, numeric_keepers
             )
-            logger.info(f"Hex records matching numeric (to delete): {len(hex_deletes)}")
+            logger.info(f"Hex duplicates to mark (status=-1): {len(hex_dupes)}")
             logger.info(f"Hex records with better data (to merge): {len(hex_updates)}")
             logger.info(f"Hex-only records (KEPT): {hex_kept}")
             
@@ -468,11 +450,11 @@ async def run_dedupe(dry_run: bool = True) -> None:
             logger.info("=" * 60)
             logger.info("SUMMARY")
             logger.info("=" * 60)
-            total_deletes = len(numeric_deletes) + len(hex_deletes)
-            final_count = len(records) - total_deletes
+            total_dupes = len(numeric_dupes) + len(hex_dupes)
+            active_count = len(numeric_keepers) + hex_kept
             logger.info(f"Current records: {len(records)}")
-            logger.info(f"To delete: {total_deletes}")
-            logger.info(f"Final count: {final_count}")
+            logger.info(f"To mark as duplicate (status=-1): {total_dupes}")
+            logger.info(f"Active records after dedup: {active_count}")
             
             if dry_run:
                 logger.info("")
@@ -491,7 +473,7 @@ async def run_dedupe(dry_run: bool = True) -> None:
                         logger.info(f"    -> {r['name']} | {r['city']}, {r['state']} | {r['email']}")
                         for orig in client_recs:
                             if orig['hotel_id'] != r['hotel_id']:
-                                logger.info(f"    Delete hotel {orig['hotel_id']}: {orig['name']} | {orig['city']}")
+                                logger.info(f"    Mark as dupe hotel {orig['hotel_id']}: {orig['name']} | {orig['city']}")
                         shown += 1
                 
                 # Show sample hex merges
@@ -507,7 +489,7 @@ async def run_dedupe(dry_run: bool = True) -> None:
                 logger.info("")
                 logger.info("Executing deduplication...")
                 stats = await execute_deduplication(
-                    conn, numeric_keepers, numeric_deletes, hex_updates, hex_deletes
+                    conn, numeric_keepers, numeric_dupes, hex_updates, hex_dupes
                 )
                 
                 logger.info("")
@@ -515,18 +497,18 @@ async def run_dedupe(dry_run: bool = True) -> None:
                 logger.info("DEDUPLICATION COMPLETE")
                 logger.info("=" * 60)
                 logger.info(f"Numeric hotels updated: {stats['numeric_updated']}")
-                logger.info(f"Numeric duplicates deleted: {stats['numeric_deleted']}")
+                logger.info(f"Numeric duplicates marked (status=-1): {stats['numeric_marked_dupe']}")
                 logger.info(f"Hex data merged into numeric: {stats['hex_merged']}")
-                logger.info(f"Hex duplicates deleted: {stats['hex_deleted']}")
+                logger.info(f"Hex duplicates marked (status=-1): {stats['hex_marked_dupe']}")
                 
-                # Verify final count
-                final = await conn.fetchval('''
+                # Verify final count (active hotels only)
+                active = await conn.fetchval('''
                     SELECT COUNT(DISTINCT h.id)
                     FROM sadie_gtm.hotels h
                     JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-                    WHERE hbe.booking_engine_id = $1
+                    WHERE hbe.booking_engine_id = $1 AND h.status >= 0
                 ''', RMS_BOOKING_ENGINE_ID)
-                logger.info(f"Final RMS hotel count: {final}")
+                logger.info(f"Active RMS hotels (status >= 0): {active}")
     
     finally:
         await close_db()
