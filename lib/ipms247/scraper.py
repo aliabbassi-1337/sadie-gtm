@@ -60,7 +60,7 @@ class ExtractedIPMS247Data(BaseModel):
 
 
 def _get_brightdata_proxy() -> Optional[str]:
-    """Get Brightdata datacenter proxy URL."""
+    """Get Brightdata datacenter proxy URL for httpx."""
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
     dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
     dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
@@ -70,17 +70,34 @@ def _get_brightdata_proxy() -> Optional[str]:
     return None
 
 
+def _get_brightdata_proxy_for_playwright() -> Optional[dict]:
+    """Get Brightdata datacenter proxy config for Playwright.
+    
+    Returns dict with server, username, password keys.
+    """
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+    dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+    if customer_id and dc_zone and dc_password:
+        return {
+            "server": "http://brd.superproxy.io:33335",
+            "username": f"brd-customer-{customer_id}-zone-{dc_zone}",
+            "password": dc_password,
+        }
+    return None
+
+
 class PlaywrightPool:
     """Singleton browser pool for reusing Playwright browser across requests.
     
     Each page gets its own context to avoid conflicts with concurrent requests.
-    Uses Brightdata proxy for all connections.
+    Uses Brightdata datacenter proxy for all connections.
     """
     
     _instance = None
     _playwright = None
     _browser = None
-    _proxy_url = None
+    _proxy_config = None  # Dict with server, username, password for Playwright
     _init_lock = None
     
     @classmethod
@@ -99,8 +116,8 @@ class PlaywrightPool:
         from playwright.async_api import async_playwright
         self._playwright = await async_playwright().start()
         
-        # Get Brightdata proxy
-        PlaywrightPool._proxy_url = _get_brightdata_proxy()
+        # Get Brightdata proxy config for Playwright
+        PlaywrightPool._proxy_config = _get_brightdata_proxy_for_playwright()
         
         self._browser = await self._playwright.chromium.launch(
             headless=True,
@@ -111,8 +128,8 @@ class PlaywrightPool:
                 '--disable-extensions',
             ]
         )
-        if PlaywrightPool._proxy_url:
-            logger.info(f"Playwright browser pool initialized with Brightdata proxy")
+        if PlaywrightPool._proxy_config:
+            logger.info(f"Playwright browser pool initialized with Brightdata DC proxy")
         else:
             logger.warning("Playwright browser pool initialized WITHOUT proxy - BRIGHTDATA env vars not set!")
     
@@ -123,8 +140,8 @@ class PlaywrightPool:
             'viewport': {'width': 1280, 'height': 720},
             'java_script_enabled': True,
         }
-        if PlaywrightPool._proxy_url:
-            context_opts['proxy'] = {'server': PlaywrightPool._proxy_url}
+        if PlaywrightPool._proxy_config:
+            context_opts['proxy'] = PlaywrightPool._proxy_config
             context_opts['ignore_https_errors'] = True
         
         context = await self._browser.new_context(**context_opts)
