@@ -169,6 +169,8 @@ async def run_backfill(limit: int, concurrency: int, use_brightdata: bool):
                             "email": data.email,
                             "lat": data.latitude,
                             "lon": data.longitude,
+                            "zip_code": data.zip_code,
+                            "contact_name": data.contact_name,
                         })
                     else:
                         failed_count += 1
