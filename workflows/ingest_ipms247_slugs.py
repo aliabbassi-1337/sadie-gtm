@@ -220,7 +220,17 @@ async def main():
         if args.dry_run:
             print("\n(Dry run - no data saved)")
     finally:
+        # Cleanup
         await close_db()
+        # Close Playwright browser pool if used
+        if not args.http_only:
+            try:
+                from lib.ipms247.scraper import PlaywrightPool
+                pool = PlaywrightPool._instance
+                if pool:
+                    await pool.close()
+            except:
+                pass
 
 
 if __name__ == "__main__":

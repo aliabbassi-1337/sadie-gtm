@@ -69,6 +69,58 @@ def _get_brightdata_proxy() -> Optional[str]:
     return None
 
 
+class PlaywrightPool:
+    """Singleton browser pool for reusing Playwright browsers across requests."""
+    
+    _instance = None
+    _playwright = None
+    _browser = None
+    _context = None
+    
+    @classmethod
+    async def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+            await cls._instance._init()
+        return cls._instance
+    
+    async def _init(self):
+        from playwright.async_api import async_playwright
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-extensions',
+            ]
+        )
+        self._context = await self._browser.new_context(
+            viewport={'width': 1280, 'height': 720},
+            java_script_enabled=True,
+        )
+        logger.info("Playwright browser pool initialized")
+    
+    async def new_page(self):
+        """Get a new page from the shared context."""
+        return await self._context.new_page()
+    
+    async def close(self):
+        """Clean up browser resources."""
+        if self._context:
+            await self._context.close()
+        if self._browser:
+            await self._browser.close()
+        if self._playwright:
+            await self._playwright.stop()
+        PlaywrightPool._instance = None
+        PlaywrightPool._playwright = None
+        PlaywrightPool._browser = None
+        PlaywrightPool._context = None
+        logger.info("Playwright browser pool closed")
+
+
 class IPMS247Scraper:
     """Scrape hotel data from IPMS247 booking pages.
     
@@ -319,84 +371,67 @@ class IPMS247Scraper:
     async def extract_with_playwright(self, slug: str) -> Optional[ExtractedIPMS247Data]:
         """Extract hotel data using Playwright to render JavaScript.
         
-        This opens the hotel info modal to get full details including
-        address, phone, email, and coordinates.
+        Uses shared browser pool for efficiency - only creates new pages, not browsers.
         """
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            logger.warning("Playwright not installed - falling back to HTTP scraper")
-            return await self.extract(slug)
-        
         url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
+        page = None
         
         try:
-            async with async_playwright() as p:
-                # Optimized browser launch
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--disable-gpu',
-                        '--disable-dev-shm-usage',
-                        '--no-sandbox',
-                        '--disable-extensions',
-                    ]
-                )
-                
-                # Use context for better resource management
-                context = await browser.new_context(
-                    viewport={'width': 1280, 'height': 720},
-                    java_script_enabled=True,
-                )
-                
-                page = await context.new_page()
-                
-                # Navigate - need networkidle for AJAX modal to work
-                await page.goto(url, wait_until="networkidle", timeout=15000)
-                
-                # Wait for page to be interactive
-                try:
-                    await page.wait_for_selector('a[title="Hotel Info"], a[id^="allhoteldetails_"]', timeout=5000)
-                except:
-                    pass  # Continue anyway
-                
-                # Click using JavaScript (more reliable than Playwright click)
-                clicked = await page.evaluate('''() => {
-                    const selectors = [
-                        'a[title="Hotel Info"]',
-                        'a[id^="allhoteldetails_"]',
-                        'a[data-target="#propertyinfoModal"]'
-                    ];
-                    for (const sel of selectors) {
-                        const el = document.querySelector(sel);
-                        if (el) {
-                            el.click();
-                            return true;
-                        }
+            # Get page from shared browser pool
+            pool = await PlaywrightPool.get_instance()
+            page = await pool.new_page()
+            
+            # Navigate - need networkidle for AJAX modal to work
+            await page.goto(url, wait_until="networkidle", timeout=15000)
+            
+            # Wait for page to be interactive
+            try:
+                await page.wait_for_selector('a[title="Hotel Info"], a[id^="allhoteldetails_"]', timeout=3000)
+            except:
+                pass  # Continue anyway
+            
+            # Click using JavaScript (more reliable than Playwright click)
+            clicked = await page.evaluate('''() => {
+                const selectors = [
+                    'a[title="Hotel Info"]',
+                    'a[id^="allhoteldetails_"]',
+                    'a[data-target="#propertyinfoModal"]'
+                ];
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        el.click();
+                        return true;
                     }
-                    return false;
-                }''')
-                
-                if clicked:
-                    # Wait for modal content to load via AJAX
-                    try:
-                        await page.wait_for_function('document.querySelector("#propertyinfoModal .htl-title") !== null', timeout=3000)
-                    except:
-                        await page.wait_for_timeout(1500)  # Fallback
-                
-                # Get page content
-                html = await page.content()
-                await context.close()
-                await browser.close()
-                
-                result = self._parse_full_html(html, slug, url)
-                if result and result.email:
-                    logger.info(f"Playwright success for {slug}: got email {result.email}")
-                return result
-                
+                }
+                return false;
+            }''')
+            
+            if clicked:
+                # Wait for modal content to load via AJAX
+                try:
+                    await page.wait_for_function('document.querySelector("#propertyinfoModal .htl-title") !== null', timeout=2000)
+                except:
+                    await page.wait_for_timeout(1000)  # Fallback
+            
+            # Get page content
+            html = await page.content()
+            
+            result = self._parse_full_html(html, slug, url)
+            if result and result.email:
+                logger.info(f"Playwright success for {slug}: got email {result.email}")
+            return result
+            
         except Exception as e:
             logger.warning(f"Playwright failed for {slug}: {type(e).__name__}: {e}")
             return await self.extract(slug)
+        finally:
+            # Always close the page to free resources
+            if page:
+                try:
+                    await page.close()
+                except:
+                    pass
     
     def _parse_full_html(self, html: str, slug: str, url: str) -> Optional[ExtractedIPMS247Data]:
         """Parse full HTML including modal content."""
