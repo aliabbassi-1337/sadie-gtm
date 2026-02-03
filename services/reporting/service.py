@@ -464,8 +464,8 @@ class Service(IService):
 
     def _populate_crawl_leads_sheet(self, sheet, leads: List[HotelLead]) -> None:
         """Populate the crawl leads sheet with hotel data."""
-        # Headers for crawl data
-        headers = ["Hotel", "City", "Country", "Website", "Booking URL", "Booking Engine"]
+        # Headers for crawl data - include all contact info
+        headers = ["Hotel", "City", "State", "Country", "Phone", "Email", "Website", "Booking URL", "Booking Engine"]
 
         # Style definitions
         header_font = Font(bold=True, color="FFFFFF")
@@ -497,8 +497,21 @@ class Service(IService):
             sheet.cell(row=row, column=col, value=lead.city or "").border = thin_border
             col += 1
 
+            # State
+            sheet.cell(row=row, column=col, value=lead.state or "").border = thin_border
+            col += 1
+
             # Country
             sheet.cell(row=row, column=col, value=lead.country or "").border = thin_border
+            col += 1
+
+            # Phone (prefer website phone, fall back to Google)
+            phone = lead.phone_website or lead.phone_google or ""
+            sheet.cell(row=row, column=col, value=phone).border = thin_border
+            col += 1
+
+            # Email
+            sheet.cell(row=row, column=col, value=lead.email or "").border = thin_border
             col += 1
 
             # Website
