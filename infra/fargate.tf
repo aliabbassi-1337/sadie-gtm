@@ -34,6 +34,11 @@ variable "sqs_rms_scan_queue_arn" {
   type        = string
 }
 
+variable "sqs_cloudbeds_enrichment_queue_arn" {
+  description = "ARN of the Cloudbeds enrichment SQS queue"
+  type        = string
+}
+
 # VPC (use default for now)
 data "aws_vpc" "default" {
   default = true
@@ -110,7 +115,8 @@ resource "aws_iam_role_policy" "ecs_task_sqs" {
         ]
         Resource = [
           var.sqs_rms_enrichment_queue_arn,
-          var.sqs_rms_scan_queue_arn
+          var.sqs_rms_scan_queue_arn,
+          var.sqs_cloudbeds_enrichment_queue_arn
         ]
       }
     ]
@@ -250,6 +256,157 @@ resource "aws_ecs_service" "rms_scan" {
   lifecycle {
     ignore_changes = [desired_count]
   }
+}
+
+# =============================================================================
+# CLOUDBEDS SQS CONSUMER (scales based on queue depth)
+# =============================================================================
+
+# ECS Task Definition - Cloudbeds SQS Consumer
+resource "aws_ecs_task_definition" "cloudbeds_consumer" {
+  family                   = "${var.app_name}-cloudbeds-consumer"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "consumer"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "-m", "workflows.enrich_cloudbeds_consumer", "--concurrency", "20"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "SQS_CLOUDBEDS_ENRICHMENT_QUEUE_URL", valueFrom = "/${var.app_name}/sqs-cloudbeds-enrichment-queue-url" },
+      { name = "BRIGHTDATA_CUSTOMER_ID", valueFrom = "/${var.app_name}/brightdata-customer-id" },
+      { name = "BRIGHTDATA_DC_ZONE", valueFrom = "/${var.app_name}/brightdata-dc-zone" },
+      { name = "BRIGHTDATA_DC_PASSWORD", valueFrom = "/${var.app_name}/brightdata-dc-password" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "cloudbeds-consumer"
+      }
+    }
+  }])
+}
+
+# ECS Service - Cloudbeds Consumer (scales based on SQS)
+resource "aws_ecs_service" "cloudbeds_consumer" {
+  name            = "${var.app_name}-cloudbeds-consumer"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.cloudbeds_consumer.arn
+  desired_count   = 0  # Starts at 0, auto-scaling kicks in
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = data.aws_subnets.default.ids
+    security_groups  = [aws_security_group.fargate.id]
+    assign_public_ip = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]  # Managed by auto-scaling
+  }
+}
+
+# Auto-scaling for Cloudbeds Consumer
+resource "aws_appautoscaling_target" "cloudbeds_consumer" {
+  max_capacity       = 5
+  min_capacity       = 0
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.cloudbeds_consumer.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "cloudbeds_consumer_scale_up" {
+  name               = "${var.app_name}-cloudbeds-consumer-scale-up"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.cloudbeds_consumer.resource_id
+  scalable_dimension = aws_appautoscaling_target.cloudbeds_consumer.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.cloudbeds_consumer.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = 1
+      metric_interval_lower_bound = 0
+      metric_interval_upper_bound = 100
+    }
+    step_adjustment {
+      scaling_adjustment          = 3
+      metric_interval_lower_bound = 100
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "cloudbeds_consumer_scale_down" {
+  name               = "${var.app_name}-cloudbeds-consumer-scale-down"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.cloudbeds_consumer.resource_id
+  scalable_dimension = aws_appautoscaling_target.cloudbeds_consumer.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.cloudbeds_consumer.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 300
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = -1
+      metric_interval_upper_bound = 0
+    }
+  }
+}
+
+# CloudWatch Alarms for Cloudbeds queue scaling
+resource "aws_cloudwatch_metric_alarm" "cloudbeds_queue_high" {
+  alarm_name          = "${var.app_name}-cloudbeds-queue-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_description   = "Scale up when messages in Cloudbeds queue"
+
+  dimensions = {
+    QueueName = "sadie-gtm-cloudbeds-enrichment"
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.cloudbeds_consumer_scale_up.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "cloudbeds_queue_low" {
+  alarm_name          = "${var.app_name}-cloudbeds-queue-empty"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  evaluation_periods  = 5
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_description   = "Scale down when Cloudbeds queue is empty"
+
+  dimensions = {
+    QueueName = "sadie-gtm-cloudbeds-enrichment"
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.cloudbeds_consumer_scale_down.arn]
 }
 
 # Auto-scaling for RMS Enrichment based on SQS queue depth
@@ -649,6 +806,10 @@ output "rms_enrichment_service_name" {
 
 output "rms_scan_service_name" {
   value = aws_ecs_service.rms_scan.name
+}
+
+output "cloudbeds_consumer_service_name" {
+  value = aws_ecs_service.cloudbeds_consumer.name
 }
 
 output "scheduled_tasks" {
