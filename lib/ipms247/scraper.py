@@ -116,9 +116,8 @@ class PlaywrightPool:
         from playwright.async_api import async_playwright
         self._playwright = await async_playwright().start()
         
-        # Disable proxy - IPMS247 blocks datacenter IPs (ERR_TUNNEL_CONNECTION_FAILED)
-        # Direct connections work, just need to keep concurrency low to avoid rate limits
-        PlaywrightPool._proxy_config = None
+        # Get Brightdata proxy config for Playwright
+        PlaywrightPool._proxy_config = _get_brightdata_proxy_for_playwright()
         
         self._browser = await self._playwright.chromium.launch(
             headless=True,
@@ -129,7 +128,10 @@ class PlaywrightPool:
                 '--disable-extensions',
             ]
         )
-        logger.info("Playwright browser pool initialized (no proxy - direct connection)")
+        if PlaywrightPool._proxy_config:
+            logger.info(f"Playwright browser pool initialized with Brightdata DC proxy")
+        else:
+            logger.warning("Playwright browser pool initialized WITHOUT proxy - BRIGHTDATA env vars not set!")
     
     async def new_page(self):
         """Get a new page with its own context (safe for concurrent use)."""
