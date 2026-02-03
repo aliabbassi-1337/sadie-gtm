@@ -366,10 +366,13 @@ class IPMS247Scraper:
                 html = await page.content()
                 await browser.close()
                 
-                return self._parse_full_html(html, slug, url)
+                result = self._parse_full_html(html, slug, url)
+                if result and result.email:
+                    logger.info(f"Playwright success for {slug}: got email {result.email}")
+                return result
                 
         except Exception as e:
-            logger.debug(f"Playwright error for {slug}: {e}")
+            logger.warning(f"Playwright failed for {slug}: {type(e).__name__}: {e}")
             return await self.extract(slug)
     
     def _parse_full_html(self, html: str, slug: str, url: str) -> Optional[ExtractedIPMS247Data]:
