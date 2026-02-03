@@ -2181,92 +2181,71 @@ class Service(IService):
         return stats
 
     # =========================================================================
-    # LOCATION BACKFILL (for crawl data missing state)
+    # LOCATION ENRICHMENT (reverse geocoding)
     # =========================================================================
 
-    async def get_location_backfill_status(self) -> repo.LocationBackfillStatus:
-        """Get status of location data for USA leads."""
-        return await repo.get_location_backfill_status()
+    async def get_pending_location_enrichment_count(self) -> int:
+        """Count hotels needing location enrichment (have coords, missing city)."""
+        return await repo.get_pending_location_enrichment_count()
 
-    async def backfill_locations_reverse_geocode(self, limit: int = 100) -> dict:
+    async def enrich_locations_reverse_geocode(self, limit: int = 100) -> dict:
         """
-        Reverse geocode USA leads that have coordinates but missing state.
+        Reverse geocode hotels that have coordinates but missing city/state.
         
         Uses Nominatim API (free, 1 req/sec rate limit).
+        Normalizes state abbreviations to full names.
         
         Args:
             limit: Max hotels to process
             
-        Returns dict with success/failed counts.
+        Returns dict with total/enriched/failed counts.
         """
         from services.leadgen.geocoding import reverse_geocode
         
-        hotels = await repo.get_hotels_for_reverse_geocoding(limit=limit)
+        hotels = await repo.get_hotels_pending_location_enrichment(limit=limit)
         
         if not hotels:
-            logger.info("No hotels pending reverse geocoding")
-            return {"total": 0, "success": 0, "failed": 0}
+            logger.info("No hotels pending location enrichment")
+            return {"total": 0, "enriched": 0, "failed": 0}
         
         logger.info(f"Reverse geocoding {len(hotels)} hotels...")
         
-        success = 0
+        enriched = 0
         failed = 0
         
         for hotel in hotels:
             hotel_id = hotel['id']
             name = hotel['name']
-            lat = hotel['lat']
-            lng = hotel['lng']
+            lat = hotel['latitude']
+            lng = hotel['longitude']
             
-            # Rate limit: 1 req/sec for Nominatim
-            await asyncio.sleep(1.1)
+            logger.info(f"  {name[:50]} ({lat}, {lng})...")
             
+            # Call Nominatim reverse geocoding
             result = await reverse_geocode(lat, lng)
             
-            if result and result.state:
-                # Normalize state to full name
-                state = self.US_STATE_NAMES.get(result.state, result.state)
+            if result and result.city:
+                # Normalize state to full name if it's a US state abbreviation
+                state = result.state
+                if state and state.upper() in self.US_STATE_NAMES:
+                    state = self.US_STATE_NAMES[state.upper()]
                 
-                await repo.update_hotel_location_from_geocode(
+                await repo.update_hotel_location_fields(
                     hotel_id=hotel_id,
+                    address=result.address,
                     city=result.city,
                     state=state,
-                    address=result.address,
+                    country=result.country,
                 )
                 
-                logger.info(f"  {name[:40]:40} -> {result.city}, {state}")
-                success += 1
+                logger.info(f"    -> {result.city}, {state}")
+                enriched += 1
             else:
-                logger.warning(f"  {name[:40]:40} -> FAILED")
+                logger.warning(f"    -> No city found")
                 failed += 1
-        
-        logger.info(f"Reverse geocoding complete: {success} success, {failed} failed")
-        return {"total": len(hotels), "success": success, "failed": failed}
-
-    async def normalize_us_states(self) -> dict:
-        """
-        Normalize US state abbreviations to full names.
-        
-        Returns dict with total_fixed count.
-        """
-        VALID_STATES = set(self.US_STATE_NAMES.values())
-        
-        states = await repo.get_distinct_us_states()
-        total_fixed = 0
-        
-        for state in states:
-            # Skip if already a valid full name
-            if state in VALID_STATES:
-                continue
             
-            # Check if it's an abbreviation
-            if state.upper() in self.US_STATE_NAMES:
-                full_name = self.US_STATE_NAMES[state.upper()]
-                
-                count = await repo.normalize_state_name(state, full_name)
-                if count > 0:
-                    logger.info(f"  {state} -> {full_name} ({count} hotels)")
-                    total_fixed += count
+            # Rate limit: Nominatim requires 1 request per second
+            await asyncio.sleep(1.1)
         
-        logger.info(f"State normalization complete: {total_fixed} hotels updated")
-        return {"total_fixed": total_fixed}
+        logger.info(f"Location enrichment complete: {enriched} enriched, {failed} failed")
+        return {"total": len(hotels), "enriched": enriched, "failed": failed}
