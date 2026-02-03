@@ -123,7 +123,7 @@ async def ingest_slugs(
         logger.info("Dry run - skipping database insert")
         return len(slugs), len(valid_results), 0
     
-    # Save to database
+    # Save to database with full scraped data
     records = []
     for r in valid_results:
         data = r["data"]
@@ -132,8 +132,8 @@ async def ingest_slugs(
         # Build booking URL
         booking_url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
         
-        # Prepare record for batch insert
-        # Order: (name, source, external_id, external_id_type, booking_engine_id, booking_url, slug, detection_method)
+        # Prepare record for batch insert with all data
+        # Order: (name, source, external_id, external_id_type, booking_engine_id, booking_url, slug, detection_method, email, phone, address, city, state, country, lat, lng)
         records.append((
             data.name or f"IPMS247 Hotel {slug}",  # $1 name
             "ipms247_archive",  # $2 source
@@ -143,11 +143,19 @@ async def ingest_slugs(
             booking_url,  # $6 booking_url
             slug,  # $7 engine_property_id (slug)
             "archive_discovery",  # $8 detection_method
+            data.email,  # $9 email
+            data.phone,  # $10 phone
+            data.address,  # $11 address
+            data.city,  # $12 city
+            data.state,  # $13 state
+            data.country,  # $14 country
+            data.latitude,  # $15 lat
+            data.longitude,  # $16 lng
         ))
     
     if records:
         try:
-            saved = await repo.batch_insert_crawled_hotels(records)
+            saved = await repo.batch_insert_ipms247_hotels(records)
             logger.info(f"Saved {saved} hotels to database")
         except Exception as e:
             logger.error(f"Failed to save hotels: {e}")

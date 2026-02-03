@@ -46,3 +46,33 @@ FROM new_hotel
 WHERE NOT EXISTS (
     SELECT 1 FROM sadie_gtm.hotel_booking_engines WHERE booking_url = $6
 );
+
+-- BATCH_INSERT_IPMS247_HOTEL
+-- Params: (name, source, external_id, external_id_type, booking_engine_id, booking_url, slug, detection_method, email, phone, address, city, state, country, lat, lng)
+-- Full insert with all scraped data including email, phone, address, and location
+WITH new_hotel AS (
+    INSERT INTO sadie_gtm.hotels (name, source, external_id, external_id_type, email, phone_website, address, city, state, country, location, status)
+    VALUES ($1, $2, $3, $4, $9, $10, $11, $12, $13, $14, 
+            CASE WHEN $15::float IS NOT NULL AND $16::float IS NOT NULL 
+                 THEN ST_SetSRID(ST_MakePoint($16::float, $15::float), 4326) 
+                 ELSE NULL END,
+            1)
+    ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL 
+    DO UPDATE SET
+        name = COALESCE(EXCLUDED.name, sadie_gtm.hotels.name),
+        email = COALESCE(EXCLUDED.email, sadie_gtm.hotels.email),
+        phone_website = COALESCE(EXCLUDED.phone_website, sadie_gtm.hotels.phone_website),
+        address = COALESCE(EXCLUDED.address, sadie_gtm.hotels.address),
+        city = COALESCE(EXCLUDED.city, sadie_gtm.hotels.city),
+        state = COALESCE(EXCLUDED.state, sadie_gtm.hotels.state),
+        country = COALESCE(EXCLUDED.country, sadie_gtm.hotels.country),
+        location = COALESCE(EXCLUDED.location, sadie_gtm.hotels.location),
+        updated_at = NOW()
+    RETURNING id
+)
+INSERT INTO sadie_gtm.hotel_booking_engines (hotel_id, booking_engine_id, booking_url, engine_property_id, detection_method, status, detected_at, updated_at)
+SELECT id, $5, $6, $7, $8, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+FROM new_hotel
+WHERE NOT EXISTS (
+    SELECT 1 FROM sadie_gtm.hotel_booking_engines WHERE booking_url = $6
+);

@@ -4,7 +4,7 @@ Ingestor Repository - Database operations for ingested data.
 
 from typing import Optional, List, Tuple, Dict, Any
 from db.client import queries, get_conn
-from db.queries.batch import BATCH_INSERT_HOTELS, BATCH_INSERT_ROOM_COUNTS, BATCH_INSERT_CRAWLED_HOTELS
+from db.queries.batch import BATCH_INSERT_HOTELS, BATCH_INSERT_ROOM_COUNTS, BATCH_INSERT_CRAWLED_HOTELS, BATCH_INSERT_IPMS247_HOTEL
 
 
 # =============================================================================
@@ -131,6 +131,29 @@ async def batch_insert_crawled_hotels(
     async with get_conn() as conn:
         async with conn.transaction():
             await conn.executemany(BATCH_INSERT_CRAWLED_HOTELS, records)
+            return len(records)
+
+
+async def batch_insert_ipms247_hotels(
+    records: List[Tuple],
+) -> int:
+    """
+    Batch insert IPMS247 hotels with full scraped data.
+    
+    Args:
+        records: List of tuples (name, source, external_id, external_id_type, 
+                                 booking_engine_id, booking_url, slug, detection_method,
+                                 email, phone, address, city, state, country, lat, lng)
+    
+    Returns:
+        Number of records processed
+    """
+    if not records:
+        return 0
+    
+    async with get_conn() as conn:
+        async with conn.transaction():
+            await conn.executemany(BATCH_INSERT_IPMS247_HOTEL, records)
             return len(records)
 
 
