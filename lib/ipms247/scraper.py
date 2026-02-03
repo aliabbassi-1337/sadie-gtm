@@ -332,43 +332,61 @@ class IPMS247Scraper:
         
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
+                # Optimized browser launch
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--disable-gpu',
+                        '--disable-dev-shm-usage',
+                        '--no-sandbox',
+                        '--disable-extensions',
+                    ]
+                )
                 
-                # Navigate to booking page
-                await page.goto(url, wait_until="networkidle", timeout=30000)
+                # Use context for better resource management
+                context = await browser.new_context(
+                    viewport={'width': 1280, 'height': 720},
+                    java_script_enabled=True,
+                )
                 
-                # Wait for page to load
-                await page.wait_for_timeout(2000)
+                page = await context.new_page()
                 
-                # Click the hotel info button to open modal
-                # Look for info icon or "Hotel Info" text
-                info_selectors = [
-                    'a[data-target="#propertyinfoModal"]',
-                    'a[onclick*="propertyinfo"]',
-                    '.fa-info-circle',
-                    'a:has-text("Hotel Info")',
-                    'a:has-text("Property Info")',
-                    '[data-type="hotel_info"]',
-                ]
+                # Navigate - need networkidle for AJAX modal to work
+                await page.goto(url, wait_until="networkidle", timeout=15000)
                 
-                clicked = False
-                for selector in info_selectors:
-                    try:
-                        elem = page.locator(selector).first
-                        if await elem.is_visible():
-                            await elem.click()
-                            clicked = True
-                            break
-                    except:
-                        continue
+                # Wait for page to be interactive
+                try:
+                    await page.wait_for_selector('a[title="Hotel Info"], a[id^="allhoteldetails_"]', timeout=5000)
+                except:
+                    pass  # Continue anyway
+                
+                # Click using JavaScript (more reliable than Playwright click)
+                clicked = await page.evaluate('''() => {
+                    const selectors = [
+                        'a[title="Hotel Info"]',
+                        'a[id^="allhoteldetails_"]',
+                        'a[data-target="#propertyinfoModal"]'
+                    ];
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }''')
                 
                 if clicked:
-                    # Wait for modal to load
-                    await page.wait_for_timeout(2000)
+                    # Wait for modal content to load via AJAX
+                    try:
+                        await page.wait_for_function('document.querySelector("#propertyinfoModal .htl-title") !== null', timeout=3000)
+                    except:
+                        await page.wait_for_timeout(1500)  # Fallback
                 
                 # Get page content
                 html = await page.content()
+                await context.close()
                 await browser.close()
                 
                 result = self._parse_full_html(html, slug, url)
