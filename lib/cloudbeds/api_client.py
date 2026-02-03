@@ -285,3 +285,66 @@ class CloudbedsApiClient:
             logger.debug(f"Could not extract property code from URL: {url}")
             return None
         return await self.extract(property_code)
+    
+    async def extract_from_title(self, property_code: str) -> Optional[CloudbedsPropertyData]:
+        """Fallback: Extract data from page title for 404/error pages.
+        
+        Even when Cloudbeds shows an error page, the <title> tag often contains:
+        "Hotel Name - City, Country - Best Price Guarantee"
+        
+        This is useful for dead URLs where the API returns no data.
+        """
+        try:
+            url = f"https://hotels.cloudbeds.com/reservation/{property_code}"
+            
+            async with httpx.AsyncClient(**self._get_client_kwargs()) as client:
+                response = await client.get(url)
+                
+                # Extract title
+                title_match = re.search(r'<title>([^<]+)</title>', response.text, re.IGNORECASE)
+                if not title_match:
+                    return None
+                
+                title = title_match.group(1).strip()
+                
+                # Skip garbage titles
+                if 'Soluções online' in title or title == 'Cloudbeds':
+                    return None
+                
+                # Parse: "Hotel Name - City, Country - Best Price Guarantee"
+                parsed = re.match(r'^(.+?) - (.+?), (.+?) - Best Price Guarantee$', title)
+                if not parsed:
+                    return None
+                
+                name, city, country = parsed.groups()
+                
+                # Normalize country
+                if country == "United States of America":
+                    country = "United States"
+                
+                return CloudbedsPropertyData(
+                    property_code=property_code,
+                    booking_url=url,
+                    name=name.strip(),
+                    city=city.strip(),
+                    country=country.strip(),
+                )
+                
+        except Exception as e:
+            logger.debug(f"Title extraction failed for {property_code}: {e}")
+            return None
+    
+    async def extract_with_fallback(self, property_code: str) -> Optional[CloudbedsPropertyData]:
+        """Extract data, falling back to title extraction if API fails.
+        
+        1. Try property_info API (best data: address, lat/lng, phone, email)
+        2. Fall back to title extraction (name, city, country only)
+        """
+        # Try API first
+        result = await self.extract(property_code)
+        if result and result.has_data():
+            return result
+        
+        # Fall back to title extraction
+        logger.debug(f"API failed for {property_code}, trying title extraction")
+        return await self.extract_from_title(property_code)
