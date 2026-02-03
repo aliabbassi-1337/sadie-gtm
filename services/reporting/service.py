@@ -300,7 +300,7 @@ class Service(IService):
     ) -> tuple[str, int]:
         """Generate Excel report for hotels with a specific booking engine from crawl data.
 
-        Creates files like: cloudbeds_crawldata.xlsx
+        Creates files like: cloudbeds_leads.xlsx
         """
         import subprocess
 
@@ -330,9 +330,8 @@ class Service(IService):
             tmp_path = tmp.name
 
         try:
-            # Filename: cloudbeds_crawldata.xlsx
-            source_tag = source_pattern.replace('%', '').replace('_', '')
-            filename = f"{booking_engine.lower()}_{source_tag}.xlsx"
+            # Filename: cloudbeds_leads.xlsx
+            filename = f"{booking_engine.lower()}_leads.xlsx"
             s3_uri = f"s3://sadie-gtm/HotelLeadGen/crawl-data/{filename}"
 
             # Try s5cmd first (faster)
