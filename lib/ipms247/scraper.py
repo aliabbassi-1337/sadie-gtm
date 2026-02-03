@@ -74,11 +74,13 @@ class PlaywrightPool:
     """Singleton browser pool for reusing Playwright browser across requests.
     
     Each page gets its own context to avoid conflicts with concurrent requests.
+    Uses Brightdata proxy for all connections.
     """
     
     _instance = None
     _playwright = None
     _browser = None
+    _proxy_url = None
     _init_lock = None
     
     @classmethod
@@ -96,6 +98,10 @@ class PlaywrightPool:
     async def _init(self):
         from playwright.async_api import async_playwright
         self._playwright = await async_playwright().start()
+        
+        # Get Brightdata proxy
+        PlaywrightPool._proxy_url = _get_brightdata_proxy()
+        
         self._browser = await self._playwright.chromium.launch(
             headless=True,
             args=[
@@ -105,14 +111,23 @@ class PlaywrightPool:
                 '--disable-extensions',
             ]
         )
-        logger.info("Playwright browser pool initialized")
+        if PlaywrightPool._proxy_url:
+            logger.info(f"Playwright browser pool initialized with Brightdata proxy")
+        else:
+            logger.warning("Playwright browser pool initialized WITHOUT proxy - BRIGHTDATA env vars not set!")
     
     async def new_page(self):
         """Get a new page with its own context (safe for concurrent use)."""
-        context = await self._browser.new_context(
-            viewport={'width': 1280, 'height': 720},
-            java_script_enabled=True,
-        )
+        # Use Brightdata proxy if available
+        context_opts = {
+            'viewport': {'width': 1280, 'height': 720},
+            'java_script_enabled': True,
+        }
+        if PlaywrightPool._proxy_url:
+            context_opts['proxy'] = {'server': PlaywrightPool._proxy_url}
+            context_opts['ignore_https_errors'] = True
+        
+        context = await self._browser.new_context(**context_opts)
         page = await context.new_page()
         return page, context
     
