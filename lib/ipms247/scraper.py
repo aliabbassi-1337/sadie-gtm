@@ -31,6 +31,18 @@ US_STATES = {
     "DC": "District of Columbia", "PR": "Puerto Rico", "VI": "Virgin Islands", "GU": "Guam",
 }
 
+# Indian state/territory codes to full names
+INDIAN_STATES = {
+    "AN": "Andaman and Nicobar Islands", "AP": "Andhra Pradesh", "AR": "Arunachal Pradesh",
+    "AS": "Assam", "BR": "Bihar", "CH": "Chandigarh", "CT": "Chhattisgarh", "DD": "Daman and Diu",
+    "DL": "Delhi", "GA": "Goa", "GJ": "Gujarat", "HP": "Himachal Pradesh", "HR": "Haryana",
+    "JH": "Jharkhand", "JK": "Jammu and Kashmir", "KA": "Karnataka", "KL": "Kerala",
+    "LA": "Ladakh", "LD": "Lakshadweep", "MH": "Maharashtra", "ML": "Meghalaya", "MN": "Manipur",
+    "MP": "Madhya Pradesh", "MZ": "Mizoram", "NL": "Nagaland", "OD": "Odisha", "PB": "Punjab",
+    "PY": "Puducherry", "RJ": "Rajasthan", "SK": "Sikkim", "TN": "Tamil Nadu", "TS": "Telangana",
+    "TR": "Tripura", "UK": "Uttarakhand", "UP": "Uttar Pradesh", "WB": "West Bengal",
+}
+
 
 class ExtractedIPMS247Data(BaseModel):
     """Extracted hotel data from IPMS247 page."""
@@ -506,20 +518,31 @@ class IPMS247Scraper:
         full_text = " ".join(lines)
         
         # Try to extract city (usually second line or after first comma)
+        # Skip lines that are country names or contain country patterns
+        country_words = ['united states', 'usa', 'america', 'india', 'canada', 'australia', 
+                         'uk', 'united kingdom', 'mexico', 'thailand', 'indonesia', 'philippines',
+                         'sri lanka', 'nepal', 'malaysia', 'vietnam', 'south africa']
         if len(lines) > 1:
-            city_line = lines[1].rstrip(",").strip()
-            if city_line and not re.match(r'^[A-Z]{2}\s*[-–]?\s*\d', city_line):
-                data.city = city_line
+            city_line = lines[1].rstrip(",").rstrip(".").strip()
+            # Skip if it looks like a state code, country, or contains country name
+            if city_line:
+                is_country = any(cw in city_line.lower() for cw in country_words)
+                is_state_code = re.match(r'^[A-Z]{2}\s*[-–]?\s*\d', city_line)
+                if not is_country and not is_state_code:
+                    data.city = city_line
         
         # Extract state - pattern like "Karnataka -" or "CA -" or "FL - 32541"
         state_match = re.search(r',?\s*([A-Za-z\s]+)\s*[-–]\s*(\d{5,6})', full_text)
         if state_match:
             state_raw = state_match.group(1).strip()
             data.zip_code = state_match.group(2).strip()
-            # Normalize US state codes
+            # Normalize US/Indian state codes
             if state_raw.upper() in US_STATES:
                 data.state = US_STATES[state_raw.upper()]
                 data.country = "United States"
+            elif state_raw.upper() in INDIAN_STATES:
+                data.state = INDIAN_STATES[state_raw.upper()]
+                data.country = "India"
             else:
                 data.state = state_raw
         else:
@@ -532,25 +555,50 @@ class IPMS247Scraper:
                 if state_code in US_STATES:
                     data.state = US_STATES[state_code]
                     data.country = "United States"
+                elif state_code in INDIAN_STATES:
+                    data.state = INDIAN_STATES[state_code]
+                    data.country = "India"
                 else:
                     data.state = state_code
         
         # Extract country (usually last, ends with period) - only if not already set
         if not data.country:
             country_patterns = [
-                (r'India\.?\s*$', 'India'),
+                (r'United States of America\.?\s*$', 'United States'),
                 (r'United States\.?\s*$', 'United States'),
                 (r'USA\.?\s*$', 'United States'),
+                (r'U\.S\.A\.?\s*$', 'United States'),
+                (r'India\.?\s*$', 'India'),
                 (r'Australia\.?\s*$', 'Australia'),
                 (r'Canada\.?\s*$', 'Canada'),
                 (r'United Kingdom\.?\s*$', 'United Kingdom'),
                 (r'UK\.?\s*$', 'United Kingdom'),
+                (r'England\.?\s*$', 'United Kingdom'),
                 (r'Sri Lanka\.?\s*$', 'Sri Lanka'),
                 (r'Nepal\.?\s*$', 'Nepal'),
                 (r'Thailand\.?\s*$', 'Thailand'),
                 (r'Indonesia\.?\s*$', 'Indonesia'),
                 (r'Philippines\.?\s*$', 'Philippines'),
                 (r'Mexico\.?\s*$', 'Mexico'),
+                (r'Malaysia\.?\s*$', 'Malaysia'),
+                (r'Vietnam\.?\s*$', 'Vietnam'),
+                (r'South Africa\.?\s*$', 'South Africa'),
+                (r'New Zealand\.?\s*$', 'New Zealand'),
+                (r'Singapore\.?\s*$', 'Singapore'),
+                (r'Japan\.?\s*$', 'Japan'),
+                (r'Germany\.?\s*$', 'Germany'),
+                (r'France\.?\s*$', 'France'),
+                (r'Spain\.?\s*$', 'Spain'),
+                (r'Italy\.?\s*$', 'Italy'),
+                (r'Greece\.?\s*$', 'Greece'),
+                (r'Portugal\.?\s*$', 'Portugal'),
+                (r'Hungary\.?\s*$', 'Hungary'),
+                (r'Czech Republic\.?\s*$', 'Czech Republic'),
+                (r'Poland\.?\s*$', 'Poland'),
+                (r'Netherlands\.?\s*$', 'Netherlands'),
+                (r'Belgium\.?\s*$', 'Belgium'),
+                (r'Switzerland\.?\s*$', 'Switzerland'),
+                (r'Austria\.?\s*$', 'Austria'),
             ]
             for pattern, country in country_patterns:
                 if re.search(pattern, full_text, re.IGNORECASE):
