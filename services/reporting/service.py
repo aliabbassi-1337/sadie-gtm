@@ -463,12 +463,34 @@ class Service(IService):
 
     def _populate_crawl_leads_sheet(self, sheet, leads: List[HotelLead]) -> None:
         """Populate the crawl leads sheet with hotel data."""
-        # Headers - ALL fields
-        headers = [
-            "Hotel", "Category", "Address", "City", "State", "Country",
-            "Phone", "Email", "Website", "Rating", "Reviews", "Room Count",
-            "Booking URL", "Booking Engine"
+        # Define all possible columns with their extractors
+        # Category moved to the right (after Booking Engine)
+        all_columns = [
+            ("Hotel", lambda l: l.hotel_name),
+            ("Address", lambda l: l.address or ""),
+            ("City", lambda l: l.city or ""),
+            ("State", lambda l: l.state or ""),
+            ("Country", lambda l: l.country or ""),
+            ("Phone", lambda l: l.phone_website or l.phone_google or ""),
+            ("Email", lambda l: l.email or ""),
+            ("Website", lambda l: l.website or ""),
+            ("Rating", lambda l: l.rating or ""),
+            ("Reviews", lambda l: l.review_count or ""),
+            ("Room Count", lambda l: l.room_count or ""),
+            ("Booking URL", lambda l: l.booking_url or ""),
+            ("Booking Engine", lambda l: l.booking_engine_name or ""),
+            ("Category", lambda l: l.category or ""),
         ]
+        
+        # Filter out columns where ALL values are empty
+        columns = []
+        for header, extractor in all_columns:
+            has_data = any(extractor(lead) for lead in leads)
+            if has_data:
+                columns.append((header, extractor))
+        
+        headers = [c[0] for c in columns]
+        extractors = [c[1] for c in columns]
 
         # Style definitions
         header_font = Font(bold=True, color="FFFFFF")
@@ -491,24 +513,9 @@ class Service(IService):
 
         # Write data rows
         for row, lead in enumerate(leads, 2):
-            values = [
-                lead.hotel_name,
-                lead.category or "",
-                lead.address or "",
-                lead.city or "",
-                lead.state or "",
-                lead.country or "",
-                lead.phone_website or lead.phone_google or "",
-                lead.email or "",
-                lead.website or "",
-                lead.rating or "",
-                lead.review_count or "",
-                lead.room_count or "",
-                lead.booking_url or "",
-                lead.booking_engine_name or "",
-            ]
-            for col, value in enumerate(values, 1):
-                sheet.cell(row=row, column=col, value=value).border = thin_border
+            for col, extractor in enumerate(extractors, 1):
+                cell = sheet.cell(row=row, column=col, value=extractor(lead))
+                cell.border = thin_border
 
         # Auto-adjust column widths
         for col in range(1, len(headers) + 1):
