@@ -2179,3 +2179,94 @@ class Service(IService):
         
         stats["total"] = sum(stats.values())
         return stats
+
+    # =========================================================================
+    # LOCATION BACKFILL (for crawl data missing state)
+    # =========================================================================
+
+    async def get_location_backfill_status(self) -> repo.LocationBackfillStatus:
+        """Get status of location data for USA leads."""
+        return await repo.get_location_backfill_status()
+
+    async def backfill_locations_reverse_geocode(self, limit: int = 100) -> dict:
+        """
+        Reverse geocode USA leads that have coordinates but missing state.
+        
+        Uses Nominatim API (free, 1 req/sec rate limit).
+        
+        Args:
+            limit: Max hotels to process
+            
+        Returns dict with success/failed counts.
+        """
+        from services.leadgen.geocoding import reverse_geocode
+        
+        hotels = await repo.get_hotels_for_reverse_geocoding(limit=limit)
+        
+        if not hotels:
+            logger.info("No hotels pending reverse geocoding")
+            return {"total": 0, "success": 0, "failed": 0}
+        
+        logger.info(f"Reverse geocoding {len(hotels)} hotels...")
+        
+        success = 0
+        failed = 0
+        
+        for hotel in hotels:
+            hotel_id = hotel['id']
+            name = hotel['name']
+            lat = hotel['lat']
+            lng = hotel['lng']
+            
+            # Rate limit: 1 req/sec for Nominatim
+            await asyncio.sleep(1.1)
+            
+            result = await reverse_geocode(lat, lng)
+            
+            if result and result.state:
+                # Normalize state to full name
+                state = self.US_STATE_NAMES.get(result.state, result.state)
+                
+                await repo.update_hotel_location_from_geocode(
+                    hotel_id=hotel_id,
+                    city=result.city,
+                    state=state,
+                    address=result.address,
+                )
+                
+                logger.info(f"  {name[:40]:40} -> {result.city}, {state}")
+                success += 1
+            else:
+                logger.warning(f"  {name[:40]:40} -> FAILED")
+                failed += 1
+        
+        logger.info(f"Reverse geocoding complete: {success} success, {failed} failed")
+        return {"total": len(hotels), "success": success, "failed": failed}
+
+    async def normalize_us_states(self) -> dict:
+        """
+        Normalize US state abbreviations to full names.
+        
+        Returns dict with total_fixed count.
+        """
+        VALID_STATES = set(self.US_STATE_NAMES.values())
+        
+        states = await repo.get_distinct_us_states()
+        total_fixed = 0
+        
+        for state in states:
+            # Skip if already a valid full name
+            if state in VALID_STATES:
+                continue
+            
+            # Check if it's an abbreviation
+            if state.upper() in self.US_STATE_NAMES:
+                full_name = self.US_STATE_NAMES[state.upper()]
+                
+                count = await repo.normalize_state_name(state, full_name)
+                if count > 0:
+                    logger.info(f"  {state} -> {full_name} ({count} hotels)")
+                    total_fixed += count
+        
+        logger.info(f"State normalization complete: {total_fixed} hotels updated")
+        return {"total_fixed": total_fixed}

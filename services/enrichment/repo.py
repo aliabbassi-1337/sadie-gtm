@@ -1024,3 +1024,126 @@ async def fix_state_with_zip(old_state: str, new_state: str) -> int:
     async with get_conn() as conn:
         result = await queries.fix_state_with_zip(conn, old_state=old_state, new_state=new_state)
         return int(result.split()[-1]) if result else 0
+
+
+# ============================================================================
+# LOCATION BACKFILL FUNCTIONS (for crawl data missing location)
+# ============================================================================
+
+
+class LocationBackfillStatus(BaseModel):
+    """Status of location data for USA leads."""
+    total_usa_hotels: int = 0
+    total_usa_leads: int = 0
+    leads_missing_state: int = 0
+    can_reverse_geocode: int = 0
+    need_forward_geocode: int = 0
+    states_need_normalization: int = 0
+
+
+async def get_location_backfill_status() -> LocationBackfillStatus:
+    """Get status of location data for USA leads (crawl sources)."""
+    async with get_conn() as conn:
+        total = await conn.fetchval('''
+            SELECT COUNT(*) FROM sadie_gtm.hotels 
+            WHERE status != -1 AND country = 'United States'
+        ''')
+        
+        leads = await conn.fetchval('''
+            SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+            WHERE h.status != -1 AND h.country = 'United States'
+        ''')
+        
+        missing_state = await conn.fetchval('''
+            SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+            WHERE h.status != -1 AND h.country = 'United States' AND h.state IS NULL
+        ''')
+        
+        can_reverse = await conn.fetchval('''
+            SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+            WHERE h.status != -1 AND h.country = 'United States' 
+            AND h.state IS NULL AND h.location IS NOT NULL
+        ''')
+        
+        need_forward = await conn.fetchval('''
+            SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+            WHERE h.status != -1 AND h.country = 'United States' 
+            AND h.state IS NULL AND h.location IS NULL
+        ''')
+        
+        abbrev_count = await conn.fetchval('''
+            SELECT COUNT(*) FROM sadie_gtm.hotels 
+            WHERE status != -1 AND country = 'United States'
+            AND state IS NOT NULL AND LENGTH(state) = 2
+        ''')
+        
+        return LocationBackfillStatus(
+            total_usa_hotels=total or 0,
+            total_usa_leads=leads or 0,
+            leads_missing_state=missing_state or 0,
+            can_reverse_geocode=can_reverse or 0,
+            need_forward_geocode=need_forward or 0,
+            states_need_normalization=abbrev_count or 0,
+        )
+
+
+async def get_hotels_for_reverse_geocoding(limit: int = 100) -> List[Dict[str, Any]]:
+    """Get USA leads with coordinates but missing state for reverse geocoding."""
+    async with get_conn() as conn:
+        rows = await conn.fetch('''
+            SELECT h.id, h.name,
+                   ST_Y(h.location::geometry) as lat,
+                   ST_X(h.location::geometry) as lng
+            FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+            WHERE h.status != -1 
+              AND h.country = 'United States'
+              AND h.state IS NULL 
+              AND h.location IS NOT NULL
+            LIMIT $1
+        ''', limit)
+        return [dict(r) for r in rows]
+
+
+async def update_hotel_location_from_geocode(
+    hotel_id: int,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    address: Optional[str] = None,
+) -> None:
+    """Update hotel with reverse geocoded location data."""
+    async with get_conn() as conn:
+        await conn.execute('''
+            UPDATE sadie_gtm.hotels
+            SET city = COALESCE($2, city),
+                state = $3,
+                address = COALESCE($4, address),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+        ''', hotel_id, city, state, address)
+
+
+async def get_distinct_us_states() -> List[str]:
+    """Get all distinct state values for USA hotels."""
+    async with get_conn() as conn:
+        rows = await conn.fetch('''
+            SELECT DISTINCT state FROM sadie_gtm.hotels 
+            WHERE status != -1 AND country = 'United States'
+            AND state IS NOT NULL
+        ''')
+        return [r['state'] for r in rows]
+
+
+async def normalize_state_name(old_state: str, new_state: str) -> int:
+    """Normalize a state abbreviation to full name. Returns count of updated records."""
+    async with get_conn() as conn:
+        result = await conn.execute('''
+            UPDATE sadie_gtm.hotels
+            SET state = $2, updated_at = CURRENT_TIMESTAMP
+            WHERE status != -1 AND country = 'United States' AND state = $1
+        ''', old_state, new_state)
+        return int(result.split()[-1]) if result else 0
