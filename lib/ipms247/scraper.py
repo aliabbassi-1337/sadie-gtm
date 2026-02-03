@@ -6,6 +6,7 @@ Uses Playwright to render page and open hotel info modal.
 URL format: https://live.ipms247.com/booking/book-rooms-{slug}
 """
 
+import asyncio
 import os
 import re
 from typing import Optional
@@ -70,18 +71,26 @@ def _get_brightdata_proxy() -> Optional[str]:
 
 
 class PlaywrightPool:
-    """Singleton browser pool for reusing Playwright browsers across requests."""
+    """Singleton browser pool for reusing Playwright browser across requests.
+    
+    Each page gets its own context to avoid conflicts with concurrent requests.
+    """
     
     _instance = None
     _playwright = None
     _browser = None
-    _context = None
+    _init_lock = None
     
     @classmethod
     async def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-            await cls._instance._init()
+        # Create lock on first access
+        if cls._init_lock is None:
+            cls._init_lock = asyncio.Lock()
+        
+        async with cls._init_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+                await cls._instance._init()
         return cls._instance
     
     async def _init(self):
@@ -96,20 +105,19 @@ class PlaywrightPool:
                 '--disable-extensions',
             ]
         )
-        self._context = await self._browser.new_context(
-            viewport={'width': 1280, 'height': 720},
-            java_script_enabled=True,
-        )
         logger.info("Playwright browser pool initialized")
     
     async def new_page(self):
-        """Get a new page from the shared context."""
-        return await self._context.new_page()
+        """Get a new page with its own context (safe for concurrent use)."""
+        context = await self._browser.new_context(
+            viewport={'width': 1280, 'height': 720},
+            java_script_enabled=True,
+        )
+        page = await context.new_page()
+        return page, context
     
     async def close(self):
         """Clean up browser resources."""
-        if self._context:
-            await self._context.close()
         if self._browser:
             await self._browser.close()
         if self._playwright:
@@ -117,7 +125,6 @@ class PlaywrightPool:
         PlaywrightPool._instance = None
         PlaywrightPool._playwright = None
         PlaywrightPool._browser = None
-        PlaywrightPool._context = None
         logger.info("Playwright browser pool closed")
 
 
@@ -371,15 +378,16 @@ class IPMS247Scraper:
     async def extract_with_playwright(self, slug: str) -> Optional[ExtractedIPMS247Data]:
         """Extract hotel data using Playwright to render JavaScript.
         
-        Uses shared browser pool for efficiency - only creates new pages, not browsers.
+        Uses shared browser pool for efficiency - each page gets its own context.
         """
         url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
         page = None
+        context = None
         
         try:
-            # Get page from shared browser pool
+            # Get page from shared browser pool (each page has its own context)
             pool = await PlaywrightPool.get_instance()
-            page = await pool.new_page()
+            page, context = await pool.new_page()
             
             # Navigate - need networkidle for AJAX modal to work
             await page.goto(url, wait_until="networkidle", timeout=15000)
@@ -426,10 +434,10 @@ class IPMS247Scraper:
             logger.warning(f"Playwright failed for {slug}: {type(e).__name__}: {e}")
             return await self.extract(slug)
         finally:
-            # Always close the page to free resources
-            if page:
+            # Always close context (which closes its page) to free resources
+            if context:
                 try:
-                    await page.close()
+                    await context.close()
                 except:
                     pass
     
