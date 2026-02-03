@@ -49,7 +49,12 @@ class ExtractedIPMS247Data(BaseModel):
     travel_directions: Optional[str] = None
     
     def has_data(self) -> bool:
-        """Check if we extracted any useful data."""
+        """Check if we extracted any useful data (not an error page)."""
+        # Filter out error pages
+        if self.name and "No Access" in self.name:
+            return False
+        if self.name and "error" in self.name.lower():
+            return False
         return bool(self.name or self.email or self.phone or self.latitude)
 
 

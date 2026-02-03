@@ -681,12 +681,22 @@ async def enrich_ipms247(limit: int, concurrency: int = 10) -> None:
                         stats['enriched'] += 1
                         logger.debug(f"{h['name'][:30] if h['name'] else 'Unknown'} | {data.name or ''} | {data.email or ''}")
                 else:
-                    stats['failed'] += 1
+                    # Check if this is a dead end (error page or no data)
+                    if data and data.name and "No Access" in data.name:
+                        # Mark as dead end
+                        await conn.execute('''
+                            UPDATE sadie_gtm.hotels SET status = 99, updated_at = NOW()
+                            WHERE id = $1
+                        ''', h['id'])
+                        stats['dead_ends'] = stats.get('dead_ends', 0) + 1
+                    else:
+                        stats['failed'] += 1
         
         logger.info("=" * 60)
         logger.info("IPMS247 ENRICHMENT COMPLETE")
         logger.info("=" * 60)
         logger.info(f"Enriched: {stats['enriched']}")
+        logger.info(f"Dead ends (No Access): {stats.get('dead_ends', 0)}")
         logger.info(f"Failed: {stats['failed']}")
         
     finally:
