@@ -345,6 +345,35 @@ WHERE be.name = :booking_engine
   AND h.source LIKE :source_pattern
 ORDER BY h.city, h.name;
 
+-- name: get_leads_by_source
+-- Get hotel leads by source pattern (for IPMS247, etc.)
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.category,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hbe.booking_url,
+    hbe.engine_property_id,
+    NULL::integer AS room_count,
+    NULL::text AS nearest_customer_name,
+    NULL::numeric AS nearest_customer_distance_km
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.source LIKE :source_pattern
+ORDER BY h.country, h.city, h.name;
+
 -- name: get_city_stats^
 -- Get stats for a city (for analytics tab)
 SELECT

@@ -53,6 +53,21 @@ class IService(ABC):
         pass
 
     @abstractmethod
+    async def export_by_source(
+        self,
+        source_pattern: str,
+        filename: str = None,
+    ) -> tuple[str, int]:
+        """Generate Excel report for hotels from a specific source.
+
+        Creates files like: ipms247_leads.xlsx
+
+        Returns:
+            Tuple of (s3_uri, lead_count)
+        """
+        pass
+
+    @abstractmethod
     async def export_all_states(
         self,
         country: str = "USA",
@@ -333,6 +348,59 @@ class Service(IService):
                 s3_uri = upload_file(tmp_path, s3_key)
 
             logger.info(f"Uploaded crawl data report to {s3_uri}")
+            return s3_uri, len(leads)
+        finally:
+            os.unlink(tmp_path)
+
+    async def export_by_source(
+        self,
+        source_pattern: str,
+        filename: str = None,
+    ) -> tuple[str, int]:
+        """Generate Excel report for hotels from a specific source.
+
+        Creates files like: ipms247_leads.xlsx
+        """
+        import subprocess
+
+        logger.info(f"Generating source report for {source_pattern}")
+
+        # Get leads
+        leads = await repo.get_leads_by_source(source_pattern)
+        logger.info(f"Found {len(leads)} leads for source {source_pattern}")
+
+        if not leads:
+            logger.warning(f"No leads found for source {source_pattern}")
+            return "", 0
+
+        # Determine source name for filename
+        source_name = source_pattern.replace('%', '').replace('_', '')
+        if not filename:
+            filename = f"{source_name}_leads.xlsx"
+
+        # Create workbook
+        workbook = self._create_crawl_workbook(leads, source_name)
+
+        # Save to temp file and upload
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            workbook.save(tmp.name)
+            tmp_path = tmp.name
+
+        try:
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/crawl-data/{filename}"
+
+            result = subprocess.run(
+                ["s5cmd", "cp", tmp_path, s3_uri],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
+                s3_key = f"HotelLeadGen/crawl-data/{filename}"
+                s3_uri = upload_file(tmp_path, s3_key)
+
+            logger.info(f"Uploaded source report to {s3_uri}")
             return s3_uri, len(leads)
         finally:
             os.unlink(tmp_path)

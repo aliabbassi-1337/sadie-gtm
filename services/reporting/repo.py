@@ -36,6 +36,18 @@ async def get_leads_by_booking_engine(booking_engine: str, source_pattern: str) 
         return [HotelLead.model_validate(dict(row)) for row in results]
 
 
+async def get_leads_by_source(source_pattern: str) -> List[HotelLead]:
+    """Get hotel leads by source pattern (e.g., 'ipms247%').
+    
+    For direct source exports like IPMS247.
+    """
+    async with get_conn() as conn:
+        results = await queries.get_leads_by_source(
+            conn, source_pattern=source_pattern
+        )
+        return [HotelLead.model_validate(dict(row)) for row in results]
+
+
 async def get_city_stats(city: str, state: str) -> CityStats:
     """Get analytics stats for a city."""
     async with get_conn() as conn:

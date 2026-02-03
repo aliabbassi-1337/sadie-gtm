@@ -22,7 +22,7 @@ class HotelLead(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
-    country: str = "United States"
+    country: Optional[str] = None
 
     # Ratings
     rating: Optional[float] = None
