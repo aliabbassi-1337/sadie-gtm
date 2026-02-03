@@ -464,8 +464,12 @@ class Service(IService):
 
     def _populate_crawl_leads_sheet(self, sheet, leads: List[HotelLead]) -> None:
         """Populate the crawl leads sheet with hotel data."""
-        # Headers for crawl data - include all contact info
-        headers = ["Hotel", "City", "State", "Country", "Phone", "Email", "Website", "Booking URL", "Booking Engine"]
+        # Headers - ALL fields
+        headers = [
+            "Hotel", "Category", "Address", "City", "State", "Country",
+            "Phone", "Email", "Website", "Rating", "Reviews", "Room Count",
+            "Booking URL", "Booking Engine", "Engine Tier"
+        ]
 
         # Style definitions
         header_font = Font(bold=True, color="FFFFFF")
@@ -488,42 +492,25 @@ class Service(IService):
 
         # Write data rows
         for row, lead in enumerate(leads, 2):
-            col = 1
-            # Hotel name
-            sheet.cell(row=row, column=col, value=lead.hotel_name).border = thin_border
-            col += 1
-
-            # City
-            sheet.cell(row=row, column=col, value=lead.city or "").border = thin_border
-            col += 1
-
-            # State
-            sheet.cell(row=row, column=col, value=lead.state or "").border = thin_border
-            col += 1
-
-            # Country
-            sheet.cell(row=row, column=col, value=lead.country or "").border = thin_border
-            col += 1
-
-            # Phone (prefer website phone, fall back to Google)
-            phone = lead.phone_website or lead.phone_google or ""
-            sheet.cell(row=row, column=col, value=phone).border = thin_border
-            col += 1
-
-            # Email
-            sheet.cell(row=row, column=col, value=lead.email or "").border = thin_border
-            col += 1
-
-            # Website
-            sheet.cell(row=row, column=col, value=lead.website or "").border = thin_border
-            col += 1
-
-            # Booking URL
-            sheet.cell(row=row, column=col, value=lead.booking_url or "").border = thin_border
-            col += 1
-
-            # Booking engine
-            sheet.cell(row=row, column=col, value=lead.booking_engine_name or "").border = thin_border
+            values = [
+                lead.hotel_name,
+                lead.category or "",
+                lead.address or "",
+                lead.city or "",
+                lead.state or "",
+                lead.country or "",
+                lead.phone_website or lead.phone_google or "",
+                lead.email or "",
+                lead.website or "",
+                lead.rating or "",
+                lead.review_count or "",
+                lead.room_count or "",
+                lead.booking_url or "",
+                lead.booking_engine_name or "",
+                lead.booking_engine_tier or "",
+            ]
+            for col, value in enumerate(values, 1):
+                sheet.cell(row=row, column=col, value=value).border = thin_border
 
         # Auto-adjust column widths
         for col in range(1, len(headers) + 1):
