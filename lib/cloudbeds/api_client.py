@@ -29,6 +29,8 @@ class CloudbedsPropertyData(BaseModel):
     longitude: Optional[float] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    contact_name: Optional[str] = None  # primary_name or contact_first_name + contact_last_name
+    formatted_address: Optional[str] = None
     
     def has_data(self) -> bool:
         return bool(self.name and self.name.strip())
@@ -242,6 +244,14 @@ class CloudbedsApiClient:
                 country_code = hotel_address.get("country") or data.get("hotel_address_country")
                 country = normalize_country(country_code) if country_code else None
                 
+                # Build contact name from available fields
+                contact_name = data.get("primary_name")
+                if not contact_name:
+                    first = data.get("contact_first_name", "")
+                    last = data.get("contact_last_name", "")
+                    if first or last:
+                        contact_name = f"{first} {last}".strip()
+                
                 result = CloudbedsPropertyData(
                     property_code=property_code,
                     booking_url=f"https://hotels.cloudbeds.com/reservation/{property_code}",
@@ -255,6 +265,8 @@ class CloudbedsApiClient:
                     longitude=lng,
                     phone=data.get("hotel_phone"),
                     email=data.get("hotel_email"),
+                    contact_name=contact_name or None,
+                    formatted_address=data.get("formatted_address"),
                 )
                 
                 if result.has_data():
