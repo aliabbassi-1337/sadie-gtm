@@ -133,15 +133,16 @@ async def ingest_slugs(
         booking_url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
         
         # Prepare record for batch insert
+        # Order: (name, source, external_id, external_id_type, booking_engine_id, booking_url, slug, detection_method)
         records.append((
-            data.name or f"IPMS247 Hotel {slug}",  # name
-            "ipms247_archive",  # source
-            slug,  # external_id
-            booking_url,  # booking_url
-            IPMS247_ENGINE_ID,  # booking_engine_id
-            slug,  # engine_property_id
-            "ipms247_archive",  # external_id_type
-            "archive_discovery",  # detection_method
+            data.name or f"IPMS247 Hotel {slug}",  # $1 name
+            "ipms247_archive",  # $2 source
+            slug,  # $3 external_id
+            "ipms247_slug",  # $4 external_id_type
+            IPMS247_ENGINE_ID,  # $5 booking_engine_id
+            booking_url,  # $6 booking_url
+            slug,  # $7 engine_property_id (slug)
+            "archive_discovery",  # $8 detection_method
         ))
     
     if records:
