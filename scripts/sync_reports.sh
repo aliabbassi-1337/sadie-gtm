@@ -39,6 +39,12 @@ echo "Starting sync: reports"
 s5cmd sync "$S3_BASE/reports/*" "$ONEDRIVE_BASE/reports/" &
 pids+=($!)
 
+# Sync crawl-data directory (Cloudbeds, RMS, IPMS247, etc.)
+mkdir -p "$ONEDRIVE_BASE/crawl-data"
+echo "Starting sync: crawl-data"
+s5cmd sync "$S3_BASE/crawl-data/*" "$ONEDRIVE_BASE/crawl-data/" &
+pids+=($!)
+
 # Wait for all syncs to complete
 echo ""
 echo "Waiting for all syncs to complete..."
