@@ -81,11 +81,22 @@ def extract_property_code(url: str) -> Optional[str]:
     Examples:
         https://hotels.cloudbeds.com/reservation/kypwgi -> kypwgi
         https://hotels.cloudbeds.com/booking/kypwgi -> kypwgi
+        https://hotels.cloudbeds.com/reservation/hotels.cloudbeds.com/reservation/osbtup -> osbtup (malformed)
     """
+    # Handle malformed URLs with duplicate domain
+    if 'cloudbeds.com/reservation/hotels.cloudbeds.com' in url:
+        url = url.replace('hotels.cloudbeds.com/reservation/hotels.cloudbeds.com/reservation/', 
+                          'hotels.cloudbeds.com/reservation/')
+    
     # Pattern: /reservation/{code} or /booking/{code}
-    match = re.search(r'/(?:reservation|booking)/([a-zA-Z0-9]+)(?:/|$|\?)', url)
+    # Code is typically 6 alphanumeric chars, but can vary
+    match = re.search(r'/(?:reservation|booking)/([a-zA-Z0-9]{2,10})(?:/|$|\?)', url)
     if match:
-        return match.group(1)
+        code = match.group(1)
+        # Skip if it looks like a domain part (shouldn't happen after fix above)
+        if code.lower() in ('hotels', 'www', 'booking'):
+            return None
+        return code
     return None
 
 
