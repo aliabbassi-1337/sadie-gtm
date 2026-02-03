@@ -16,6 +16,21 @@ from bs4 import BeautifulSoup
 from loguru import logger
 from pydantic import BaseModel
 
+# US state code to full name mapping
+US_STATES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
+    "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
+    "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa",
+    "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri",
+    "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
+    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
+    "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+    "DC": "District of Columbia", "PR": "Puerto Rico", "VI": "Virgin Islands", "GU": "Guam",
+}
+
 
 class ExtractedIPMS247Data(BaseModel):
     """Extracted hotel data from IPMS247 page."""
@@ -51,22 +66,39 @@ class ExtractedIPMS247Data(BaseModel):
     
     def has_data(self) -> bool:
         """Check if we extracted any useful data (not an error page)."""
-        # Filter out error pages
-        if self.name and "No Access" in self.name:
+        if not self.name:
             return False
-        if self.name and "error" in self.name.lower():
-            return False
-        return bool(self.name or self.email or self.phone or self.latitude)
+        # Filter out error pages and junk
+        error_patterns = ["No Access", "Not Found", "Sorry", "Incorrect URL", "error", "Oops", "eZee Reservation", "Demo -", "Google"]
+        for pattern in error_patterns:
+            if pattern.lower() in self.name.lower():
+                return False
+        return True
 
 
-def _get_brightdata_proxy() -> Optional[str]:
-    """Get Brightdata datacenter proxy URL for httpx."""
+def _get_brightdata_proxy(use_residential: bool = False, session_id: str = None) -> Optional[str]:
+    """Get Brightdata proxy URL for httpx.
+    
+    Args:
+        use_residential: If True, use residential proxy (more reliable, higher cost)
+        session_id: Unique ID for residential proxy to get new IP
+    """
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
-    dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
-    dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
-    if customer_id and dc_zone and dc_password:
-        username = f"brd-customer-{customer_id}-zone-{dc_zone}"
-        return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
+    
+    if use_residential:
+        res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
+        res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
+        if customer_id and res_zone and res_password:
+            username = f"brd-customer-{customer_id}-zone-{res_zone}"
+            if session_id:
+                username += f"-session-{session_id}"
+            return f"http://{username}:{res_password}@brd.superproxy.io:22225"
+    else:
+        dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+        dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+        if customer_id and dc_zone and dc_password:
+            username = f"brd-customer-{customer_id}-zone-{dc_zone}"
+            return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
     return None
 
 
@@ -244,18 +276,29 @@ class IPMS247Scraper:
         """Build booking URL from slug."""
         return f"https://live.ipms247.com/booking/book-rooms-{slug}"
     
-    async def scrape(self, slug: str) -> Optional[ExtractedIPMS247Data]:
-        """Scrape full hotel data using Playwright.
+    async def scrape(self, slug_or_url: str, skip_playwright: bool = False) -> Optional[ExtractedIPMS247Data]:
+        """Scrape full hotel data using httpx POST to rminfo endpoint.
         
-        This is the primary method - gets all data including:
+        Gets all data including:
         - Name, address, city, state, country, zip
         - Phone, email
         - Lat/lng coordinates
-        - Hotel type, check-in/out times, policies
+        - Hotel type, check-in/out times
         
-        Falls back to HTTP-only extract() if Playwright fails.
+        Args:
+            slug_or_url: Hotel slug or full URL
+            skip_playwright: If True, don't fall back to Playwright
         """
-        return await self.extract_with_playwright(slug)
+        result = await self.extract(slug_or_url)
+        if result and result.has_data():
+            return result
+        
+        if skip_playwright:
+            return None
+        
+        # Fallback to Playwright for edge cases
+        logger.debug(f"httpx extract failed for {slug_or_url}, trying Playwright")
+        return await self.extract_with_playwright(slug_or_url)
     
     def _get_client_kwargs(self) -> dict:
         """Get httpx client kwargs."""
@@ -265,29 +308,64 @@ class IPMS247Scraper:
             kwargs["verify"] = False
         return kwargs
     
-    async def extract(self, slug: str) -> Optional[ExtractedIPMS247Data]:
+    async def extract(self, slug_or_url: str, _retry_with_proxy: bool = False) -> Optional[ExtractedIPMS247Data]:
         """Extract hotel data from IPMS247 booking page.
         
         Uses two requests:
         1. Main booking page to get session + hotel ID
-        2. propertyinfo.php to get full hotel details
+        2. POST to rminfo-{slug} to get full hotel details (phone, email, address)
+        
+        On rate limit (403/429), retries with Brightdata residential proxy.
         
         Args:
-            slug: The hotel slug (e.g., "safarihotelboardwalk")
+            slug_or_url: Either a slug (e.g., "safarihotelboardwalk"), numeric ID (e.g., "126545"),
+                         or full URL (e.g., "https://live.ipms247.com/booking/book-rooms-safarihotelboardwalk")
+            _retry_with_proxy: Internal flag - if True, using residential proxy for retry
             
         Returns:
             ExtractedIPMS247Data if successful, None if page not found
         """
-        booking_url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
+        import uuid
+        
+        # Handle full URLs - extract slug
+        if slug_or_url.startswith("http"):
+            match = re.search(r'book-rooms-([^/?]+)', slug_or_url)
+            if match:
+                slug = match.group(1)
+                booking_url = slug_or_url  # Use original URL
+            else:
+                logger.debug(f"Could not extract slug from URL: {slug_or_url}")
+                return None
+        else:
+            slug = slug_or_url
+            booking_url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
+        
+        # Normalize URL
+        booking_url = booking_url.replace(":80/", "/").replace("//booking", "/booking")
+        if not booking_url.startswith("https://"):
+            booking_url = booking_url.replace("http://", "https://")
+        
+        # Setup client - use residential proxy on retry
+        client_kwargs = {"timeout": self.timeout, "follow_redirects": True}
+        if _retry_with_proxy:
+            proxy_url = _get_brightdata_proxy(use_residential=True, session_id=str(uuid.uuid4())[:8])
+            if proxy_url:
+                client_kwargs["proxy"] = proxy_url
+                client_kwargs["verify"] = False
         
         try:
-            async with httpx.AsyncClient(**self._get_client_kwargs(), follow_redirects=True) as client:
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
                 }
                 
                 # Step 1: Get main page to extract hotel ID and establish session
                 main_resp = await client.get(booking_url, headers=headers)
+                
+                # Rate limited - retry with proxy
+                if main_resp.status_code in (403, 429) and not _retry_with_proxy:
+                    logger.debug(f"Rate limited on {slug}, retrying with Brightdata proxy")
+                    return await self.extract(slug_or_url, _retry_with_proxy=True)
                 
                 if main_resp.status_code != 200:
                     logger.debug(f"IPMS247 page not found: {slug} (status {main_resp.status_code})")
@@ -297,28 +375,183 @@ class IPMS247Scraper:
                 if len(main_html) < 1000:
                     return None
                 
-                # Extract hotel ID
+                # Extract hotel ID from page
                 hotel_id_match = re.search(r'HotelId["\s:=]+(\d+)', main_html)
-                if not hotel_id_match:
-                    # Try to parse from main page only
-                    return self._parse_html(main_html, slug, booking_url)
+                hotel_id = hotel_id_match.group(1) if hotel_id_match else slug
                 
-                hotel_id = hotel_id_match.group(1)
+                # Step 2: Fetch rminfo (POST) and gmap (GET) in parallel
+                rminfo_url = f"https://live.ipms247.com/booking/rminfo-{slug}"
+                gmap_url = f"https://live.ipms247.com/booking/gmap-{slug}"
+                rminfo_payload = {
+                    "HotelId": hotel_id,
+                    "flag": "1",
+                    "Hotel_valid": "HotelInformation"
+                }
                 
-                # Step 2: Fetch propertyinfo.php with session (has full hotel details)
-                info_url = f"https://live.ipms247.com/booking/propertyinfo.php?HotelId={hotel_id}"
-                info_resp = await client.get(info_url, headers=headers)
+                # Parallel requests for speed
+                rminfo_task = client.post(rminfo_url, data=rminfo_payload, headers=headers)
+                gmap_task = client.get(gmap_url, headers=headers)
+                rminfo_resp, gmap_resp = await asyncio.gather(rminfo_task, gmap_task, return_exceptions=True)
                 
-                if info_resp.status_code == 200 and len(info_resp.text) > 1000:
-                    # Parse the full propertyinfo page
-                    return self._parse_full_html(info_resp.text, slug, booking_url)
-                else:
-                    # Fallback to main page parsing
-                    return self._parse_html(main_html, slug, booking_url)
+                # Parse rminfo response
+                if not isinstance(rminfo_resp, Exception) and rminfo_resp.status_code == 200 and len(rminfo_resp.text) > 500:
+                    result = self._parse_rminfo_html(rminfo_resp.text, slug, booking_url, hotel_id)
+                    if result and result.has_data():
+                        # Parse gmap for lat/lng
+                        if not isinstance(gmap_resp, Exception) and gmap_resp.status_code == 200:
+                            coords = re.findall(r"parseFloat\('([0-9.-]+)'\)", gmap_resp.text)
+                            if len(coords) >= 2:
+                                try:
+                                    result.latitude = float(coords[0])
+                                    result.longitude = float(coords[1])
+                                except ValueError:
+                                    pass
+                        return result
+                
+                # Fallback to main page parsing
+                return self._parse_html(main_html, slug, booking_url)
                 
         except Exception as e:
             logger.debug(f"IPMS247 error for {slug}: {e}")
             return None
+    
+    def _parse_rminfo_html(self, html: str, slug: str, url: str, hotel_id: str = None) -> Optional[ExtractedIPMS247Data]:
+        """Parse hotel data from rminfo POST response.
+        
+        This endpoint returns the full hotel info including:
+        - Address, City, State, Country, Zip
+        - Phone, Reservation Phone, Email
+        - Hotel Type, Check-in/out times
+        - Policies and descriptions
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        
+        data = ExtractedIPMS247Data(slug=slug, booking_url=url, hotel_id=hotel_id)
+        
+        # Extract name from htl-title
+        title_elem = soup.find("h4", class_="htl-title")
+        if title_elem:
+            for small in title_elem.find_all("small"):
+                small.decompose()
+            data.name = title_elem.get_text(strip=True)
+        
+        # Parse address from pl-address
+        addr_elem = soup.find("p", class_="pl-address")
+        if addr_elem:
+            self._parse_address_from_rminfo(addr_elem, data)
+        
+        # Parse cnt-detail elements for phone, email, hotel type, check-in/out
+        for detail in soup.find_all("p", class_="cnt-detail"):
+            text = detail.get_text(strip=True)
+            
+            if "Phone" in text and "Reservation" not in text:
+                match = re.search(r'Phone\s*:\s*(.+)', text)
+                if match and not data.phone:
+                    data.phone = match.group(1).strip()
+            
+            elif "Reservation Phone" in text:
+                match = re.search(r'Reservation Phone\s*:\s*(.+)', text)
+                if match:
+                    data.reservation_phone = match.group(1).strip()
+            
+            elif "Email" in text:
+                match = re.search(r'Email\s*:\s*(\S+@\S+)', text)
+                if match and not data.email:
+                    data.email = match.group(1).strip()
+            
+            elif "Hotel Type" in text or "Hostel Type" in text:
+                match = re.search(r'(?:Hotel|Hostel) Type\s*:\s*(.+)', text)
+                if match:
+                    data.hotel_type = match.group(1).strip()
+            
+            elif "Check-In Time" in text:
+                match = re.search(r'Check-In Time\s*(.+)', text)
+                if match:
+                    data.check_in_time = match.group(1).strip()
+            
+            elif "Check-Out Time" in text:
+                match = re.search(r'Check-Out Time\s*(.+)', text)
+                if match:
+                    data.check_out_time = match.group(1).strip()
+            
+            elif text.startswith("Hostel Information") or text.startswith("Hotel Information"):
+                # This is the description
+                desc_text = text.replace("Hostel Information", "").replace("Hotel Information", "").strip()
+                if desc_text:
+                    data.description = desc_text
+        
+        return data if data.has_data() else None
+    
+    def _parse_address_from_rminfo(self, addr_elem, data: ExtractedIPMS247Data) -> None:
+        """Parse address from rminfo pl-address element.
+        
+        Format: Address: street, city, state - zip, country
+        """
+        # Get raw text
+        raw_text = addr_elem.get_text(separator="\n", strip=True)
+        lines = [l.strip() for l in raw_text.split("\n") if l.strip() and l.strip() not in [":", "Address:", "Address"]]
+        
+        if not lines:
+            return
+        
+        # First line is usually street address
+        if lines:
+            data.address = lines[0].rstrip(",").strip()
+        
+        # Look for city, state, zip, country pattern
+        full_text = " ".join(lines)
+        
+        # Try to extract city (usually second line or after first comma)
+        if len(lines) > 1:
+            city_line = lines[1].rstrip(",").strip()
+            if city_line and not re.match(r'^[A-Z]{2}\s*[-–]?\s*\d', city_line):
+                data.city = city_line
+        
+        # Extract state - pattern like "Karnataka -" or "CA -" or "FL - 32541"
+        state_match = re.search(r',?\s*([A-Za-z\s]+)\s*[-–]\s*(\d{5,6})', full_text)
+        if state_match:
+            state_raw = state_match.group(1).strip()
+            data.zip_code = state_match.group(2).strip()
+            # Normalize US state codes
+            if state_raw.upper() in US_STATES:
+                data.state = US_STATES[state_raw.upper()]
+                data.country = "United States"
+            else:
+                data.state = state_raw
+        else:
+            # Try US state code pattern: "FL 32541" or "CA, 90210"
+            us_state_match = re.search(r'\b([A-Z]{2})\s*[-–,]?\s*(\d{5}(?:-\d{4})?)', full_text)
+            if us_state_match:
+                state_code = us_state_match.group(1)
+                data.zip_code = us_state_match.group(2)
+                # Normalize US state code to full name
+                if state_code in US_STATES:
+                    data.state = US_STATES[state_code]
+                    data.country = "United States"
+                else:
+                    data.state = state_code
+        
+        # Extract country (usually last, ends with period) - only if not already set
+        if not data.country:
+            country_patterns = [
+                (r'India\.?\s*$', 'India'),
+                (r'United States\.?\s*$', 'United States'),
+                (r'USA\.?\s*$', 'United States'),
+                (r'Australia\.?\s*$', 'Australia'),
+                (r'Canada\.?\s*$', 'Canada'),
+                (r'United Kingdom\.?\s*$', 'United Kingdom'),
+                (r'UK\.?\s*$', 'United Kingdom'),
+                (r'Sri Lanka\.?\s*$', 'Sri Lanka'),
+                (r'Nepal\.?\s*$', 'Nepal'),
+                (r'Thailand\.?\s*$', 'Thailand'),
+                (r'Indonesia\.?\s*$', 'Indonesia'),
+                (r'Philippines\.?\s*$', 'Philippines'),
+                (r'Mexico\.?\s*$', 'Mexico'),
+            ]
+            for pattern, country in country_patterns:
+                if re.search(pattern, full_text, re.IGNORECASE):
+                    data.country = country
+                    break
     
     def _parse_html(self, html: str, slug: str, url: str) -> Optional[ExtractedIPMS247Data]:
         """Parse hotel data from IPMS247 HTML.
@@ -432,13 +665,22 @@ class IPMS247Scraper:
                 elif line and not data.city:
                     data.city = line.rstrip(",")
     
-    async def extract_with_playwright(self, slug: str) -> Optional[ExtractedIPMS247Data]:
+    async def extract_with_playwright(self, slug_or_url: str) -> Optional[ExtractedIPMS247Data]:
         """Extract hotel data using Playwright to render JavaScript.
         
         Uses shared browser pool for efficiency - each page gets its own context.
+        Args:
+            slug_or_url: Either a slug like "safarihotel" or full URL like "https://live.ipms247.com/booking/book-rooms-safarihotel"
         """
         import time
-        url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
+        # Handle both URLs and slugs
+        if slug_or_url.startswith("http"):
+            url = slug_or_url
+            slug = re.search(r'book-rooms-([^/?]+)', slug_or_url)
+            slug = slug.group(1) if slug else slug_or_url
+        else:
+            slug = slug_or_url
+            url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
         page = None
         context = None
         t0 = time.time()
@@ -488,18 +730,19 @@ class IPMS247Scraper:
             }''')
             
             if clicked:
-                # Wait for modal content to load via AJAX
+                # Wait for modal content with Phone/Email to appear (loaded via AJAX)
                 try:
-                    await page.wait_for_function('document.querySelector("#propertyinfoModal .htl-title") !== null', timeout=2000)
+                    await page.wait_for_function('document.body.innerText.includes("Phone :")', timeout=10000)
                 except:
-                    await page.wait_for_timeout(1000)  # Fallback
+                    await page.wait_for_timeout(3000)  # Fallback
             
             t3 = time.time()
             
-            # Get page content
+            # Get page content AND body text (modal content renders into body)
             html = await page.content()
+            modal_text = await page.evaluate('() => document.body.innerText')
             
-            result = self._parse_full_html(html, slug, url)
+            result = self._parse_full_html(html, slug, url, modal_text)
             t4 = time.time()
             logger.debug(f"{slug}: modal={t3-t2:.2f}s, parse={t4-t3:.2f}s, total={t4-t0:.2f}s")
             if result and result.email:
@@ -517,7 +760,7 @@ class IPMS247Scraper:
                 except:
                     pass
     
-    def _parse_full_html(self, html: str, slug: str, url: str) -> Optional[ExtractedIPMS247Data]:
+    def _parse_full_html(self, html: str, slug: str, url: str, modal_text: str = "") -> Optional[ExtractedIPMS247Data]:
         """Parse full HTML including modal content."""
         soup = BeautifulSoup(html, "html.parser")
         data = ExtractedIPMS247Data(slug=slug, booking_url=url)
@@ -542,6 +785,84 @@ class IPMS247Scraper:
                     data.name = title.split(" , ")[0].strip()
                 else:
                     data.name = title
+        
+        # Extract all fields from modal text (the actual hotel info)
+        # Modal text contains: "Phone : +14102896411\nEmail : safarimotel@gmail.com\n..."
+        text = modal_text or html
+        
+        # Email: look for "Email : xxx@xxx.xxx" pattern
+        email_match = re.search(r'Email\s*:\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', text)
+        if email_match:
+            data.email = email_match.group(1).strip()
+        
+        # Phone: look for "Phone : +xxx" pattern (not Reservation Phone)
+        phone_match = re.search(r'(?<!Reservation )Phone\s*:\s*([+\d\s()-]{7,20})', text)
+        if phone_match:
+            data.phone = phone_match.group(1).strip()
+        
+        # Reservation Phone
+        res_phone_match = re.search(r'Reservation\s+Phone\s*:\s*([+\d\s()-]{7,20})', text)
+        if res_phone_match:
+            data.reservation_phone = res_phone_match.group(1).strip()
+            if not data.phone:
+                data.phone = data.reservation_phone
+        
+        # Address block: "Address:\n1219 Atlantic Ave,,\nOcean City, MD - 21842, United States"
+        addr_match = re.search(r'Address:\s*\n([^\n]+(?:\n[^\n]+)*?)(?=\n\s*\n|\nPhone|\nEmail)', text, re.DOTALL)
+        if addr_match:
+            addr_lines = [l.strip() for l in addr_match.group(1).strip().split('\n') if l.strip()]
+            if addr_lines:
+                data.address = addr_lines[0].rstrip(',')
+                # Parse city, state, zip, country from remaining lines
+                for line in addr_lines[1:]:
+                    # Pattern: "City, STATE - ZIP, Country" or "City, STATE ZIP, Country"
+                    loc_match = re.match(r'([^,]+),\s*([A-Z]{2})\s*[-–]?\s*(\d{5})?,?\s*(.+)?', line)
+                    if loc_match:
+                        data.city = loc_match.group(1).strip()
+                        data.state = loc_match.group(2).strip()
+                        if loc_match.group(3):
+                            data.zip_code = loc_match.group(3).strip()
+                        if loc_match.group(4):
+                            data.country = loc_match.group(4).strip().rstrip('.')
+        
+        # Website from meta or link
+        website_match = re.search(r'Website\s*:\s*(https?://[^\s<>"]+)', text)
+        if website_match:
+            data.website = website_match.group(1).strip()
+        
+        # Hotel Type
+        type_match = re.search(r'Hotel\s+Type\s*:\s*([^\n<]+)', text)
+        if type_match:
+            data.hotel_type = type_match.group(1).strip()
+        
+        # Check-In/Out Times
+        checkin_match = re.search(r'Check-In\s+Time\s*[:\n]\s*(\d{1,2}:\d{2}\s*[AP]M)', text, re.IGNORECASE)
+        if checkin_match:
+            data.check_in_time = checkin_match.group(1).strip()
+        
+        checkout_match = re.search(r'Check-Out\s+Time\s*[:\n]\s*(\d{1,2}:\d{2}\s*[AP]M)', text, re.IGNORECASE)
+        if checkout_match:
+            data.check_out_time = checkout_match.group(1).strip()
+        
+        # Coordinates from Google Maps link or data attributes
+        coords_match = re.search(r'@(-?\d+\.?\d*),(-?\d+\.?\d*)', html)
+        if coords_match:
+            try:
+                data.latitude = float(coords_match.group(1))
+                data.longitude = float(coords_match.group(2))
+            except ValueError:
+                pass
+        
+        # Also try data-lat/data-lng attributes
+        if not data.latitude:
+            lat_match = re.search(r'data-lat[="\']+(-?\d+\.?\d*)', html)
+            lng_match = re.search(r'data-lng[="\']+(-?\d+\.?\d*)', html)
+            if lat_match and lng_match:
+                try:
+                    data.latitude = float(lat_match.group(1))
+                    data.longitude = float(lng_match.group(1))
+                except ValueError:
+                    pass
         
         # Parse address from pl-address or cnt-detail
         addr_elem = soup.find("p", class_="pl-address")
