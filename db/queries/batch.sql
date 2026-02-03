@@ -73,7 +73,6 @@ WITH new_hotel AS (
 INSERT INTO sadie_gtm.hotel_booking_engines (hotel_id, booking_engine_id, booking_url, engine_property_id, detection_method, status, detected_at, updated_at)
 SELECT id, $5, $6, $7, $8, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 FROM new_hotel
-ON CONFLICT (hotel_id) DO UPDATE SET
-    booking_url = EXCLUDED.booking_url,
-    engine_property_id = EXCLUDED.engine_property_id,
-    updated_at = CURRENT_TIMESTAMP;
+WHERE NOT EXISTS (
+    SELECT 1 FROM sadie_gtm.hotel_booking_engines WHERE booking_url = $6
+);

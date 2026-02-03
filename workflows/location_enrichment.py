@@ -2,30 +2,30 @@
 
 USAGE:
 
-1. Enrich locations (respects Nominatim rate limit of 1 req/sec):
-   uv run python workflows/location_enrichment.py enrich --limit 100
-
-2. Check status:
+1. Check status:
    uv run python workflows/location_enrichment.py status
+
+2. Enrich locations (respects Nominatim rate limit of 1 req/sec):
+   uv run python workflows/location_enrichment.py enrich --limit 100
 
 NOTES:
 - Uses OpenStreetMap Nominatim API (free, 1 request per second rate limit)
 - Only processes hotels that have coordinates but missing city
+- Normalizes state abbreviations to full names (CA -> California)
 - Idempotent (can be re-run safely)
 """
 
 import sys
 from pathlib import Path
 
-# Add project root to path for direct script execution
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncio
 import argparse
 from loguru import logger
 
-from db.client import init_db, close_db, queries, get_conn
-from services.leadgen.geocoding import reverse_geocode
+from db.client import init_db, close_db
+from services.enrichment.service import Service
 from infra import slack
 
 
@@ -33,69 +33,31 @@ async def run_location_enrichment(limit: int, notify: bool = True) -> None:
     """Run location enrichment for hotels missing city data."""
     await init_db()
     try:
+        service = Service()
+        
         # Get pending count first
-        async with get_conn() as conn:
-            result = await queries.get_pending_location_enrichment_count(conn)
-            pending = result["count"] if result else 0
-
+        pending = await service.get_pending_location_enrichment_count()
         logger.info(f"Hotels pending location enrichment: {pending}")
 
         if pending == 0:
             logger.info("No hotels pending location enrichment")
             return
 
-        # Get hotels to process
-        async with get_conn() as conn:
-            hotels = await queries.get_hotels_pending_location_enrichment(conn, limit=limit)
-
-        logger.info(f"Processing {len(hotels)} hotels for location enrichment...")
-
-        enriched_count = 0
-        failed_count = 0
-
-        for hotel in hotels:
-            hotel_id = hotel["id"]
-            hotel_name = hotel["name"]
-            lat = hotel["latitude"]
-            lng = hotel["longitude"]
-
-            logger.info(f"  {hotel_name} ({lat}, {lng})...")
-
-            # Call Nominatim reverse geocoding
-            result = await reverse_geocode(lat, lng)
-
-            if result and result.city:
-                # Update hotel with location data
-                async with get_conn() as conn:
-                    await queries.update_hotel_location(
-                        conn,
-                        hotel_id=hotel_id,
-                        address=result.address,
-                        city=result.city,
-                        state=result.state,
-                        country=result.country,
-                    )
-                logger.info(f"    -> {result.city}, {result.state}")
-                enriched_count += 1
-            else:
-                logger.warning(f"    -> No city found")
-                failed_count += 1
-
-            # Rate limit: Nominatim requires 1 request per second
-            await asyncio.sleep(1.1)
+        # Run enrichment
+        stats = await service.enrich_locations_reverse_geocode(limit=limit)
 
         logger.info("=" * 60)
         logger.info("LOCATION ENRICHMENT COMPLETE")
         logger.info("=" * 60)
-        logger.info(f"Hotels enriched: {enriched_count}")
-        logger.info(f"Hotels failed: {failed_count}")
+        logger.info(f"Hotels enriched: {stats['enriched']}")
+        logger.info(f"Hotels failed: {stats['failed']}")
         logger.info("=" * 60)
 
-        if notify and enriched_count > 0:
+        if notify and stats["enriched"] > 0:
             slack.send_message(
                 f"*Location Enrichment Complete*\n"
-                f"• Hotels enriched: {enriched_count}\n"
-                f"• Hotels failed: {failed_count}"
+                f"• Hotels enriched: {stats['enriched']}\n"
+                f"• Hotels failed: {stats['failed']}"
             )
 
     except Exception as e:
@@ -111,9 +73,8 @@ async def show_status() -> None:
     """Show location enrichment status."""
     await init_db()
     try:
-        async with get_conn() as conn:
-            result = await queries.get_pending_location_enrichment_count(conn)
-            pending = result["count"] if result else 0
+        service = Service()
+        pending = await service.get_pending_location_enrichment_count()
 
         logger.info("=" * 60)
         logger.info("LOCATION ENRICHMENT STATUS")
@@ -162,6 +123,9 @@ Examples:
     subparsers.add_parser("status", help="Show location enrichment status")
 
     args = parser.parse_args()
+
+    logger.remove()
+    logger.add(sys.stderr, level="INFO", format="<level>{level: <8}</level> | {message}")
 
     if args.command == "enrich":
         logger.info(f"Running location enrichment (limit={args.limit})")

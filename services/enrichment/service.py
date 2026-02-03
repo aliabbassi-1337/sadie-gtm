@@ -2179,3 +2179,73 @@ class Service(IService):
         
         stats["total"] = sum(stats.values())
         return stats
+
+    # =========================================================================
+    # LOCATION ENRICHMENT (reverse geocoding)
+    # =========================================================================
+
+    async def get_pending_location_enrichment_count(self) -> int:
+        """Count hotels needing location enrichment (have coords, missing city)."""
+        return await repo.get_pending_location_enrichment_count()
+
+    async def enrich_locations_reverse_geocode(self, limit: int = 100) -> dict:
+        """
+        Reverse geocode hotels that have coordinates but missing city/state.
+        
+        Uses Nominatim API (free, 1 req/sec rate limit).
+        Normalizes state abbreviations to full names.
+        
+        Args:
+            limit: Max hotels to process
+            
+        Returns dict with total/enriched/failed counts.
+        """
+        from services.leadgen.geocoding import reverse_geocode
+        
+        hotels = await repo.get_hotels_pending_location_enrichment(limit=limit)
+        
+        if not hotels:
+            logger.info("No hotels pending location enrichment")
+            return {"total": 0, "enriched": 0, "failed": 0}
+        
+        logger.info(f"Reverse geocoding {len(hotels)} hotels...")
+        
+        enriched = 0
+        failed = 0
+        
+        for hotel in hotels:
+            hotel_id = hotel['id']
+            name = hotel['name']
+            lat = hotel['latitude']
+            lng = hotel['longitude']
+            
+            logger.info(f"  {name[:50]} ({lat}, {lng})...")
+            
+            # Call Nominatim reverse geocoding
+            result = await reverse_geocode(lat, lng)
+            
+            if result and result.city:
+                # Normalize state to full name if it's a US state abbreviation
+                state = result.state
+                if state and state.upper() in self.US_STATE_NAMES:
+                    state = self.US_STATE_NAMES[state.upper()]
+                
+                await repo.update_hotel_location_fields(
+                    hotel_id=hotel_id,
+                    address=result.address,
+                    city=result.city,
+                    state=state,
+                    country=result.country,
+                )
+                
+                logger.info(f"    -> {result.city}, {state}")
+                enriched += 1
+            else:
+                logger.warning(f"    -> No city found")
+                failed += 1
+            
+            # Rate limit: Nominatim requires 1 request per second
+            await asyncio.sleep(1.1)
+        
+        logger.info(f"Location enrichment complete: {enriched} enriched, {failed} failed")
+        return {"total": len(hotels), "enriched": enriched, "failed": failed}

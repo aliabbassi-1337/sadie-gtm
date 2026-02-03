@@ -1024,3 +1024,46 @@ async def fix_state_with_zip(old_state: str, new_state: str) -> int:
     async with get_conn() as conn:
         result = await queries.fix_state_with_zip(conn, old_state=old_state, new_state=new_state)
         return int(result.split()[-1]) if result else 0
+
+
+# ============================================================================
+# LOCATION ENRICHMENT FUNCTIONS (reverse geocoding)
+# ============================================================================
+
+
+class LocationEnrichmentStatus(BaseModel):
+    """Status of location enrichment."""
+    pending_count: int = 0
+
+
+async def get_hotels_pending_location_enrichment(limit: int = 100) -> List[Dict[str, Any]]:
+    """Get hotels with coordinates but missing city for reverse geocoding."""
+    async with get_conn() as conn:
+        rows = await queries.get_hotels_pending_location_enrichment(conn, limit=limit)
+        return [dict(r) for r in rows]
+
+
+async def get_pending_location_enrichment_count() -> int:
+    """Count hotels needing location enrichment (have coords, missing city)."""
+    async with get_conn() as conn:
+        result = await queries.get_pending_location_enrichment_count(conn)
+        return result["count"] if result else 0
+
+
+async def update_hotel_location_fields(
+    hotel_id: int,
+    address: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> None:
+    """Update hotel with reverse geocoded location data."""
+    async with get_conn() as conn:
+        await queries.update_hotel_location(
+            conn,
+            hotel_id=hotel_id,
+            address=address,
+            city=city,
+            state=state,
+            country=country,
+        )
