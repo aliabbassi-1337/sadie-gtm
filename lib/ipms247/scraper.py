@@ -390,7 +390,7 @@ class IPMS247Scraper:
             page, context = await pool.new_page()
             
             # Navigate - need networkidle for AJAX modal to work
-            await page.goto(url, wait_until="networkidle", timeout=15000)
+            await page.goto(url, wait_until="networkidle", timeout=30000)
             
             # Wait for page to be interactive
             try:
