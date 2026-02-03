@@ -713,27 +713,33 @@ WHERE status = 1;
 -- ============================================================================
 
 -- name: get_hotels_pending_location_enrichment
--- Get hotels with coordinates but missing city
-SELECT
-    id,
-    name,
-    address,
-    city,
-    state,
-    country,
-    ST_Y(location::geometry) AS latitude,
-    ST_X(location::geometry) AS longitude
-FROM sadie_gtm.hotels
-WHERE location IS NOT NULL
-  AND (city IS NULL OR city = '')
+-- Get USA leads with coordinates but missing state (for reverse geocoding)
+SELECT DISTINCT
+    h.id,
+    h.name,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    ST_Y(h.location::geometry) AS latitude,
+    ST_X(h.location::geometry) AS longitude
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.location IS NOT NULL
+  AND h.status != -1
+  AND h.country = 'United States'
+  AND (h.state IS NULL OR h.state = '')
 LIMIT :limit;
 
 -- name: get_pending_location_enrichment_count^
--- Count hotels needing location enrichment
-SELECT COUNT(*) AS count
-FROM sadie_gtm.hotels
-WHERE location IS NOT NULL
-  AND (city IS NULL OR city = '');
+-- Count USA leads needing location enrichment (have coords, missing state)
+SELECT COUNT(DISTINCT h.id) AS count
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+WHERE h.location IS NOT NULL
+  AND h.status != -1
+  AND h.country = 'United States'
+  AND (h.state IS NULL OR h.state = '');
 
 -- name: update_hotel_location!
 -- Update hotel location fields from reverse geocoding

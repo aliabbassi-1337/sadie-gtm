@@ -1641,6 +1641,8 @@ class Service(IService):
                         "country": data.country,
                         "phone": data.phone,
                         "email": data.email,
+                        "zip_code": data.zip_code,
+                        "contact_name": data.contact_name,
                     })
                     logger.info(f"  Hotel {hotel_id}: {data.name[:25] if data.name else ''}, {data.city}")
                 elif error:
@@ -1713,6 +1715,8 @@ class Service(IService):
                             "email": data.email,
                             "lat": data.latitude,
                             "lon": data.longitude,
+                            "zip_code": data.zip_code,
+                            "contact_name": data.contact_name,
                         })
                         loc = f" @ ({data.latitude:.4f}, {data.longitude:.4f})" if data.has_location() else ""
                         logger.debug(f"Hotel {hotel_id}: {data.name[:30] if data.name else ''} | {data.city}, {data.country}{loc}")
@@ -1872,6 +1876,8 @@ class Service(IService):
                         "email": data.email,
                         "lat": data.latitude,
                         "lon": data.longitude,
+                        "zip_code": data.zip_code,
+                        "contact_name": data.contact_name,
                     })
                     hotels_enriched += 1
                     loc = f" @ ({data.latitude:.2f}, {data.longitude:.2f})" if data.has_location() else ""
@@ -2004,6 +2010,8 @@ class Service(IService):
                             "country": data.country,
                             "phone": data.phone,
                             "email": data.email,
+                            "zip_code": getattr(data, "zip_code", None),
+                            "contact_name": getattr(data, "contact_name", None),
                         })
                         hotels_enriched += 1
 

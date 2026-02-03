@@ -175,7 +175,6 @@ WHERE id = :hotel_id;
 -- name: get_cloudbeds_hotels_needing_enrichment
 -- Get hotels with Cloudbeds booking URLs that need name, city, or state enrichment
 -- Includes both pending (status=0) and live (status=1) hotels
--- Only includes hotels not attempted in last 7 days (handles rate limits)
 SELECT h.id, h.name, h.city, h.state, h.country, h.address,
        hbe.booking_url, hbe.engine_property_id as slug
 FROM sadie_gtm.hotels h
@@ -184,7 +183,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
+  AND hbe.enrichment_status != -1  -- Exclude permanently dead URLs
   AND h.status >= 0  -- Include pending (0) and live (1), exclude errors (-1)
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
@@ -203,7 +202,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%cloudbeds%'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND (hbe.last_enrichment_attempt IS NULL OR hbe.last_enrichment_attempt < NOW() - INTERVAL '7 days')
+  AND hbe.enrichment_status != -1  -- Exclude permanently dead URLs
   AND h.status >= 0  -- Include pending (0) and live (1), exclude errors (-1)
   AND (
       (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')

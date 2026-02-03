@@ -780,6 +780,8 @@ async def batch_update_cloudbeds_enrichment(
     emails = []
     lats = []
     lons = []
+    zip_codes = []
+    contact_names = []
     
     for u in updates:
         hotel_ids.append(u["hotel_id"])
@@ -792,6 +794,8 @@ async def batch_update_cloudbeds_enrichment(
         emails.append(u.get("email"))
         lats.append(u.get("lat"))
         lons.append(u.get("lon"))
+        zip_codes.append(u.get("zip_code"))
+        contact_names.append(u.get("contact_name"))
     
     # Scraped/API data overrides existing (Cloudbeds page is authoritative)
     sql = """
@@ -816,6 +820,10 @@ async def batch_update_cloudbeds_enrichment(
             THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography
             ELSE h.location 
         END,
+        zip_code = CASE WHEN v.zip_code IS NOT NULL AND v.zip_code != '' 
+                        THEN v.zip_code ELSE h.zip_code END,
+        contact_name = CASE WHEN v.contact_name IS NOT NULL AND v.contact_name != '' 
+                            THEN v.contact_name ELSE h.contact_name END,
         updated_at = CURRENT_TIMESTAMP
     FROM (
         SELECT * FROM unnest(
@@ -828,8 +836,10 @@ async def batch_update_cloudbeds_enrichment(
             $7::text[],
             $8::text[],
             $9::float[],
-            $10::float[]
-        ) AS t(hotel_id, name, address, city, state, country, phone, email, lat, lon)
+            $10::float[],
+            $11::text[],
+            $12::text[]
+        ) AS t(hotel_id, name, address, city, state, country, phone, email, lat, lon, zip_code, contact_name)
     ) v
     WHERE h.id = v.hotel_id
     """
@@ -847,6 +857,8 @@ async def batch_update_cloudbeds_enrichment(
             emails,
             lats,
             lons,
+            zip_codes,
+            contact_names,
         )
         count = int(result.split()[-1]) if result else len(updates)
     
