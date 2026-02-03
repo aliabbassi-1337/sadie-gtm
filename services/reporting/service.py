@@ -467,7 +467,7 @@ class Service(IService):
         headers = [
             "Hotel", "Category", "Address", "City", "State", "Country",
             "Phone", "Email", "Website", "Rating", "Reviews", "Room Count",
-            "Booking URL", "Booking Engine", "Engine Tier"
+            "Booking URL", "Booking Engine"
         ]
 
         # Style definitions
@@ -506,7 +506,6 @@ class Service(IService):
                 lead.room_count or "",
                 lead.booking_url or "",
                 lead.booking_engine_name or "",
-                lead.booking_engine_tier or "",
             ]
             for col, value in enumerate(values, 1):
                 sheet.cell(row=row, column=col, value=value).border = thin_border
