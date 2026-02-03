@@ -15,6 +15,56 @@ from loguru import logger
 API_TIMEOUT = 15.0
 
 
+def clean_phone(phone: Optional[str]) -> Optional[str]:
+    """Clean and normalize phone number.
+    
+    Removes common prefixes like WhatsApp, Tel, Phone, etc.
+    Extracts just the phone number portion.
+    """
+    if not phone:
+        return None
+    
+    phone = phone.strip()
+    if not phone:
+        return None
+    
+    # Remove common prefixes and labels (case insensitive)
+    # Also handles "Whatsapp/Celular:" patterns
+    patterns_to_remove = [
+        r'^whatsapp[/\s:,-]*',
+        r'^whatapp[/\s:,-]*',  # typo variant
+        r'^wa[:\s]+',
+        r'^tel[:\s]+',
+        r'^phone[:\s]+',
+        r'^ph[:\s]+',
+        r'^call[:\s]+',
+        r'^mobile[:\s]+',
+        r'^cell[:\s]+',
+        r'^celular[:\s]+',
+        r'^fax[:\s]+',
+        r'^[\s/]*celular[:\s]*',  # handle "/Celular:" left over
+        r'^\s*-\s*',  # leading dash
+        r'\s*\(text only\)\s*$',  # trailing notes
+        r'\s*-?\s*message only\s*',  # message only notes
+        r'^message only\s*',  # leading message only
+    ]
+    
+    for pattern in patterns_to_remove:
+        phone = re.sub(pattern, '', phone, flags=re.IGNORECASE)
+    
+    phone = phone.strip()
+    
+    # Clean up leading/trailing punctuation
+    phone = re.sub(r'^[/:\s-]+', '', phone)
+    phone = re.sub(r'[/:\s-]+$', '', phone)
+    
+    # If nothing left or just punctuation, return None
+    if not phone or not re.search(r'\d', phone):
+        return None
+    
+    return phone
+
+
 class CloudbedsPropertyData(BaseModel):
     """Data extracted from Cloudbeds property_info API."""
     property_code: str
@@ -274,7 +324,7 @@ class CloudbedsApiClient:
                     zip_code=hotel_address.get("zip") or None,
                     latitude=lat,
                     longitude=lng,
-                    phone=data.get("hotel_phone"),
+                    phone=clean_phone(data.get("hotel_phone")),
                     email=data.get("hotel_email"),
                     contact_name=contact_name or None,
                     formatted_address=data.get("formatted_address"),
