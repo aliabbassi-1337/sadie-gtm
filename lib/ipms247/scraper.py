@@ -308,24 +308,26 @@ class IPMS247Scraper:
             kwargs["verify"] = False
         return kwargs
     
-    async def extract(self, slug_or_url: str, _retry_with_proxy: bool = False) -> Optional[ExtractedIPMS247Data]:
+    async def extract(self, slug_or_url: str, _retry_count: int = 0) -> Optional[ExtractedIPMS247Data]:
         """Extract hotel data from IPMS247 booking page.
         
         Uses two requests:
         1. Main booking page to get session + hotel ID
         2. POST to rminfo-{slug} to get full hotel details (phone, email, address)
         
-        On rate limit (403/429), retries with Brightdata residential proxy.
+        On rate limit (403/429), retries up to 3 times with Brightdata residential proxy (new IP each time).
         
         Args:
             slug_or_url: Either a slug (e.g., "safarihotelboardwalk"), numeric ID (e.g., "126545"),
                          or full URL (e.g., "https://live.ipms247.com/booking/book-rooms-safarihotelboardwalk")
-            _retry_with_proxy: Internal flag - if True, using residential proxy for retry
+            _retry_count: Internal counter for retries (0 = first attempt without proxy)
             
         Returns:
             ExtractedIPMS247Data if successful, None if page not found
         """
         import uuid
+        
+        MAX_RETRIES = 3
         
         # Handle full URLs - extract slug
         if slug_or_url.startswith("http"):
@@ -345,10 +347,12 @@ class IPMS247Scraper:
         if not booking_url.startswith("https://"):
             booking_url = booking_url.replace("http://", "https://")
         
-        # Setup client - use residential proxy on retry
+        # Setup client - use residential proxy on retries (new IP each time)
         client_kwargs = {"timeout": self.timeout, "follow_redirects": True}
-        if _retry_with_proxy:
-            proxy_url = _get_brightdata_proxy(use_residential=True, session_id=str(uuid.uuid4())[:8])
+        if _retry_count > 0:
+            # Generate unique session ID for new IP
+            session_id = f"{slug[:8]}_{uuid.uuid4().hex[:8]}"
+            proxy_url = _get_brightdata_proxy(use_residential=True, session_id=session_id)
             if proxy_url:
                 client_kwargs["proxy"] = proxy_url
                 client_kwargs["verify"] = False
@@ -362,10 +366,10 @@ class IPMS247Scraper:
                 # Step 1: Get main page to extract hotel ID and establish session
                 main_resp = await client.get(booking_url, headers=headers)
                 
-                # Rate limited - retry with proxy
-                if main_resp.status_code in (403, 429) and not _retry_with_proxy:
-                    logger.debug(f"Rate limited on {slug}, retrying with Brightdata proxy")
-                    return await self.extract(slug_or_url, _retry_with_proxy=True)
+                # Rate limited - retry with new IP
+                if main_resp.status_code in (403, 429) and _retry_count < MAX_RETRIES:
+                    logger.debug(f"Rate limited on {slug} (attempt {_retry_count + 1}), retrying with new Brightdata IP")
+                    return await self.extract(slug_or_url, _retry_count=_retry_count + 1)
                 
                 if main_resp.status_code != 200:
                     logger.debug(f"IPMS247 page not found: {slug} (status {main_resp.status_code})")
