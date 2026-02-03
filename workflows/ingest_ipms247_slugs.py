@@ -169,6 +169,8 @@ async def main():
     parser.add_argument("--input", type=str, help="Local file with slugs (one per line)")
     parser.add_argument("--concurrency", type=int, default=5, help="Concurrent scrapes (default: 5 for Playwright)")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of slugs (0 = all)")
+    parser.add_argument("--chunk", type=int, default=0, help="Chunk index (0-based) for parallel processing")
+    parser.add_argument("--total-chunks", type=int, default=1, help="Total number of chunks for parallel processing")
     parser.add_argument("--dry-run", action="store_true", help="Don't save to database")
     parser.add_argument("--http-only", action="store_true", help="Use HTTP-only scraping (faster but less data)")
     args = parser.parse_args()
@@ -194,6 +196,18 @@ async def main():
         existing = await get_existing_slugs()
         new_slugs = [s for s in slugs if s.lower() not in existing]
         logger.info(f"After filtering existing: {len(new_slugs)} new slugs ({len(existing)} already in DB)")
+        
+        # Apply chunking for parallel processing
+        if args.total_chunks > 1:
+            chunk_size = len(new_slugs) // args.total_chunks
+            start_idx = args.chunk * chunk_size
+            # Last chunk gets any remainder
+            if args.chunk == args.total_chunks - 1:
+                end_idx = len(new_slugs)
+            else:
+                end_idx = start_idx + chunk_size
+            new_slugs = new_slugs[start_idx:end_idx]
+            logger.info(f"Chunk {args.chunk + 1}/{args.total_chunks}: processing {len(new_slugs)} slugs (indices {start_idx}-{end_idx})")
         
         if args.limit > 0:
             new_slugs = new_slugs[:args.limit]

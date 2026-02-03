@@ -70,19 +70,26 @@ def _get_brightdata_proxy() -> Optional[str]:
     return None
 
 
-def _get_brightdata_proxy_for_playwright() -> Optional[dict]:
-    """Get Brightdata datacenter proxy config for Playwright.
+def _get_brightdata_proxy_for_playwright(session_id: Optional[str] = None) -> Optional[dict]:
+    """Get Brightdata residential proxy config for Playwright.
+    
+    Args:
+        session_id: Unique session ID to get a dedicated IP. Each session_id gets a different IP.
     
     Returns dict with server, username, password keys.
+    Uses residential proxy - required for IPMS247 (datacenter blocked by Brightdata policy).
     """
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
-    dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
-    dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
-    if customer_id and dc_zone and dc_password:
+    res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
+    res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
+    if customer_id and res_zone and res_password:
+        username = f"brd-customer-{customer_id}-zone-{res_zone}"
+        if session_id:
+            username += f"-session-{session_id}"
         return {
-            "server": "http://brd.superproxy.io:33335",
-            "username": f"brd-customer-{customer_id}-zone-{dc_zone}",
-            "password": dc_password,
+            "server": "http://brd.superproxy.io:22225",
+            "username": username,
+            "password": res_password,
         }
     return None
 
@@ -90,14 +97,15 @@ def _get_brightdata_proxy_for_playwright() -> Optional[dict]:
 class PlaywrightPool:
     """Singleton browser pool for reusing Playwright browser across requests.
     
-    Each page gets its own context to avoid conflicts with concurrent requests.
-    Uses Brightdata datacenter proxy for all connections.
+    Each page gets its own context with a unique session ID = unique IP from Brightdata.
+    This allows concurrent requests without overwhelming a single IP.
     """
     
     _instance = None
     _playwright = None
     _browser = None
-    _proxy_config = None  # Dict with server, username, password for Playwright
+    _has_proxy = False
+    _session_counter = 0
     _init_lock = None
     
     @classmethod
@@ -114,10 +122,13 @@ class PlaywrightPool:
     
     async def _init(self):
         from playwright.async_api import async_playwright
+        import uuid
         self._playwright = await async_playwright().start()
+        self._session_counter = 0
         
-        # Get Brightdata proxy config for Playwright
-        PlaywrightPool._proxy_config = _get_brightdata_proxy_for_playwright()
+        # Check if proxy is configured
+        test_config = _get_brightdata_proxy_for_playwright()
+        self._has_proxy = test_config is not None
         
         self._browser = await self._playwright.chromium.launch(
             headless=True,
@@ -128,20 +139,34 @@ class PlaywrightPool:
                 '--disable-extensions',
             ]
         )
-        if PlaywrightPool._proxy_config:
-            logger.info(f"Playwright browser pool initialized with Brightdata DC proxy")
+        if self._has_proxy:
+            logger.info(f"Playwright browser pool initialized with Brightdata residential proxy (unique IP per session)")
         else:
             logger.warning("Playwright browser pool initialized WITHOUT proxy - BRIGHTDATA env vars not set!")
     
-    async def new_page(self):
-        """Get a new page with its own context (safe for concurrent use)."""
-        # Use Brightdata proxy if available
+    async def new_page(self, session_id: Optional[str] = None):
+        """Get a new page with its own context and unique IP.
+        
+        Args:
+            session_id: Optional session ID. If not provided, generates a unique one.
+                       Each unique session_id gets a different IP from Brightdata.
+        """
+        import uuid
+        
+        # Generate unique session ID if not provided
+        if session_id is None:
+            self._session_counter += 1
+            session_id = f"s{self._session_counter}_{uuid.uuid4().hex[:8]}"
+        
         context_opts = {
             'viewport': {'width': 1280, 'height': 720},
             'java_script_enabled': True,
         }
-        if PlaywrightPool._proxy_config:
-            context_opts['proxy'] = PlaywrightPool._proxy_config
+        
+        if self._has_proxy:
+            # Get proxy config with unique session ID = unique IP
+            proxy_config = _get_brightdata_proxy_for_playwright(session_id)
+            context_opts['proxy'] = proxy_config
             context_opts['ignore_https_errors'] = True
         
         context = await self._browser.new_context(**context_opts)
@@ -412,17 +437,32 @@ class IPMS247Scraper:
         
         Uses shared browser pool for efficiency - each page gets its own context.
         """
+        import time
         url = f"https://live.ipms247.com/booking/book-rooms-{slug}"
         page = None
         context = None
+        t0 = time.time()
         
         try:
-            # Get page from shared browser pool (each page has its own context)
             pool = await PlaywrightPool.get_instance()
-            page, context = await pool.new_page()
+            t1 = time.time()
             
-            # Navigate - need networkidle for AJAX modal to work
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            # Retry with new IP (new context) on tunnel failures
+            for attempt in range(3):
+                try:
+                    page, context = await pool.new_page()
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    break
+                except Exception as e:
+                    if context:
+                        await context.close()
+                        context = None
+                    if "ERR_TUNNEL_CONNECTION_FAILED" in str(e) and attempt < 2:
+                        logger.debug(f"{slug}: new IP retry {attempt + 1}")
+                        continue
+                    raise
+            t2 = time.time()
+            logger.debug(f"{slug}: page_setup={t1-t0:.2f}s, goto={t2-t1:.2f}s")
             
             # Wait for page to be interactive
             try:
@@ -454,10 +494,14 @@ class IPMS247Scraper:
                 except:
                     await page.wait_for_timeout(1000)  # Fallback
             
+            t3 = time.time()
+            
             # Get page content
             html = await page.content()
             
             result = self._parse_full_html(html, slug, url)
+            t4 = time.time()
+            logger.debug(f"{slug}: modal={t3-t2:.2f}s, parse={t4-t3:.2f}s, total={t4-t0:.2f}s")
             if result and result.email:
                 logger.info(f"Playwright success for {slug}: got email {result.email}")
             return result
