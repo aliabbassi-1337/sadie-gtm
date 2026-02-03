@@ -608,10 +608,14 @@ WHERE state = :state
 --    1 = Launched (fully enriched)
 --
 -- Launch criteria (ALL required):
+--   - status = 0 (pending)
 --   - name (not null, not empty, not 'Unknown')
 --   - email OR phone (at least one)
 --   - state, country (city optional)
 --   - booking engine detected (hbe.status = 1)
+-- NOT required (optional, displayed if available):
+--   - room_count
+--   - customer proximity
 
 -- name: get_launchable_hotels
 -- Get hotels ready to be launched (fully enriched)

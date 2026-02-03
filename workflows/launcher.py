@@ -1,4 +1,4 @@
-"""Launcher workflow - Launch hotels that have completed all enrichment.
+"""Launcher workflow - Launch hotels that have completed enrichment.
 
 USAGE:
 
@@ -15,8 +15,12 @@ LAUNCH CRITERIA (all required):
 - status = 0 (pending)
 - name (not null, not empty, not 'Unknown')
 - email OR phone (at least one contact method)
-- city, state, country (location required)
+- state + country (location required, city optional)
 - booking engine detected (hbe.status = 1)
+
+NOT REQUIRED (optional enrichment):
+- room_count (displayed if available)
+- customer proximity (displayed if available)
 
 Launching sets the hotel status to 1 (live).
 Uses FOR UPDATE SKIP LOCKED for multi-worker safety.
