@@ -5,8 +5,11 @@ RMS Enrichment Enqueuer
 Enqueues RMS hotels that need enrichment to SQS.
 
 Usage:
-    python workflows/enrich_rms_enqueue.py
+    # Normal mode (only hotels missing data)
     python workflows/enrich_rms_enqueue.py --limit 1000
+    
+    # Force mode (ALL hotels, for re-enrichment)
+    python workflows/enrich_rms_enqueue.py --limit 1000 --force
 """
 
 import sys
@@ -27,6 +30,7 @@ def main():
     parser = argparse.ArgumentParser(description="Enqueue RMS hotels for enrichment")
     parser.add_argument("--limit", type=int, default=5000, help="Max hotels to enqueue")
     parser.add_argument("--batch-size", type=int, default=10, help="Hotels per SQS message")
+    parser.add_argument("--force", action="store_true", help="Enqueue ALL hotels (for re-enrichment)")
     args = parser.parse_args()
     
     asyncio.run(run(args))
@@ -36,10 +40,14 @@ async def run(args):
     await init_db()
     service = Service()
     
+    mode = "ALL hotels (force)" if args.force else "hotels needing enrichment"
+    logger.info(f"Enqueueing {mode}")
+    
     try:
         result = await service.enqueue_rms_for_enrichment(
             limit=args.limit,
             batch_size=args.batch_size,
+            force=args.force,
         )
         
         if result.skipped:

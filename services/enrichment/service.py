@@ -525,17 +525,17 @@ class IService(ABC):
 
     # RMS Enrichment
     @abstractmethod
-    async def enrich_rms_hotels(self, hotels: List[RMSHotelRecord], concurrency: int = 6) -> EnrichResult:
+    async def enrich_rms_hotels(self, hotels: List[RMSHotelRecord], concurrency: int = 6, force_overwrite: bool = False) -> EnrichResult:
         """Enrich RMS hotels by scraping their booking pages."""
         pass
 
     @abstractmethod
-    async def enqueue_rms_for_enrichment(self, limit: int = 5000, batch_size: int = 10) -> EnqueueResult:
+    async def enqueue_rms_for_enrichment(self, limit: int = 5000, batch_size: int = 10, force: bool = False) -> EnqueueResult:
         """Find and enqueue RMS hotels needing enrichment."""
         pass
 
     @abstractmethod
-    async def consume_rms_enrichment_queue(self, concurrency: int = 6, max_messages: int = 0, should_stop: Optional[Callable[[], bool]] = None) -> ConsumeResult:
+    async def consume_rms_enrichment_queue(self, concurrency: int = 6, max_messages: int = 0, should_stop: Optional[Callable[[], bool]] = None, force_overwrite: bool = False) -> ConsumeResult:
         """Consume and process RMS enrichment queue."""
         pass
 
@@ -1406,7 +1406,7 @@ class Service(IService):
     # RMS Enrichment
     # =========================================================================
 
-    async def enrich_rms_hotels(self, hotels: List[RMSHotelRecord], concurrency: int = 6) -> EnrichResult:
+    async def enrich_rms_hotels(self, hotels: List[RMSHotelRecord], concurrency: int = 6, force_overwrite: bool = False) -> EnrichResult:
         """Enrich RMS hotels using fast API with adaptive Brightdata fallback.
         
         Strategy:
@@ -1414,6 +1414,11 @@ class Service(IService):
         2. Auto-switch to Brightdata after 3 consecutive failures
         3. Switch back to direct after success
         4. Fall back to Playwright only if API completely fails
+        
+        Args:
+            hotels: List of hotels to enrich
+            concurrency: Max concurrent requests
+            force_overwrite: If True, overwrite existing data. If False, only fill empty fields.
         
         Uses batch UPDATE at the end for efficiency.
         """
@@ -1509,18 +1514,24 @@ class Service(IService):
         
         # Batch update all results
         if batch_updates or failed_urls:
-            updated = await self._rms_repo.batch_update_enrichment(batch_updates, failed_urls)
+            updated = await self._rms_repo.batch_update_enrichment(batch_updates, failed_urls, force_overwrite=force_overwrite)
             logger.info(f"Batch update: {updated} hotels updated, {len(failed_urls)} marked failed")
         
         return EnrichResult(processed=processed, enriched=enriched, failed=failed)
 
-    async def enqueue_rms_for_enrichment(self, limit: int = 5000, batch_size: int = 10) -> EnqueueResult:
-        """Find and enqueue RMS hotels needing enrichment."""
+    async def enqueue_rms_for_enrichment(self, limit: int = 5000, batch_size: int = 10, force: bool = False) -> EnqueueResult:
+        """Find and enqueue RMS hotels needing enrichment.
+        
+        Args:
+            limit: Max hotels to enqueue
+            batch_size: Hotels per SQS message
+            force: If True, enqueue ALL hotels regardless of current data state
+        """
         stats = self._rms_queue.get_stats()
         logger.info(f"Queue: {stats.pending} pending, {stats.in_flight} in flight")
         if stats.pending > MAX_QUEUE_DEPTH:
             return EnqueueResult(total_found=0, enqueued=0, skipped=True, reason=f"Queue depth exceeds {MAX_QUEUE_DEPTH}")
-        hotels = await self._rms_repo.get_hotels_needing_enrichment(limit)
+        hotels = await self._rms_repo.get_hotels_needing_enrichment(limit, force=force)
         logger.info(f"Found {len(hotels)} hotels needing enrichment")
         if not hotels:
             return EnqueueResult(total_found=0, enqueued=0, skipped=False)
@@ -1528,11 +1539,18 @@ class Service(IService):
         logger.success(f"Enqueued {enqueued} hotels")
         return EnqueueResult(total_found=len(hotels), enqueued=enqueued, skipped=False)
 
-    async def consume_rms_enrichment_queue(self, concurrency: int = 6, max_messages: int = 0, should_stop: Optional[Callable[[], bool]] = None) -> ConsumeResult:
-        """Consume and process RMS enrichment queue."""
+    async def consume_rms_enrichment_queue(self, concurrency: int = 6, max_messages: int = 0, should_stop: Optional[Callable[[], bool]] = None, force_overwrite: bool = False) -> ConsumeResult:
+        """Consume and process RMS enrichment queue.
+        
+        Args:
+            concurrency: Max concurrent requests
+            max_messages: Max messages to process (0=infinite)
+            should_stop: Callback to check if we should stop
+            force_overwrite: If True, overwrite existing data. If False, only fill empty fields.
+        """
         messages_processed = hotels_processed = hotels_enriched = hotels_failed = 0
         should_stop = should_stop or (lambda: self._shutdown_requested)
-        logger.info(f"Starting consumer (concurrency={concurrency})")
+        logger.info(f"Starting consumer (concurrency={concurrency}, force_overwrite={force_overwrite})")
         while not should_stop():
             if max_messages > 0 and messages_processed >= max_messages:
                 break
@@ -1554,7 +1572,7 @@ class Service(IService):
                     self._rms_queue.delete_message(msg.receipt_handle)
                     continue
                 try:
-                    result = await self.enrich_rms_hotels(msg.hotels, concurrency)
+                    result = await self.enrich_rms_hotels(msg.hotels, concurrency, force_overwrite=force_overwrite)
                     hotels_processed += result.processed
                     hotels_enriched += result.enriched
                     hotels_failed += result.failed

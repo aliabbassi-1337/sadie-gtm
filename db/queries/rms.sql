@@ -39,6 +39,20 @@ WHERE hbe.booking_engine_id = :booking_engine_id
 ORDER BY hbe.last_enrichment_attempt ASC NULLS FIRST
 LIMIT :limit;
 
+-- name: get_rms_hotels_all
+-- Get ALL RMS hotels for force re-enrichment (ignores current data state)
+SELECT 
+    h.id AS hotel_id,
+    hbe.booking_url
+FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
+WHERE hbe.booking_engine_id = :booking_engine_id
+  AND h.status >= 0
+  AND hbe.booking_url IS NOT NULL
+  AND hbe.booking_url != ''
+ORDER BY hbe.last_enrichment_attempt ASC NULLS FIRST
+LIMIT :limit;
+
 -- name: insert_rms_hotel<!
 -- Insert a new RMS hotel and return the ID
 -- Uses external_id for upsert (RMS slug as external_id)

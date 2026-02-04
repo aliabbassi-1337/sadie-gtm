@@ -23,13 +23,23 @@ class RMSRepo:
                     raise ValueError("RMS Cloud booking engine not found")
         return self._booking_engine_id
     
-    async def get_hotels_needing_enrichment(self, limit: int = 1000) -> List[RMSHotelRecord]:
-        """Get RMS hotels that need enrichment."""
+    async def get_hotels_needing_enrichment(self, limit: int = 1000, force: bool = False) -> List[RMSHotelRecord]:
+        """Get RMS hotels that need enrichment.
+        
+        Args:
+            limit: Max hotels to return
+            force: If True, return ALL hotels regardless of current data state
+        """
         booking_engine_id = await self.get_booking_engine_id()
         async with get_conn() as conn:
-            results = await queries.get_rms_hotels_needing_enrichment(
-                conn, booking_engine_id=booking_engine_id, limit=limit
-            )
+            if force:
+                results = await queries.get_rms_hotels_all(
+                    conn, booking_engine_id=booking_engine_id, limit=limit
+                )
+            else:
+                results = await queries.get_rms_hotels_needing_enrichment(
+                    conn, booking_engine_id=booking_engine_id, limit=limit
+                )
             return [
                 RMSHotelRecord(hotel_id=r["hotel_id"], booking_url=r["booking_url"])
                 for r in results
@@ -82,12 +92,14 @@ class RMSRepo:
         self,
         updates: List[Dict],
         failed_urls: List[str],
+        force_overwrite: bool = False,
     ) -> int:
         """Batch update RMS hotels and enrichment status in a single query.
         
         Args:
             updates: List of dicts with hotel_id, booking_url, name, address, etc.
             failed_urls: List of booking_urls that failed enrichment
+            force_overwrite: If True, overwrite existing data. If False, only fill empty fields.
             
         Returns:
             Number of hotels updated
@@ -111,30 +123,58 @@ class RMSRepo:
                 latitudes = [u.get("latitude") for u in updates]
                 longitudes = [u.get("longitude") for u in updates]
                 
-                sql_hotels = """
-                UPDATE sadie_gtm.hotels h
-                SET
-                    name = CASE WHEN v.name IS NOT NULL AND v.name != '' THEN v.name ELSE h.name END,
-                    address = CASE WHEN v.address IS NOT NULL AND v.address != '' THEN v.address ELSE h.address END,
-                    city = CASE WHEN v.city IS NOT NULL AND v.city != '' THEN v.city ELSE h.city END,
-                    state = CASE WHEN v.state IS NOT NULL AND v.state != '' THEN v.state ELSE h.state END,
-                    country = CASE WHEN v.country IS NOT NULL AND v.country != '' THEN v.country ELSE h.country END,
-                    phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' THEN v.phone ELSE h.phone_website END,
-                    email = CASE WHEN v.email IS NOT NULL AND v.email != '' THEN v.email ELSE h.email END,
-                    website = CASE WHEN v.website IS NOT NULL AND v.website != '' THEN v.website ELSE h.website END,
-                    location = CASE 
-                        WHEN v.latitude IS NOT NULL AND v.longitude IS NOT NULL 
-                        THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
-                        ELSE h.location 
-                    END,
-                    status = 1,
-                    updated_at = NOW()
-                FROM (
-                    SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::float[], $11::float[])
-                    AS t(hotel_id, name, address, city, state, country, phone, email, website, latitude, longitude)
-                ) v
-                WHERE h.id = v.hotel_id
-                """
+                if force_overwrite:
+                    # Force overwrite: new data always wins (if not null/empty)
+                    sql_hotels = """
+                    UPDATE sadie_gtm.hotels h
+                    SET
+                        name = CASE WHEN v.name IS NOT NULL AND v.name != '' THEN v.name ELSE h.name END,
+                        address = CASE WHEN v.address IS NOT NULL AND v.address != '' THEN v.address ELSE h.address END,
+                        city = CASE WHEN v.city IS NOT NULL AND v.city != '' THEN v.city ELSE h.city END,
+                        state = CASE WHEN v.state IS NOT NULL AND v.state != '' THEN v.state ELSE h.state END,
+                        country = CASE WHEN v.country IS NOT NULL AND v.country != '' THEN v.country ELSE h.country END,
+                        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' THEN v.phone ELSE h.phone_website END,
+                        email = CASE WHEN v.email IS NOT NULL AND v.email != '' THEN v.email ELSE h.email END,
+                        website = CASE WHEN v.website IS NOT NULL AND v.website != '' THEN v.website ELSE h.website END,
+                        location = CASE 
+                            WHEN v.latitude IS NOT NULL AND v.longitude IS NOT NULL 
+                            THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
+                            ELSE h.location 
+                        END,
+                        status = 1,
+                        updated_at = NOW()
+                    FROM (
+                        SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::float[], $11::float[])
+                        AS t(hotel_id, name, address, city, state, country, phone, email, website, latitude, longitude)
+                    ) v
+                    WHERE h.id = v.hotel_id
+                    """
+                else:
+                    # Normal mode: only fill empty fields
+                    sql_hotels = """
+                    UPDATE sadie_gtm.hotels h
+                    SET
+                        name = CASE WHEN (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%') AND v.name IS NOT NULL AND v.name != '' THEN v.name ELSE h.name END,
+                        address = CASE WHEN (h.address IS NULL OR h.address = '') AND v.address IS NOT NULL AND v.address != '' THEN v.address ELSE h.address END,
+                        city = CASE WHEN (h.city IS NULL OR h.city = '') AND v.city IS NOT NULL AND v.city != '' THEN v.city ELSE h.city END,
+                        state = CASE WHEN (h.state IS NULL OR h.state = '') AND v.state IS NOT NULL AND v.state != '' THEN v.state ELSE h.state END,
+                        country = CASE WHEN (h.country IS NULL OR h.country = '') AND v.country IS NOT NULL AND v.country != '' THEN v.country ELSE h.country END,
+                        phone_website = CASE WHEN (h.phone_website IS NULL OR h.phone_website = '') AND v.phone IS NOT NULL AND v.phone != '' THEN v.phone ELSE h.phone_website END,
+                        email = CASE WHEN (h.email IS NULL OR h.email = '') AND v.email IS NOT NULL AND v.email != '' THEN v.email ELSE h.email END,
+                        website = CASE WHEN (h.website IS NULL OR h.website = '') AND v.website IS NOT NULL AND v.website != '' THEN v.website ELSE h.website END,
+                        location = CASE 
+                            WHEN h.location IS NULL AND v.latitude IS NOT NULL AND v.longitude IS NOT NULL 
+                            THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
+                            ELSE h.location 
+                        END,
+                        status = 1,
+                        updated_at = NOW()
+                    FROM (
+                        SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::float[], $11::float[])
+                        AS t(hotel_id, name, address, city, state, country, phone, email, website, latitude, longitude)
+                    ) v
+                    WHERE h.id = v.hotel_id
+                    """
                 result = await conn.execute(
                     sql_hotels,
                     hotel_ids, names, addresses, cities, states, countries, phones, emails, websites, latitudes, longitudes
