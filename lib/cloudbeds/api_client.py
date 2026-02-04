@@ -346,64 +346,64 @@ class CloudbedsApiClient:
             
             # Extract hotel address
             hotel_address = data.get("hotel_address", {})
-                
-                # Parse lat/lng (they come as strings)
-                lat = None
-                lng = None
-                if hotel_address.get("lat"):
-                    try:
-                        lat = float(hotel_address["lat"])
-                    except (ValueError, TypeError):
-                        pass
-                if hotel_address.get("lng"):
-                    try:
-                        lng = float(hotel_address["lng"])
-                    except (ValueError, TypeError):
-                        pass
-                
-                # Build full address
-                address_parts = []
-                if hotel_address.get("address1"):
-                    address_parts.append(hotel_address["address1"])
-                if hotel_address.get("address2"):
-                    address_parts.append(hotel_address["address2"])
-                full_address = ", ".join(address_parts) if address_parts else None
-                
-                # Normalize country
-                country_code = hotel_address.get("country") or data.get("hotel_address_country")
-                country = normalize_country(country_code) if country_code else None
-                
-                # Build contact name from available fields
-                contact_name = data.get("primary_name")
-                if not contact_name:
-                    first = data.get("contact_first_name", "")
-                    last = data.get("contact_last_name", "")
-                    if first or last:
-                        contact_name = f"{first} {last}".strip()
-                
-                result = CloudbedsPropertyData(
-                    property_code=property_code,
-                    booking_url=f"https://hotels.cloudbeds.com/reservation/{property_code}",
-                    name=data.get("hotel_name"),
-                    address=full_address,
-                    city=hotel_address.get("city"),
-                    state=hotel_address.get("state") or None,  # Empty string -> None
-                    country=country,
-                    zip_code=hotel_address.get("zip") or None,
-                    latitude=lat,
-                    longitude=lng,
-                    phone=clean_phone(data.get("hotel_phone")),
-                    email=data.get("hotel_email"),
-                    contact_name=contact_name or None,
-                    formatted_address=data.get("formatted_address"),
-                )
-                
-                if result.has_data():
-                    loc_str = f" @ ({lat}, {lng})" if lat else ""
-                    logger.debug(f"Cloudbeds API success: {result.name} | {result.city}, {result.country}{loc_str}")
-                    return result
-                
-                return None
+            
+            # Parse lat/lng (they come as strings)
+            lat = None
+            lng = None
+            if hotel_address.get("lat"):
+                try:
+                    lat = float(hotel_address["lat"])
+                except (ValueError, TypeError):
+                    pass
+            if hotel_address.get("lng"):
+                try:
+                    lng = float(hotel_address["lng"])
+                except (ValueError, TypeError):
+                    pass
+            
+            # Build full address
+            address_parts = []
+            if hotel_address.get("address1"):
+                address_parts.append(hotel_address["address1"])
+            if hotel_address.get("address2"):
+                address_parts.append(hotel_address["address2"])
+            full_address = ", ".join(address_parts) if address_parts else None
+            
+            # Normalize country
+            country_code = hotel_address.get("country") or data.get("hotel_address_country")
+            country = normalize_country(country_code) if country_code else None
+            
+            # Build contact name from available fields
+            contact_name = data.get("primary_name")
+            if not contact_name:
+                first = data.get("contact_first_name", "")
+                last = data.get("contact_last_name", "")
+                if first or last:
+                    contact_name = f"{first} {last}".strip()
+            
+            result = CloudbedsPropertyData(
+                property_code=property_code,
+                booking_url=f"https://hotels.cloudbeds.com/reservation/{property_code}",
+                name=data.get("hotel_name"),
+                address=full_address,
+                city=hotel_address.get("city"),
+                state=hotel_address.get("state") or None,  # Empty string -> None
+                country=country,
+                zip_code=hotel_address.get("zip") or None,
+                latitude=lat,
+                longitude=lng,
+                phone=clean_phone(data.get("hotel_phone")),
+                email=data.get("hotel_email"),
+                contact_name=contact_name or None,
+                formatted_address=data.get("formatted_address"),
+            )
+            
+            if result.has_data():
+                loc_str = f" @ ({lat}, {lng})" if lat else ""
+                logger.debug(f"Cloudbeds API success: {result.name} | {result.city}, {result.country}{loc_str}")
+                return result
+            
+            return None
                 
         except httpx.TimeoutException:
             logger.debug(f"Cloudbeds API timeout for {property_code}")
