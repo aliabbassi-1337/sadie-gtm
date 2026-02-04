@@ -205,26 +205,53 @@ class CloudbedsApiClient:
     """Fast Cloudbeds data extraction via property_info API.
     
     Usage:
-        client = CloudbedsApiClient()
-        data = await client.extract("kypwgi")
+        async with CloudbedsApiClient() as client:
+            data = await client.extract("kypwgi")
         
-        # With Brightdata proxy:
-        client = CloudbedsApiClient(use_brightdata=True)
-        data = await client.extract("kypwgi")
+        # With Brightdata proxy for IP rotation:
+        async with CloudbedsApiClient(use_brightdata=True) as client:
+            data = await client.extract("kypwgi")
+    
+    Features:
+        - Connection pooling (reuses httpx.AsyncClient)
+        - Adaptive IP rotation on rate limits (429/403)
+        - Automatic retry with Brightdata proxy on blocks
     """
     
     API_URL = "https://hotels.cloudbeds.com/booking/property_info"
+    
+    # Rate limit tracking
+    _consecutive_failures: int = 0
+    _max_failures_before_proxy: int = 3
     
     def __init__(self, timeout: float = API_TIMEOUT, use_brightdata: bool = False):
         self.timeout = timeout
         self.use_brightdata = use_brightdata
         self._proxy_url: Optional[str] = None
+        self._client: Optional[httpx.AsyncClient] = None
+        self._proxy_client: Optional[httpx.AsyncClient] = None
         if use_brightdata:
             self._proxy_url = _get_brightdata_proxy()
             if self._proxy_url:
                 logger.debug("Cloudbeds API client using Brightdata proxy")
     
-    def _get_client_kwargs(self) -> dict:
+    async def __aenter__(self) -> "CloudbedsApiClient":
+        """Create connection pool on context enter."""
+        self._client = httpx.AsyncClient(**self._get_client_kwargs(use_proxy=False))
+        if self._proxy_url:
+            self._proxy_client = httpx.AsyncClient(**self._get_client_kwargs(use_proxy=True))
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Close connection pool on context exit."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+        if self._proxy_client:
+            await self._proxy_client.aclose()
+            self._proxy_client = None
+    
+    def _get_client_kwargs(self, use_proxy: bool = False) -> dict:
         """Get httpx client configuration."""
         kwargs = {
             "timeout": httpx.Timeout(self.timeout),
@@ -237,13 +264,55 @@ class CloudbedsApiClient:
                 "Referer": "https://hotels.cloudbeds.com/",
             },
             "follow_redirects": True,
+            "limits": httpx.Limits(max_connections=100, max_keepalive_connections=50),
         }
-        if self._proxy_url:
+        if use_proxy and self._proxy_url:
             kwargs["proxy"] = self._proxy_url
         return kwargs
     
+    async def _get_client(self, use_proxy: bool = False) -> httpx.AsyncClient:
+        """Get or create appropriate client."""
+        if use_proxy and self._proxy_client:
+            return self._proxy_client
+        if self._client:
+            return self._client
+        # Fallback: create temporary client (for non-context usage)
+        return httpx.AsyncClient(**self._get_client_kwargs(use_proxy=use_proxy))
+    
+    async def _make_request(self, property_code: str, use_proxy: bool = False) -> Optional[dict]:
+        """Make API request, returns JSON data or None."""
+        client = await self._get_client(use_proxy=use_proxy)
+        response = await client.post(
+            self.API_URL,
+            data={
+                "booking_engine_source": "hosted",
+                "iframe": "false",
+                "lang": "en",
+                "property_code": property_code,
+            },
+        )
+        
+        # Rate limited or blocked - signal to retry with proxy
+        if response.status_code in (429, 403):
+            CloudbedsApiClient._consecutive_failures += 1
+            logger.debug(f"Cloudbeds rate limited ({response.status_code}) for {property_code}, failures={CloudbedsApiClient._consecutive_failures}")
+            return None
+        
+        if response.status_code != 200:
+            logger.debug(f"Cloudbeds API returned {response.status_code} for {property_code}")
+            return None
+        
+        # Reset failure counter on success
+        CloudbedsApiClient._consecutive_failures = 0
+        return response.json()
+    
     async def extract(self, property_code: str) -> Optional[CloudbedsPropertyData]:
         """Extract property data from Cloudbeds property_info API.
+        
+        Features:
+            - First tries direct request
+            - On rate limit (429/403), retries with Brightdata proxy
+            - Automatically switches to proxy after consecutive failures
         
         Args:
             property_code: The property code (e.g., "kypwgi")
@@ -252,32 +321,31 @@ class CloudbedsApiClient:
             CloudbedsPropertyData or None if extraction fails
         """
         try:
-            async with httpx.AsyncClient(**self._get_client_kwargs()) as client:
-                # POST to property_info API
-                response = await client.post(
-                    self.API_URL,
-                    data={
-                        "booking_engine_source": "hosted",
-                        "iframe": "false",
-                        "lang": "en",
-                        "property_code": property_code,
-                    },
-                )
+            # Check if we should use proxy due to consecutive failures
+            use_proxy_first = (
+                self._proxy_url and 
+                CloudbedsApiClient._consecutive_failures >= CloudbedsApiClient._max_failures_before_proxy
+            )
+            
+            # Try request (with proxy if we've been rate limited repeatedly)
+            json_data = await self._make_request(property_code, use_proxy=use_proxy_first)
+            
+            # If failed and proxy available, retry with proxy
+            if json_data is None and self._proxy_url and not use_proxy_first:
+                logger.debug(f"Retrying {property_code} with Brightdata proxy")
+                json_data = await self._make_request(property_code, use_proxy=True)
+            
+            if json_data is None:
+                return None
                 
-                if response.status_code != 200:
-                    logger.debug(f"Cloudbeds API returned {response.status_code} for {property_code}")
-                    return None
-                
-                json_data = response.json()
-                
-                if not json_data.get("success"):
-                    logger.debug(f"Cloudbeds API returned success=false for {property_code}")
-                    return None
-                
-                data = json_data.get("data", {})
-                
-                # Extract hotel address
-                hotel_address = data.get("hotel_address", {})
+            if not json_data.get("success"):
+                logger.debug(f"Cloudbeds API returned success=false for {property_code}")
+                return None
+            
+            data = json_data.get("data", {})
+            
+            # Extract hotel address
+            hotel_address = data.get("hotel_address", {})
                 
                 # Parse lat/lng (they come as strings)
                 lat = None

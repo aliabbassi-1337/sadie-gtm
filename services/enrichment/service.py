@@ -1825,112 +1825,120 @@ class Service(IService):
         BATCH_SIZE = 50
         VISIBILITY_TIMEOUT = 60  # Shorter timeout since API is fast
 
-        client = CloudbedsApiClient(use_brightdata=use_brightdata)
-        semaphore = asyncio.Semaphore(concurrency)
+        # Use context manager for connection pooling
+        async with CloudbedsApiClient(use_brightdata=use_brightdata) as client:
+            semaphore = asyncio.Semaphore(concurrency)
 
-        logger.info(f"Starting Cloudbeds API consumer (concurrency={concurrency}, brightdata={use_brightdata})")
+            logger.info(f"Starting Cloudbeds API consumer (concurrency={concurrency}, brightdata={use_brightdata}, connection_pooling=True)")
 
-        async def process_message(msg: dict) -> tuple:
-            """Process a single SQS message."""
-            async with semaphore:
-                body = msg["body"]
-                hotel_id = body.get("hotel_id")
-                booking_url = body.get("booking_url")
+            async def process_message(msg: dict) -> tuple:
+                """Process a single SQS message."""
+                async with semaphore:
+                    body = msg["body"]
+                    hotel_id = body.get("hotel_id")
+                    booking_url = body.get("booking_url")
 
-                if not hotel_id or not booking_url:
-                    return (msg, None, False, None, "invalid_message")
+                    if not hotel_id or not booking_url:
+                        return (msg, None, False, None, "invalid_message")
 
-                property_code = extract_property_code(booking_url)
-                if not property_code:
-                    return (msg, hotel_id, False, None, "no_property_code")
+                    property_code = extract_property_code(booking_url)
+                    if not property_code:
+                        return (msg, hotel_id, False, None, "no_property_code")
 
+                    try:
+                        data = await client.extract(property_code)
+                        if data and data.has_data():
+                            return (msg, hotel_id, True, data, None)
+                        else:
+                            return (msg, hotel_id, False, None, "no_data")
+                    except Exception as e:
+                        return (msg, hotel_id, False, None, str(e)[:50])
+
+            while not should_stop():
+                # Check queue depth periodically
                 try:
-                    data = await client.extract(property_code)
-                    if data and data.has_data():
-                        return (msg, hotel_id, True, data, None)
+                    attrs = get_queue_attributes(queue_url)
+                    pending = int(attrs.get("ApproximateNumberOfMessages", 0))
+                    in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
+                    if pending == 0 and in_flight == 0:
+                        logger.info("Queue empty, waiting...")
+                        await asyncio.sleep(10)
+                        continue
+                except Exception:
+                    pass
+
+                # Receive multiple batches concurrently to maximize throughput
+                # SQS limits to 10 messages per request, so fetch multiple batches
+                batch_tasks = [
+                    asyncio.to_thread(
+                        receive_messages,
+                        queue_url,
+                        max_messages=10,
+                        visibility_timeout=VISIBILITY_TIMEOUT,
+                        wait_time_seconds=1,
+                    )
+                    for _ in range(5)  # Fetch 5 batches = up to 50 messages
+                ]
+                batch_results_raw = await asyncio.gather(*batch_tasks)
+                messages = [m for batch in batch_results_raw if batch for m in batch]
+
+                if not messages:
+                    continue
+
+                # Process all messages concurrently
+                results = await asyncio.gather(*[process_message(m) for m in messages])
+
+                # Handle results
+                for msg, hotel_id, success, data, error in results:
+                    if hotel_id is None:
+                        # Invalid message - delete it
+                        delete_message(queue_url, msg["receipt_handle"])
+                        continue
+
+                    hotels_processed += 1
+
+                    if success and data:
+                        batch_results.append({
+                            "hotel_id": hotel_id,
+                            "name": data.name,
+                            "address": data.address,
+                            "city": data.city,
+                            "state": data.state,
+                            "country": data.country,
+                            "phone": data.phone,
+                            "email": data.email,
+                            "lat": data.latitude,
+                            "lon": data.longitude,
+                            "zip_code": data.zip_code,
+                            "contact_name": data.contact_name,
+                        })
+                        hotels_enriched += 1
+                        loc = f" @ ({data.latitude:.2f}, {data.longitude:.2f})" if data.has_location() else ""
+                        logger.debug(f"Hotel {hotel_id}: {data.name[:30] if data.name else ''} | {data.city}{loc}")
                     else:
-                        return (msg, hotel_id, False, None, "no_data")
-                except Exception as e:
-                    return (msg, hotel_id, False, None, str(e)[:50])
+                        batch_failed_ids.append(hotel_id)
+                        hotels_failed += 1
+                        logger.debug(f"Hotel {hotel_id}: {error}")
 
-        while not should_stop():
-            # Check queue depth periodically
-            try:
-                attrs = get_queue_attributes(queue_url)
-                pending = int(attrs.get("ApproximateNumberOfMessages", 0))
-                in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
-                if pending == 0 and in_flight == 0:
-                    logger.info("Queue empty, waiting...")
-                    await asyncio.sleep(10)
-                    continue
-            except Exception:
-                pass
-
-            # Receive batch of messages
-            messages = receive_messages(
-                queue_url,
-                max_messages=10,
-                visibility_timeout=VISIBILITY_TIMEOUT,
-                wait_time_seconds=5,
-            )
-
-            if not messages:
-                continue
-
-            # Process all messages concurrently
-            results = await asyncio.gather(*[process_message(m) for m in messages])
-
-            # Handle results
-            for msg, hotel_id, success, data, error in results:
-                if hotel_id is None:
-                    # Invalid message - delete it
+                    # Delete message from queue
                     delete_message(queue_url, msg["receipt_handle"])
-                    continue
+                    messages_processed += 1
 
-                hotels_processed += 1
+                # Batch update to database
+                if len(batch_results) >= BATCH_SIZE:
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                    logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
+                    batch_results = []
 
-                if success and data:
-                    batch_results.append({
-                        "hotel_id": hotel_id,
-                        "name": data.name,
-                        "address": data.address,
-                        "city": data.city,
-                        "state": data.state,
-                        "country": data.country,
-                        "phone": data.phone,
-                        "email": data.email,
-                        "lat": data.latitude,
-                        "lon": data.longitude,
-                        "zip_code": data.zip_code,
-                        "contact_name": data.contact_name,
-                    })
-                    hotels_enriched += 1
-                    loc = f" @ ({data.latitude:.2f}, {data.longitude:.2f})" if data.has_location() else ""
-                    logger.debug(f"Hotel {hotel_id}: {data.name[:30] if data.name else ''} | {data.city}{loc}")
-                else:
-                    batch_failed_ids.append(hotel_id)
-                    hotels_failed += 1
-                    logger.debug(f"Hotel {hotel_id}: {error}")
+                if len(batch_failed_ids) >= BATCH_SIZE:
+                    await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                    batch_failed_ids = []
 
-                # Delete message from queue
-                delete_message(queue_url, msg["receipt_handle"])
-                messages_processed += 1
-
-            # Batch update to database
-            if len(batch_results) >= BATCH_SIZE:
-                updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
-                logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
-                batch_results = []
-
-            if len(batch_failed_ids) >= BATCH_SIZE:
+            # Final batch update
+            if batch_results:
+                await repo.batch_update_cloudbeds_enrichment(batch_results)
+            if batch_failed_ids:
                 await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
-                batch_failed_ids = []
-
-        # Final batch update
-        if batch_results:
-            await repo.batch_update_cloudbeds_enrichment(batch_results)
-        if batch_failed_ids:
-            await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
 
         return ConsumeResult(
             messages_processed=messages_processed,
