@@ -1438,21 +1438,21 @@ class Service(IService):
                     
                     # Parse clientId and server from URL
                     # Format 1: /Search/Index/{id}/90/ (bookings.rmscloud.com)
-                    # Format 2: ibe12.rmscloud.com/{id} (IBE servers)
+                    # Format 2: /rates/index/{id}/90/ (bookings.rmscloud.com)
+                    # Format 3: ibe12.rmscloud.com/{id} (IBE servers)
                     import re
                     slug = None
                     server = "bookings.rmscloud.com"
                     
-                    # Try /Search/Index/ format first
-                    match = re.search(r'/Search/Index/([^/]+)/\d+/?', url)
+                    # Extract server from URL
+                    server_match = re.search(r'(bookings\d*\.rmscloud\.com)', url)
+                    if server_match:
+                        server = server_match.group(1)
+                    
+                    # Try /Search/Index/ or /rates/index/ format
+                    match = re.search(r'/(?:Search|rates)/[Ii]ndex/([^/]+)/\d+/?', url)
                     if match:
                         slug = match.group(1)
-                        if "bookings12" in url:
-                            server = "bookings12.rmscloud.com"
-                        elif "bookings10" in url:
-                            server = "bookings10.rmscloud.com"
-                        elif "bookings8" in url:
-                            server = "bookings8.rmscloud.com"
                     else:
                         # Try IBE format: ibe12.rmscloud.com/{numeric_id}
                         ibe_match = re.search(r'(ibe\d+\.rmscloud\.com)/(\d+)', url)
