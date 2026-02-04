@@ -1,7 +1,13 @@
 """Enqueue Cloudbeds hotels for distributed enrichment via SQS.
 
 Usage:
+    # Normal mode (only hotels needing enrichment)
     uv run python -m workflows.enrich_cloudbeds_enqueue --limit 10000
+    
+    # Force mode (ALL hotels for re-enrichment)
+    uv run python -m workflows.enrich_cloudbeds_enqueue --limit 10000 --force
+    
+    # Dry run
     uv run python -m workflows.enrich_cloudbeds_enqueue --dry-run --limit 100
 """
 
@@ -15,14 +21,35 @@ import argparse
 import os
 from loguru import logger
 
-from db.client import init_db, close_db
+from db.client import init_db, close_db, get_conn
 from services.enrichment import repo
 from infra.sqs import send_messages_batch, get_queue_attributes
 
 QUEUE_URL = os.getenv("SQS_CLOUDBEDS_ENRICHMENT_QUEUE_URL", "")
 
 
-async def run(limit: int = 1000, dry_run: bool = False):
+async def get_all_cloudbeds_hotels(limit: int):
+    """Get ALL Cloudbeds hotels for force re-enrichment."""
+    async with get_conn() as conn:
+        sql = '''
+            SELECT h.id, hbe.booking_url
+            FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+            JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+            WHERE be.name ILIKE '%cloudbeds%'
+              AND hbe.booking_url IS NOT NULL
+              AND hbe.booking_url != ''
+              AND h.status >= 0
+            ORDER BY h.id
+        '''
+        if limit > 0:
+            sql += f' LIMIT {limit}'
+        rows = await conn.fetch(sql)
+        # Return as simple objects with id and booking_url
+        return [{"id": r["id"], "booking_url": r["booking_url"]} for r in rows]
+
+
+async def run(limit: int = 1000, dry_run: bool = False, force: bool = False):
     """Enqueue Cloudbeds hotels for enrichment."""
     if not QUEUE_URL and not dry_run:
         logger.error("SQS_CLOUDBEDS_ENRICHMENT_QUEUE_URL not set in .env")
@@ -37,9 +64,21 @@ async def run(limit: int = 1000, dry_run: bool = False):
             waiting = int(attrs.get("ApproximateNumberOfMessages", 0))
             logger.info(f"Queue status: {waiting} waiting, {in_flight} in-flight")
         
-        # Get hotels needing enrichment
-        # Query excludes hotels with url_status='404' (broken URLs)
-        candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
+        # Get hotels - either all (force) or only those needing enrichment
+        if force:
+            logger.info("Force mode: getting ALL Cloudbeds hotels")
+            rows = await get_all_cloudbeds_hotels(limit)
+            # Convert to objects with id/booking_url attributes
+            class Hotel:
+                def __init__(self, id, booking_url, name=None, city=None):
+                    self.id = id
+                    self.booking_url = booking_url
+                    self.name = name
+                    self.city = city
+            candidates = [Hotel(r["id"], r["booking_url"]) for r in rows]
+        else:
+            # Query excludes hotels with url_status='404' (broken URLs)
+            candidates = await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
         
         if not candidates:
             logger.info("No Cloudbeds hotels need enrichment")
@@ -92,9 +131,10 @@ def main():
     parser = argparse.ArgumentParser(description="Enqueue Cloudbeds hotels for enrichment")
     parser.add_argument("--limit", type=int, default=10000, help="Max hotels to enqueue")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be enqueued")
+    parser.add_argument("--force", action="store_true", help="Enqueue ALL hotels (for re-enrichment)")
     
     args = parser.parse_args()
-    asyncio.run(run(limit=args.limit, dry_run=args.dry_run))
+    asyncio.run(run(limit=args.limit, dry_run=args.dry_run, force=args.force))
 
 
 if __name__ == "__main__":

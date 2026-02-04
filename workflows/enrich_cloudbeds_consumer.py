@@ -3,6 +3,9 @@
 Polls SQS and enriches hotels using the property_info API.
 Run on multiple EC2 instances for parallel processing.
 
+Note: Cloudbeds enrichment ALWAYS overwrites existing data (unlike RMS).
+The --force-overwrite flag is accepted for consistency but has no effect.
+
 Usage:
     uv run python -m workflows.enrich_cloudbeds_consumer
     uv run python -m workflows.enrich_cloudbeds_consumer --concurrency 30
