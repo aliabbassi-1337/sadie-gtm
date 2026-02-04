@@ -1,3 +1,11 @@
+- Each service folder in the services/ dir is a monoservice, so you can't have multiple services in services/{service}. services/enrichment/service.py is where the service class sits.
+- The workflow should use service methods defined in the service interface.
+- Repo functions can only be used by the service.
+- Servies can't communicate with each other - no inter-service communication. Shared code can go to shared library module at /lib
+- The Lib shouldn't have any repo functions or touch the db, just static unstateful logic.
+- SQl queries should go to @db/queries
+
+
 # Coding Guide for Sadie GTM
 
 ## Architecture: 3-Layer Pattern
@@ -10,7 +18,7 @@ Repository Layer (repo.py)     → Data access functions
 SQL Queries (queries/*.sql)    → Raw SQL (aiosql format)
 ```
 
-**3 Services:** leadgen (scraping + detection) | enrichment (room counts + proximity) | reporting (exports + uploads)
+**3 Services:** leadgen (scraping + detection) | enrichment (room counts + proximity) | reporting (exports + uploads) | ingestion 
 
 ### Service Layer Rules
 
@@ -109,7 +117,7 @@ async def test_get_hotels_by_city():
 - Always cleanup with `delete_*()`
 - Run tests: `uv run pytest -v`
 
-### 4. Add to Service (Optional)
+### 4. Add to Service 
 
 **File:** `/services/leadgen/service.py`
 
@@ -121,70 +129,4 @@ class Service(IService):
         """Count hotels waiting for detection (status=0)."""
         hotels = await repo.get_hotels_by_status(status=0)
         return len(hotels)
-```
-
-## Database
-
-**Schema:** 7 tables (hotels, booking_engines, existing_customers, hotel_booking_engines, hotel_room_count, hotel_customer_proximity, jobs)
-
-**PostGIS location handling:**
-
-```sql
--- Insert: ST_Point(longitude, latitude)
-INSERT INTO hotels (name, location)
-VALUES (:name, ST_Point(:longitude, :latitude)::geography)
-
--- Query: ST_X/ST_Y to get coordinates
-SELECT ST_Y(location::geometry) AS latitude,
-       ST_X(location::geometry) AS longitude
-FROM hotels
-
--- Distance in km
-SELECT ST_Distance(h.location, c.location) / 1000 AS distance_km
-FROM hotels h, existing_customers c
-```
-
-## Python Conventions (Python 3.9)
-
-```python
-# ✅ Use Optional (Python 3.9)
-from typing import Optional, List
-def get_hotel() -> Optional[Hotel]:
-    pass
-
-# ❌ Don't use | syntax (Python 3.10+)
-def get_hotel() -> Hotel | None:  # Wrong!
-    pass
-```
-
-**Pydantic models:** Match DB schema exactly, use `Optional[Type]` for nullable fields
-
-```python
-from pydantic import BaseModel, ConfigDict
-
-class Hotel(BaseModel):
-    id: int
-    name: str
-    website: Optional[str] = None
-    status: int = 0
-
-    model_config = ConfigDict(from_attributes=True)
-```
-
-## Common Mistakes
-
-❌ **Positional params in SQL:** `WHERE id = $1` → ✅ `WHERE id = :hotel_id`
-
-❌ **Raw Record to Pydantic:** `Hotel.model_validate(result)` → ✅ `Hotel.model_validate(dict(result))`
-
-❌ **Creating new pools:** Use `get_conn()` context manager, not `asyncpg.create_pool()`
-
-❌ **Forgetting cleanup:** Always `await delete_hotel(hotel_id)` in tests
-
-## Quick Commands
-
-```bash
-uv run pytest           # Run all tests
-uv run pytest -v        # Verbose
-uv run pytest -k "name" # Run specific test
 ```
