@@ -618,7 +618,7 @@ WHERE state = :state
 --   - customer proximity
 
 -- name: get_launchable_hotels
--- Get hotels ready to be launched (fully enriched)
+-- Get hotels ready to be launched (valid name + location, email not required)
 SELECT
     h.id,
     h.name AS hotel_name,
@@ -640,30 +640,53 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status =
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.status = 0
-  -- Name required (not null, not empty, not placeholder)
-  AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
-  -- Email OR phone required
-  AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
-  -- Location required (state + country, city optional)
+  -- Location requirements
   AND h.state IS NOT NULL AND h.state != ''
   AND h.country IS NOT NULL AND h.country != ''
+  -- Valid name requirements (filter out junk/test/system names)
+  AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
+  AND LENGTH(h.name) > 2
+  AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK')
+  AND h.name NOT ILIKE '%test%'
+  AND h.name NOT ILIKE '%demo%'
+  AND h.name NOT ILIKE '%sandbox%'
+  AND h.name NOT ILIKE '%sample%'
+  AND h.name NOT ILIKE 'unknown%'
+  AND h.name NOT ILIKE '%internal%server%error%'
+  AND h.name NOT ILIKE '%check availability%'
+  AND h.name NOT LIKE '% RMS %'
+  AND h.name NOT LIKE 'RMS %'
+  AND h.name NOT LIKE '% RMS'
 LIMIT :limit;
 
 -- name: get_launchable_count^
--- Count hotels ready to be launched (fully enriched)
+-- Count hotels ready to be launched (valid name + location, email not required)
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 WHERE h.status = 0
-  AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
-  AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
+  -- Location requirements
   AND h.state IS NOT NULL AND h.state != ''
-  AND h.country IS NOT NULL AND h.country != '';
+  AND h.country IS NOT NULL AND h.country != ''
+  -- Valid name requirements (filter out junk/test/system names)
+  AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
+  AND LENGTH(h.name) > 2
+  AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK')
+  AND h.name NOT ILIKE '%test%'
+  AND h.name NOT ILIKE '%demo%'
+  AND h.name NOT ILIKE '%sandbox%'
+  AND h.name NOT ILIKE '%sample%'
+  AND h.name NOT ILIKE 'unknown%'
+  AND h.name NOT ILIKE '%internal%server%error%'
+  AND h.name NOT ILIKE '%check availability%'
+  AND h.name NOT LIKE '% RMS %'
+  AND h.name NOT LIKE 'RMS %'
+  AND h.name NOT LIKE '% RMS';
 
 -- name: launch_hotels
 -- Atomically claim and launch hotels (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
--- Only launches fully enriched hotels
+-- Launches hotels with valid names (email not required)
 -- Returns launched hotel IDs for logging/tracking
 WITH claimed AS (
     SELECT h.id
@@ -671,11 +694,25 @@ WITH claimed AS (
     INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     WHERE h.status = 0
       AND h.id = ANY(:hotel_ids)
-      -- Enrichment requirements
-      AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
-      AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
+      -- Location requirements
       AND h.state IS NOT NULL AND h.state != ''
       AND h.country IS NOT NULL AND h.country != ''
+      -- Valid name requirements (filter out junk/test/system names)
+      AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
+      AND LENGTH(h.name) > 2
+      AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Hotel Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK')
+      AND h.name NOT ILIKE '%test%'
+      AND h.name NOT ILIKE '%demo%'
+      AND h.name NOT ILIKE '%sandbox%'
+      AND h.name NOT ILIKE '%sample%'
+      AND h.name NOT ILIKE 'unknown%'
+      AND h.name NOT ILIKE '%internal%server%error%'
+      AND h.name NOT ILIKE '%check availability%'
+      AND h.name NOT ILIKE '%booking engine%'
+      AND h.name NOT LIKE '% RMS %'
+      AND h.name NOT LIKE 'RMS %'
+      AND h.name NOT LIKE '% RMS'
+      AND h.name !~ '^[0-9-]+$'
     FOR UPDATE OF h SKIP LOCKED
 )
 UPDATE sadie_gtm.hotels
@@ -686,18 +723,32 @@ RETURNING id;
 -- name: launch_ready_hotels
 -- Atomically claim and launch up to :limit ready hotels (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
--- Only launches fully enriched hotels
+-- Launches hotels with valid names (email no longer required)
 -- Returns launched hotel IDs for logging/tracking
 WITH claimed AS (
     SELECT h.id
     FROM sadie_gtm.hotels h
     INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     WHERE h.status = 0
-      -- Enrichment requirements
-      AND h.name IS NOT NULL AND h.name != '' AND h.name NOT LIKE 'Unknown%'
-      AND ((h.email IS NOT NULL AND h.email != '') OR (h.phone_website IS NOT NULL AND h.phone_website != ''))
+      -- Location requirements
       AND h.state IS NOT NULL AND h.state != ''
       AND h.country IS NOT NULL AND h.country != ''
+      -- Valid name requirements (filter out junk/test/system names)
+      AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
+      AND LENGTH(h.name) > 2
+      AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Hotel Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK')
+      AND h.name NOT ILIKE '%test%'
+      AND h.name NOT ILIKE '%demo%'
+      AND h.name NOT ILIKE '%sandbox%'
+      AND h.name NOT ILIKE '%sample%'
+      AND h.name NOT ILIKE 'unknown%'
+      AND h.name NOT ILIKE '%internal%server%error%'
+      AND h.name NOT ILIKE '%check availability%'
+      AND h.name NOT ILIKE '%booking engine%'
+      AND h.name NOT LIKE '% RMS %'
+      AND h.name NOT LIKE 'RMS %'
+      AND h.name NOT LIKE '% RMS'
+      AND h.name !~ '^[0-9-]+$'
     FOR UPDATE OF h SKIP LOCKED
     LIMIT :limit
 )
@@ -1310,3 +1361,29 @@ FROM sadie_gtm.hotels
 WHERE country IN ('USA', 'US', 'AU', 'UK', 'GB', 'NZ', 'DE', 'FR', 'ES', 'IT', 'MX', 'JP', 'CN', 'BR', 'IN', 'AR', 'CL', 'CO', 'PE', 'ZA', 'EG', 'MA', 'KE', 'TH', 'VN', 'ID', 'MY', 'SG', 'PH', 'KR', 'TW', 'HK', 'AE', 'IL', 'TR', 'GR', 'PT', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'PL', 'CZ', 'HU', 'RO', 'IE', 'PR')
 GROUP BY country 
 ORDER BY cnt DESC;
+
+-- ============================================================================
+-- STATE EXTRACTION QUERIES
+-- ============================================================================
+
+-- name: get_us_hotels_missing_state
+-- Get US hotels that have address but no state (for state extraction from address)
+SELECT id, name, address, city, country
+FROM sadie_gtm.hotels
+WHERE (state IS NULL OR state = '')
+  AND address IS NOT NULL
+  AND address != ''
+  AND (country = 'United States' OR country = 'USA' OR country = 'US' OR country IS NULL)
+ORDER BY id
+LIMIT :limit;
+
+-- name: batch_update_extracted_states!
+-- Batch update hotels with extracted state data
+UPDATE sadie_gtm.hotels h
+SET state = v.state,
+    country = CASE WHEN h.country IS NULL THEN 'United States' ELSE h.country END,
+    updated_at = NOW()
+FROM (
+    SELECT * FROM unnest(:hotel_ids::int[], :states::text[]) AS t(hotel_id, state)
+) v
+WHERE h.id = v.hotel_id;

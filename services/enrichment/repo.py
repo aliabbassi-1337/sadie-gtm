@@ -788,6 +788,7 @@ async def batch_update_cloudbeds_enrichment(
         names.append(u.get("name"))
         addresses.append(u.get("address"))
         cities.append(u.get("city"))
+        # State normalization is done in Service layer before calling repo
         states.append(u.get("state"))
         countries.append(u.get("country"))
         phones.append(u.get("phone"))
@@ -1079,3 +1080,46 @@ async def update_hotel_location_fields(
             state=state,
             country=country,
         )
+
+
+# ============================================================================
+# STATE EXTRACTION FUNCTIONS
+# ============================================================================
+
+
+class HotelForStateExtraction(BaseModel):
+    """Hotel record for state extraction from address."""
+    id: int
+    name: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+
+
+async def get_us_hotels_missing_state(limit: int = 1000) -> List[HotelForStateExtraction]:
+    """Get US hotels that have address but no state."""
+    async with get_conn() as conn:
+        rows = await queries.get_us_hotels_missing_state(conn, limit=limit)
+        return [HotelForStateExtraction.model_validate(dict(r)) for r in rows]
+
+
+async def batch_update_extracted_states(updates: List[Dict[str, Any]]) -> int:
+    """Batch update hotels with extracted state data.
+    
+    Args:
+        updates: List of dicts with 'id' and 'state' keys
+        
+    Returns:
+        Number of hotels updated
+    """
+    if not updates:
+        return 0
+    
+    hotel_ids = [u["id"] for u in updates]
+    states = [u["state"] for u in updates]
+    
+    async with get_conn() as conn:
+        result = await queries.batch_update_extracted_states(
+            conn, hotel_ids=hotel_ids, states=states
+        )
+        return int(result.split()[-1]) if result else 0

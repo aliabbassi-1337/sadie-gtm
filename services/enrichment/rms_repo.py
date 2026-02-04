@@ -115,8 +115,9 @@ class RMSRepo:
                 names = [u.get("name") for u in updates]
                 addresses = [u.get("address") for u in updates]
                 cities = [u.get("city") for u in updates]
-                states = [u.get("state") for u in updates]
                 countries = [u.get("country") for u in updates]
+                # State normalization is done in Service layer before calling repo
+                states = [u.get("state") for u in updates]
                 phones = [u.get("phone") for u in updates]
                 emails = [u.get("email") for u in updates]
                 websites = [u.get("website") for u in updates]

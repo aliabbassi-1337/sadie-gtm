@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
 from services.enrichment import repo
+from services.enrichment import state_utils
 from services.enrichment.room_count_enricher import (
     enrich_hotel_room_count,
     get_groq_api_key,
@@ -592,6 +593,21 @@ class Service(IService):
         """Request graceful shutdown."""
         self._shutdown_requested = True
         logger.info("Shutdown requested")
+
+    def _normalize_states_in_batch(self, updates: List[Dict]) -> List[Dict]:
+        """Normalize state abbreviations to full names in a batch of updates.
+        
+        Modifies the 'state' field in each dict using state_utils.normalize_state.
+        This is called in Service layer before passing to repo for persistence.
+        """
+        for u in updates:
+            raw_state = u.get("state")
+            if raw_state:
+                normalized = state_utils.normalize_state(raw_state, u.get("country"))
+                if normalized != raw_state:
+                    logger.debug(f"State normalized: '{raw_state}' -> '{normalized}'")
+                u["state"] = normalized
+        return updates
 
     async def enrich_room_counts(
         self,
@@ -1519,8 +1535,9 @@ class Service(IService):
                         failed += 1
                         failed_urls.append(hotels[i].booking_url)
         
-        # Batch update all results
+        # Batch update all results (normalize states in Service layer)
         if batch_updates or failed_urls:
+            self._normalize_states_in_batch(batch_updates)
             updated = await self._rms_repo.batch_update_enrichment(batch_updates, failed_urls, force_overwrite=force_overwrite)
             logger.info(f"Batch update: {updated} hotels updated, {len(failed_urls)} marked failed")
         
@@ -1558,19 +1575,22 @@ class Service(IService):
         messages_processed = hotels_processed = hotels_enriched = hotels_failed = 0
         should_stop = should_stop or (lambda: self._shutdown_requested)
         logger.info(f"Starting consumer (concurrency={concurrency}, force_overwrite={force_overwrite})")
+        empty_receives = 0
         while not should_stop():
             if max_messages > 0 and messages_processed >= max_messages:
                 break
-            stats = self._rms_queue.get_stats()
-            if stats.pending == 0 and stats.in_flight == 0:
-                if max_messages > 0:
-                    break
-                logger.info("Queue empty, waiting...")
-                await asyncio.sleep(30)
-                continue
+            # Use long-poll receive instead of checking inaccurate queue stats
+            # (wait_time_seconds=20 is already set in rms_queue.receive_messages)
             messages = self._rms_queue.receive_messages(min(concurrency, 10))
             if not messages:
+                empty_receives += 1
+                if empty_receives >= 3:  # 3 * 20s = 60s of empty receives
+                    if max_messages > 0:
+                        break  # Exit if we have a message limit and queue seems empty
+                    if empty_receives % 3 == 0:
+                        logger.info("Queue empty, waiting for messages...")
                 continue
+            empty_receives = 0
             logger.info(f"Processing {len(messages)} messages")
             for msg in messages:
                 if should_stop():
@@ -1675,6 +1695,7 @@ class Service(IService):
                     logger.warning(f"  Hotel {hotel_id}: {error}")
 
         if results_buffer:
+            self._normalize_states_in_batch(results_buffer)
             total_enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
             logger.info(f"Updated {total_enriched} hotels")
 
@@ -1756,9 +1777,10 @@ class Service(IService):
         # Process all hotels concurrently
         await asyncio.gather(*[process_hotel(h) for h in hotels])
         
-        # Batch update results
+        # Batch update results (normalize states in Service layer)
         enriched = 0
         if results_buffer:
+            self._normalize_states_in_batch(results_buffer)
             enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
             logger.info(f"Updated {enriched} hotels with Cloudbeds API data")
         
@@ -1783,7 +1805,11 @@ class Service(IService):
         return await repo.get_cloudbeds_hotels_needing_enrichment(limit=limit)
 
     async def batch_update_cloudbeds_enrichment(self, results: List[Dict]) -> int:
-        """Batch update Cloudbeds enrichment results."""
+        """Batch update Cloudbeds enrichment results.
+        
+        Normalizes states before persisting to database.
+        """
+        self._normalize_states_in_batch(results)
         return await repo.batch_update_cloudbeds_enrichment(results)
 
     async def batch_mark_cloudbeds_failed(self, hotel_ids: List[int]) -> int:
@@ -1854,28 +1880,18 @@ class Service(IService):
                     except Exception as e:
                         return (msg, hotel_id, False, None, str(e)[:50])
 
+            empty_receives = 0
             while not should_stop():
-                # Check queue depth periodically
-                try:
-                    attrs = get_queue_attributes(queue_url)
-                    pending = int(attrs.get("ApproximateNumberOfMessages", 0))
-                    in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
-                    if pending == 0 and in_flight == 0:
-                        logger.info("Queue empty, waiting...")
-                        await asyncio.sleep(10)
-                        continue
-                except Exception:
-                    pass
-
                 # Receive multiple batches concurrently to maximize throughput
                 # SQS limits to 10 messages per request, so fetch multiple batches
+                # Use longer wait time for long-polling to avoid busy-waiting
                 batch_tasks = [
                     asyncio.to_thread(
                         receive_messages,
                         queue_url,
                         max_messages=10,
                         visibility_timeout=VISIBILITY_TIMEOUT,
-                        wait_time_seconds=1,
+                        wait_time_seconds=10,  # Long poll - SQS will wait up to 10s for messages
                     )
                     for _ in range(5)  # Fetch 5 batches = up to 50 messages
                 ]
@@ -1883,7 +1899,12 @@ class Service(IService):
                 messages = [m for batch in batch_results_raw if batch for m in batch]
 
                 if not messages:
+                    empty_receives += 1
+                    if empty_receives % 6 == 0:  # Log every ~60 seconds (6 * 10s wait)
+                        logger.info("Queue empty, waiting for messages...")
                     continue
+                
+                empty_receives = 0
 
                 # Process all messages concurrently
                 results = await asyncio.gather(*[process_message(m) for m in messages])
@@ -1924,8 +1945,9 @@ class Service(IService):
                     delete_message(queue_url, msg["receipt_handle"])
                     messages_processed += 1
 
-                # Batch update to database
+                # Batch update to database (normalize states in Service layer)
                 if len(batch_results) >= BATCH_SIZE:
+                    self._normalize_states_in_batch(batch_results)
                     updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                     logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
                     batch_results = []
@@ -1934,8 +1956,9 @@ class Service(IService):
                     await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
                     batch_failed_ids = []
 
-            # Final batch update
+            # Final batch update (normalize states in Service layer)
             if batch_results:
+                self._normalize_states_in_batch(batch_results)
                 await repo.batch_update_cloudbeds_enrichment(batch_results)
             if batch_failed_ids:
                 await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
@@ -2065,8 +2088,9 @@ class Service(IService):
                     hotels_processed += 1
                     messages_processed += 1
 
-                # Batch update periodically
+                # Batch update periodically (normalize states in Service layer)
                 if len(batch_results) >= BATCH_SIZE:
+                    self._normalize_states_in_batch(batch_results)
                     updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                     logger.info(f"Batch update: {updated} hotels")
                     batch_results = []
@@ -2081,8 +2105,9 @@ class Service(IService):
                 remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
                 logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched, {hotels_failed} failed, ~{remaining} remaining")
 
-            # Final batch flush
+            # Final batch flush (normalize states in Service layer)
             if batch_results:
+                self._normalize_states_in_batch(batch_results)
                 updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                 logger.info(f"Final batch update: {updated} hotels")
 
@@ -2164,6 +2189,49 @@ class Service(IService):
         "WA": "Western Australia", "SA": "South Australia", "TAS": "Tasmania",
         "ACT": "Australian Capital Territory", "NT": "Northern Territory",
     }
+
+    def normalize_state(self, state: Optional[str], country: Optional[str] = None) -> Optional[str]:
+        """Normalize state abbreviation to full name.
+        
+        Delegates to state_utils.normalize_state for consistent logic across codebase.
+        
+        Args:
+            state: State value (could be abbreviation or full name)
+            country: Country hint (unused currently, but available for future logic)
+        
+        Returns:
+            Full state name if abbreviation found, otherwise original value
+        """
+        return state_utils.normalize_state(state, country)
+
+    def extract_state_from_text(self, text: str) -> Optional[str]:
+        """Extract US state from a text string (address, city, etc).
+        
+        Delegates to state_utils.extract_state_from_text for consistent logic.
+        
+        Looks for:
+        1. Full state names (case insensitive)
+        2. State abbreviations with context clues
+        
+        Returns the full state name if found, None otherwise.
+        """
+        return state_utils.extract_state_from_text(text)
+
+    def extract_state(self, address: Optional[str], city: Optional[str]) -> Optional[str]:
+        """Extract state from address or city field.
+        
+        Delegates to state_utils.extract_state for consistent logic.
+        
+        Tries address first (more likely to contain state), then city.
+        
+        Args:
+            address: Hotel address field
+            city: Hotel city field
+            
+        Returns:
+            Full state name if found, None otherwise
+        """
+        return state_utils.extract_state(address, city)
 
     async def get_normalization_status(self) -> dict:
         """Get counts of data needing location normalization."""
@@ -2290,3 +2358,67 @@ class Service(IService):
         
         logger.info(f"Location enrichment complete: {enriched} enriched, {failed} failed")
         return {"total": len(hotels), "enriched": enriched, "failed": failed}
+
+    # =========================================================================
+    # STATE EXTRACTION FROM ADDRESS
+    # =========================================================================
+
+    async def extract_states_from_address(self, limit: int = 1000, dry_run: bool = False) -> dict:
+        """Extract US state from address field for hotels missing state.
+        
+        Uses regex patterns to find state names and abbreviations in address/city fields.
+        Only updates hotels where state could be extracted.
+        
+        Args:
+            limit: Max hotels to process
+            dry_run: If True, return matches without updating database
+            
+        Returns:
+            dict with total/matched/updated counts and sample matches for dry_run
+        """
+        # Get US hotels missing state
+        hotels = await repo.get_us_hotels_missing_state(limit=limit)
+        
+        if not hotels:
+            logger.info("No US hotels found missing state")
+            return {"total": 0, "matched": 0, "updated": 0}
+        
+        logger.info(f"Found {len(hotels)} US hotels without state")
+        
+        # Extract states from address or city
+        updates = []
+        for hotel in hotels:
+            state = self.extract_state(hotel.address, hotel.city)
+            if state:
+                updates.append({
+                    "id": hotel.id,
+                    "name": hotel.name,
+                    "address": hotel.address,
+                    "city": hotel.city,
+                    "state": state,
+                })
+        
+        logger.info(f"Found state in address for {len(updates)} hotels")
+        
+        if dry_run:
+            logger.info("Dry run - showing first 20 matches:")
+            for u in updates[:20]:
+                name = u['name'][:40] if u['name'] else 'N/A'
+                addr = u['address'][:60] if u['address'] else 'N/A'
+                logger.info(f"  {u['id']}: {name}")
+                logger.info(f"      Address: {addr}...")
+                logger.info(f"      -> State: {u['state']}")
+            return {
+                "total": len(hotels),
+                "matched": len(updates),
+                "updated": 0,
+                "samples": updates[:20],
+            }
+        
+        # Batch update
+        updated = 0
+        if updates:
+            updated = await repo.batch_update_extracted_states(updates)
+            logger.success(f"Updated {updated} hotels with extracted state")
+        
+        return {"total": len(hotels), "matched": len(updates), "updated": updated}
