@@ -1439,7 +1439,9 @@ class Service(IService):
                     # Parse clientId and server from URL
                     # Format 1: /Search/Index/{id}/90/ (bookings.rmscloud.com)
                     # Format 2: /rates/index/{id}/90/ (bookings.rmscloud.com)
-                    # Format 3: ibe12.rmscloud.com/{id} (IBE servers)
+                    # Format 3: /search/index/{id} (no trailing number)
+                    # Format 4: bookings.rmscloud.com/{slug} (direct slug)
+                    # Format 5: ibe12.rmscloud.com/{id} (IBE servers)
                     import re
                     slug = None
                     server = "bookings.rmscloud.com"
@@ -1449,8 +1451,8 @@ class Service(IService):
                     if server_match:
                         server = server_match.group(1)
                     
-                    # Try /Search/Index/ or /rates/index/ format
-                    match = re.search(r'/(?:Search|rates)/[Ii]ndex/([^/]+)/\d+/?', url)
+                    # Try /Search/Index/ or /rates/index/ format (with or without trailing number)
+                    match = re.search(r'/(?:Search|rates)/[Ii]ndex/([^/]+)(?:/\d+)?/?$', url, re.IGNORECASE)
                     if match:
                         slug = match.group(1)
                     else:
@@ -1459,6 +1461,11 @@ class Service(IService):
                         if ibe_match:
                             server = ibe_match.group(1)
                             slug = ibe_match.group(2)
+                        else:
+                            # Try direct slug format: bookings.rmscloud.com/{hex_slug}
+                            direct_match = re.search(r'bookings\d*\.rmscloud\.com/([a-f0-9]{16,})$', url)
+                            if direct_match:
+                                slug = direct_match.group(1)
                     
                     # Skip if we couldn't parse the URL
                     if not slug:
