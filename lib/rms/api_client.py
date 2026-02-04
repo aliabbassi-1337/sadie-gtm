@@ -103,18 +103,24 @@ class RMSApiClient:
     """Fast RMS data extraction via API (no browser needed).
     
     Usage:
-        client = RMSApiClient()
-        data = await client.extract(slug)
+        # With connection pooling (recommended):
+        async with RMSApiClient() as client:
+            data = await client.extract(slug)
         
         # With Brightdata proxy:
-        client = RMSApiClient(use_brightdata=True)
-        data = await client.extract(slug)
+        async with RMSApiClient(use_brightdata=True) as client:
+            data = await client.extract(slug)
+    
+    Features:
+        - Connection pooling (reuses httpx.AsyncClient)
+        - Optional Brightdata proxy
     """
     
     def __init__(self, timeout: float = API_TIMEOUT, use_brightdata: bool = False):
         self.timeout = timeout
         self.use_brightdata = use_brightdata
         self._proxy_url: Optional[str] = None
+        self._client: Optional[httpx.AsyncClient] = None
         if use_brightdata:
             self._proxy_url = _get_brightdata_proxy()
             if self._proxy_url:
@@ -122,13 +128,34 @@ class RMSApiClient:
             else:
                 logger.warning("Brightdata requested but credentials not found")
     
+    async def __aenter__(self) -> "RMSApiClient":
+        """Create connection pool on context enter."""
+        self._client = httpx.AsyncClient(**self._get_client_kwargs())
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Close connection pool on context exit."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+    
     def _get_client_kwargs(self) -> dict:
         """Get httpx client kwargs with optional proxy."""
-        kwargs = {"timeout": self.timeout}
+        kwargs = {
+            "timeout": self.timeout,
+            "limits": httpx.Limits(max_connections=100, max_keepalive_connections=50),
+        }
         if self._proxy_url:
             kwargs["proxy"] = self._proxy_url
             kwargs["verify"] = False
         return kwargs
+    
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create client (for backwards compatibility)."""
+        if self._client:
+            return self._client
+        # Fallback for non-context usage (creates new client each time)
+        return httpx.AsyncClient(**self._get_client_kwargs())
     
     async def extract(self, slug: str, server: str = "bookings12.rmscloud.com") -> Optional[ExtractedRMSData]:
         """Extract hotel data from RMS API.
@@ -297,7 +324,9 @@ class RMSApiClient:
     
     async def _fetch_api_data(self, slug: str, server: str) -> Optional[RMSApiResponse]:
         """Fetch data from RMS API endpoints."""
-        async with httpx.AsyncClient(**self._get_client_kwargs()) as client:
+        client = await self._get_client()
+        should_close = self._client is None  # Close if we created a temp client
+        try:
             response = RMSApiResponse()
             
             # 1. First try OnlineApi/GetSearchOptions (richest data - has address, phone, email)
@@ -359,6 +388,9 @@ class RMSApiClient:
                 logger.debug(f"Details API failed: {e}")
             
             return response if response.property_name else None
+        finally:
+            if should_close and client:
+                await client.aclose()
     
     def _parse_structured_description(self, text: str) -> dict:
         """Parse structured property descriptions.
@@ -459,42 +491,46 @@ class RMSApiClient:
         The RMS booking pages contain all data in the initial HTML response.
         """
         url = f"https://{server}/Search/Index/{slug}/90/"
+        client = await self._get_client()
+        should_close = self._client is None  # Close if we created a temp client
         
         try:
-            async with httpx.AsyncClient(**self._get_client_kwargs()) as client:
-                # First check the redirect without following
-                resp = await client.get(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-                    follow_redirects=False,
-                )
-                
-                # Check if redirecting to error page
-                if resp.status_code in (301, 302, 303, 307, 308):
-                    location = resp.headers.get("location", "")
-                    if "message=" in location or "error" in location.lower():
-                        logger.debug(f"Redirect to error page for {slug}: {location}")
-                        return None
-                
-                # Now follow redirects
-                resp = await client.get(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-                    follow_redirects=True,
-                )
-                
-                if resp.status_code != 200:
+            # First check the redirect without following
+            resp = await client.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+                follow_redirects=False,
+            )
+            
+            # Check if redirecting to error page
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("location", "")
+                if "message=" in location or "error" in location.lower():
+                    logger.debug(f"Redirect to error page for {slug}: {location}")
                     return None
-                
-                html = resp.text
-                if len(html) < 1000:
-                    return None
-                
-                return self._parse_html(html, slug, url)
+            
+            # Now follow redirects
+            resp = await client.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+                follow_redirects=True,
+            )
+            
+            if resp.status_code != 200:
+                return None
+            
+            html = resp.text
+            if len(html) < 1000:
+                return None
+            
+            return self._parse_html(html, slug, url)
                 
         except Exception as e:
             logger.debug(f"HTML fetch error for {slug}: {e}")
             return None
+        finally:
+            if should_close and client:
+                await client.aclose()
     
     def _parse_html(self, html: str, slug: str, url: str) -> Optional[ExtractedRMSData]:
         """Parse hotel data from RMS HTML page."""
@@ -745,23 +781,28 @@ class AdaptiveRMSApiClient:
         self._brightdata_available = False
     
     async def __aenter__(self):
-        """Initialize clients."""
+        """Initialize clients with connection pooling."""
         self._direct_client = RMSApiClient(timeout=self.timeout, use_brightdata=False)
+        await self._direct_client.__aenter__()  # Initialize connection pool
         
         # Check if Brightdata is available
         proxy_url = _get_brightdata_proxy()
         if proxy_url:
             self._brightdata_client = RMSApiClient(timeout=self.timeout, use_brightdata=True)
+            await self._brightdata_client.__aenter__()  # Initialize connection pool
             self._brightdata_available = True
-            logger.info("Adaptive RMS client: Brightdata available, will switch if rate limited")
+            logger.info("Adaptive RMS client: Brightdata available, will switch if rate limited (connection pooling enabled)")
         else:
             logger.warning("Adaptive RMS client: Brightdata not available (no credentials)")
         
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Cleanup."""
-        pass
+        """Cleanup connection pools."""
+        if self._direct_client:
+            await self._direct_client.__aexit__(exc_type, exc_val, exc_tb)
+        if self._brightdata_client:
+            await self._brightdata_client.__aexit__(exc_type, exc_val, exc_tb)
     
     def _get_active_client(self) -> RMSApiClient:
         """Get the currently active client."""
