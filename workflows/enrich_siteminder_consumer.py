@@ -86,9 +86,12 @@ async def process_hotel(
     hotel_id: int,
     booking_url: str,
 ) -> EnrichmentResult:
-    """Process a single hotel using the SiteMinder API."""
+    """Process a single hotel using the SiteMinder property API.
+    
+    Uses the full 'property' endpoint which returns address, contact, and coordinates.
+    """
     try:
-        data = await client.get_hotel_data_from_url(booking_url)
+        data = await client.get_property_data_from_url(booking_url)
         
         if not data or not data.name:
             return EnrichmentResult(hotel_id=hotel_id, success=False, error="no_data")
@@ -98,7 +101,6 @@ async def process_hotel(
             success=True,
             name=data.name,
             website=data.website,
-            # Location fields - TODO: Add when API integration is available
             address=data.address,
             city=data.city,
             state=data.state,

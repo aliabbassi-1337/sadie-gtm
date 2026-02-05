@@ -1,21 +1,30 @@
 """SiteMinder GraphQL API client for hotel data extraction.
 
-Uses the direct-book.com GraphQL API to extract hotel data without browser rendering.
-Much faster than Playwright (~100ms vs 10s per hotel).
+Uses the direct-book.com GraphQL API to extract full hotel data:
+- Name, website, description
+- Address, city, state, country, postal code
+- Latitude, longitude
+- Email, phone
+- Star rating, amenities
+
+Two endpoints:
+1. 'settings' - Fast, returns name/website/social (for name enrichment)
+2. 'property' - Full data with address/contact/location (for location enrichment)
 
 Usage:
     async with SiteMinderClient() as client:
-        data = await client.get_hotel_data("thehindsheaddirect")
-        print(data.name, data.website)
+        # Full property data (address, contact, location)
+        data = await client.get_property_data("thehindsheaddirect")
+        print(data.name, data.city, data.state, data.country)
     
-    # With Brightdata proxy (for bypassing CloudFront blocks):
+    # With Brightdata proxy:
     async with SiteMinderClient(use_brightdata=True) as client:
-        data = await client.get_hotel_data("thehindsheaddirect")
+        data = await client.get_property_data("thehindsheaddirect")
 """
 
 import os
 import re
-from typing import Optional
+from typing import Optional, List
 from urllib.parse import urlparse, quote
 
 import httpx
@@ -26,8 +35,9 @@ from pydantic import BaseModel
 # GraphQL endpoint
 API_URL = "https://direct-book.com/api/graphql"
 
-# Persisted query hash for 'settings' operation
+# Persisted query hashes
 SETTINGS_QUERY_HASH = "d1a3cdf28313be40aaa5cbaa30f99bfcc1b30e65683eec73e0a04cb786764e8c"
+PROPERTY_QUERY_HASH = "c1266a16d8a7e6521600961d321a88e2b2f8348639fce22c270909112408cf45"
 
 # Request timeout
 API_TIMEOUT = 30.0
@@ -37,17 +47,21 @@ class SiteMinderHotelData(BaseModel):
     """Extracted hotel data from SiteMinder API."""
     name: Optional[str] = None
     website: Optional[str] = None
-    # Location fields - TODO: Add API integration to extract these
+    description: Optional[str] = None
+    # Location
     address: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
     country: Optional[str] = None
+    country_code: Optional[str] = None
     postal_code: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
-    # Contact fields - TODO: Add API integration to extract these
+    # Contact
     email: Optional[str] = None
     phone: Optional[str] = None
+    # Property details
+    star_rating: Optional[float] = None
     # Social media
     facebook: Optional[str] = None
     instagram: Optional[str] = None
@@ -131,11 +145,15 @@ class SiteMinderClient:
     
     Usage:
         async with SiteMinderClient() as client:
+            # Full property data (address, contact, coords)
+            data = await client.get_property_data("thehindsheaddirect")
+            
+            # Quick name/website only
             data = await client.get_hotel_data("thehindsheaddirect")
             
         # With Brightdata proxy (for bypassing CloudFront blocks):
         async with SiteMinderClient(use_brightdata=True) as client:
-            data = await client.get_hotel_data("thehindsheaddirect")
+            data = await client.get_property_data("thehindsheaddirect")
     """
     
     def __init__(self, timeout: float = API_TIMEOUT, use_brightdata: bool = False):
@@ -176,8 +194,142 @@ class SiteMinderClient:
             "Referer": f"https://direct-book.com/properties/{channel_code}",
         }
     
+    async def get_property_data(self, channel_code: str) -> Optional[SiteMinderHotelData]:
+        """Get FULL property data from SiteMinder (address, contact, location).
+        
+        Uses the 'property' GraphQL operation which returns:
+        - name, website, description
+        - address (line1, line2, city, state, postcode, country, lat/lon)
+        - contact (email, phone)
+        - star rating, amenities
+        
+        Args:
+            channel_code: The property slug (e.g., "thehindsheaddirect")
+        
+        Returns:
+            SiteMinderHotelData if successful, None if failed
+        """
+        if not self._client:
+            raise RuntimeError("Client not initialized. Use 'async with' context manager.")
+        
+        if not channel_code:
+            return None
+        
+        # Build GraphQL query URL with persisted query
+        import json
+        variables = quote(json.dumps({"channelCode": channel_code, "locale": "en"}))
+        extensions = quote(json.dumps({
+            "persistedQuery": {"version": 1, "sha256Hash": PROPERTY_QUERY_HASH}
+        }))
+        
+        url = f"{API_URL}?operationName=property&variables={variables}&extensions={extensions}"
+        
+        try:
+            resp = await self._client.get(
+                url,
+                headers=self._get_headers(channel_code),
+            )
+            
+            if resp.status_code != 200:
+                logger.debug(f"SiteMinder property API returned {resp.status_code} for {channel_code}")
+                return None
+            
+            data = resp.json()
+            
+            if "errors" in data:
+                logger.debug(f"SiteMinder property API error for {channel_code}: {data['errors']}")
+                return None
+            
+            prop = data.get("data", {}).get("property")
+            if not prop:
+                return None
+            
+            return self._parse_property_response(prop)
+            
+        except httpx.TimeoutException:
+            logger.debug(f"SiteMinder property API timeout for {channel_code}")
+            return None
+        except Exception as e:
+            logger.debug(f"SiteMinder property API error for {channel_code}: {e}")
+            return None
+    
+    async def get_property_data_from_url(self, booking_url: str) -> Optional[SiteMinderHotelData]:
+        """Get full property data from a booking URL.
+        
+        Args:
+            booking_url: Full booking URL (e.g., "https://direct-book.com/properties/xyz")
+        
+        Returns:
+            SiteMinderHotelData if successful, None if failed
+        """
+        channel_code = extract_channel_code(booking_url)
+        if not channel_code:
+            logger.debug(f"Could not extract channel code from {booking_url}")
+            return None
+        
+        return await self.get_property_data(channel_code)
+    
+    def _parse_property_response(self, prop: dict) -> SiteMinderHotelData:
+        """Parse property API response into SiteMinderHotelData."""
+        result = SiteMinderHotelData(
+            name=prop.get("name"),
+            website=prop.get("website") or None,
+            description=prop.get("description"),
+            star_rating=prop.get("starRating"),
+        )
+        
+        # Address
+        address = prop.get("address") or {}
+        if address:
+            line1 = address.get("addressLine1") or ""
+            line2 = address.get("addressLine2") or ""
+            if line1 and line2:
+                result.address = f"{line1}, {line2}".strip(", ")
+            else:
+                result.address = (line1 or line2).strip() or None
+            
+            result.city = (address.get("city") or "").strip() or None
+            result.state = (address.get("state") or "").strip() or None
+            result.postal_code = (address.get("postcode") or "").strip() or None
+            
+            # Country is nested: {"name": "United Kingdom", "code": "GB"}
+            country_data = address.get("country") or {}
+            if isinstance(country_data, dict):
+                result.country = country_data.get("name")
+                result.country_code = country_data.get("code")
+            elif isinstance(country_data, str):
+                result.country = country_data
+            
+            # Coordinates
+            try:
+                lat = address.get("latitude")
+                lon = address.get("longitude")
+                if lat is not None:
+                    result.lat = float(lat)
+                if lon is not None:
+                    result.lon = float(lon)
+            except (ValueError, TypeError):
+                pass
+        
+        # Contact
+        contact = prop.get("contact") or {}
+        if contact:
+            result.email = contact.get("email") or None
+            
+            phones = contact.get("phone") or []
+            if isinstance(phones, list) and phones:
+                # Take the first phone number
+                result.phone = phones[0] if phones[0] else None
+            elif isinstance(phones, str):
+                result.phone = phones or None
+        
+        return result
+    
     async def get_hotel_data(self, channel_code: str) -> Optional[SiteMinderHotelData]:
-        """Get hotel data from the SiteMinder GraphQL API.
+        """Get basic hotel data from the SiteMinder 'settings' API.
+        
+        Faster but only returns name/website/social. Use get_property_data()
+        for full address/contact/location.
         
         Args:
             channel_code: The property slug (e.g., "thehindsheaddirect")
@@ -240,13 +392,9 @@ class SiteMinderClient:
             return None
     
     async def get_hotel_data_from_url(self, booking_url: str) -> Optional[SiteMinderHotelData]:
-        """Get hotel data from a booking URL.
+        """Get basic hotel data from a booking URL (name/website only).
         
-        Args:
-            booking_url: Full booking URL (e.g., "https://direct-book.com/properties/xyz")
-        
-        Returns:
-            SiteMinderHotelData if successful, None if failed
+        For full data use get_property_data_from_url() instead.
         """
         channel_code = extract_channel_code(booking_url)
         if not channel_code:
@@ -259,11 +407,18 @@ class SiteMinderClient:
 async def test_client():
     """Quick test of the client."""
     async with SiteMinderClient() as client:
-        data = await client.get_hotel_data("thehindsheaddirect")
+        # Test the full property endpoint
+        data = await client.get_property_data("ushawhistorichousechapelsdirect")
         if data:
             print(f"Name: {data.name}")
             print(f"Website: {data.website}")
-            print(f"Property ID: {data.siteminder_property_id}")
+            print(f"Address: {data.address}")
+            print(f"City: {data.city}")
+            print(f"State: {data.state}")
+            print(f"Country: {data.country} ({data.country_code})")
+            print(f"Lat/Lon: {data.lat}, {data.lon}")
+            print(f"Email: {data.email}")
+            print(f"Phone: {data.phone}")
         else:
             print("Failed to get data")
 
