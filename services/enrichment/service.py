@@ -1765,6 +1765,7 @@ class Service(IService):
                     logger.warning(f"  Hotel {hotel_id}: {error}")
 
         if results_buffer:
+            self._sanitize_enrichment_data(results_buffer)
             self._normalize_states_in_batch(results_buffer)
             total_enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
             logger.info(f"Updated {total_enriched} hotels")
@@ -1847,9 +1848,10 @@ class Service(IService):
         # Process all hotels concurrently
         await asyncio.gather(*[process_hotel(h) for h in hotels])
         
-        # Batch update results (normalize states in Service layer)
+        # Batch update results (sanitize + normalize in Service layer)
         enriched = 0
         if results_buffer:
+            self._sanitize_enrichment_data(results_buffer)
             self._normalize_states_in_batch(results_buffer)
             enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
             logger.info(f"Updated {enriched} hotels with Cloudbeds API data")
@@ -1877,8 +1879,9 @@ class Service(IService):
     async def batch_update_cloudbeds_enrichment(self, results: List[Dict]) -> int:
         """Batch update Cloudbeds enrichment results.
         
-        Normalizes states before persisting to database.
+        Sanitizes garbage values and normalizes states before persisting.
         """
+        self._sanitize_enrichment_data(results)
         self._normalize_states_in_batch(results)
         return await repo.batch_update_cloudbeds_enrichment(results)
 
@@ -2015,8 +2018,9 @@ class Service(IService):
                     delete_message(queue_url, msg["receipt_handle"])
                     messages_processed += 1
 
-                # Batch update to database (normalize states in Service layer)
+                # Batch update to database (sanitize + normalize in Service layer)
                 if len(batch_results) >= BATCH_SIZE:
+                    self._sanitize_enrichment_data(batch_results)
                     self._normalize_states_in_batch(batch_results)
                     updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                     logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
@@ -2026,8 +2030,9 @@ class Service(IService):
                     await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
                     batch_failed_ids = []
 
-            # Final batch update (normalize states in Service layer)
+            # Final batch update (sanitize + normalize in Service layer)
             if batch_results:
+                self._sanitize_enrichment_data(batch_results)
                 self._normalize_states_in_batch(batch_results)
                 await repo.batch_update_cloudbeds_enrichment(batch_results)
             if batch_failed_ids:
@@ -2158,8 +2163,9 @@ class Service(IService):
                     hotels_processed += 1
                     messages_processed += 1
 
-                # Batch update periodically (normalize states in Service layer)
+                # Batch update periodically (sanitize + normalize in Service layer)
                 if len(batch_results) >= BATCH_SIZE:
+                    self._sanitize_enrichment_data(batch_results)
                     self._normalize_states_in_batch(batch_results)
                     updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                     logger.info(f"Batch update: {updated} hotels")
@@ -2175,8 +2181,9 @@ class Service(IService):
                 remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
                 logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched, {hotels_failed} failed, ~{remaining} remaining")
 
-            # Final batch flush (normalize states in Service layer)
+            # Final batch flush (sanitize + normalize in Service layer)
             if batch_results:
+                self._sanitize_enrichment_data(batch_results)
                 self._normalize_states_in_batch(batch_results)
                 updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                 logger.info(f"Final batch update: {updated} hotels")
@@ -2273,6 +2280,89 @@ class Service(IService):
             Full state name if abbreviation found, otherwise original value
         """
         return state_utils.normalize_state(state, country)
+
+    async def normalize_states_bulk(self, dry_run: bool = False) -> dict:
+        """Normalize state abbreviations to full names in database.
+        
+        Processes each supported country separately with its own state map:
+        - United States: CA -> California, etc.
+        - Australia: NSW -> New South Wales, etc.
+        
+        Args:
+            dry_run: If True, only report what would be fixed without making changes
+            
+        Returns:
+            dict with 'fixes' (list of tuples) and 'total_fixed' count
+        """
+        from db.client import get_conn
+        
+        # Define supported countries and their state maps
+        COUNTRY_STATE_MAPS = {
+            "United States": state_utils.US_STATES,
+            "Australia": state_utils.AU_STATES,
+        }
+        
+        all_fixes = []
+        total_fixed = 0
+        
+        for country_name, state_map in COUNTRY_STATE_MAPS.items():
+            valid_full_names = set(state_map.values())
+            
+            # Get unique states for this country
+            async with get_conn() as conn:
+                rows = await conn.fetch('''
+                    SELECT state, COUNT(*) as cnt
+                    FROM sadie_gtm.hotels 
+                    WHERE status != -1 
+                      AND country = $1
+                      AND state IS NOT NULL
+                    GROUP BY state
+                    ORDER BY cnt DESC
+                ''', country_name)
+            
+            if not rows:
+                continue
+                
+            logger.info(f"{country_name}: {len(rows)} unique state values")
+            
+            # Find states that need normalization
+            for row in rows:
+                state = row['state']
+                count = row['cnt']
+                
+                # Skip if already a valid full name
+                if state in valid_full_names:
+                    continue
+                
+                # Check if it's an abbreviation we can normalize
+                state_upper = state.strip().upper()
+                if state_upper in state_map:
+                    new_state = state_map[state_upper]
+                    all_fixes.append((state, new_state, country_name, count))
+                    
+                    logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
+                    
+                    if not dry_run:
+                        async with get_conn() as conn:
+                            result = await conn.execute('''
+                                UPDATE sadie_gtm.hotels 
+                                SET state = $2, updated_at = CURRENT_TIMESTAMP
+                                WHERE status != -1 AND country = $3 AND state = $1
+                            ''', state, new_state, country_name)
+                            fixed = int(result.split()[-1]) if result else 0
+                            total_fixed += fixed
+        
+        if not all_fixes:
+            logger.info("No state normalization needed")
+            return {"fixes": [], "total_fixed": 0}
+        
+        if dry_run:
+            would_fix = sum(c for _, _, _, c in all_fixes)
+            logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
+            return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
+        else:
+            logger.success(f"Normalized {total_fixed} hotels.")
+            return {"fixes": all_fixes, "total_fixed": total_fixed}
 
     def extract_state_from_text(self, text: str) -> Optional[str]:
         """Extract US state from a text string (address, city, etc).
