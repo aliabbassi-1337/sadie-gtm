@@ -776,11 +776,16 @@ async def batch_set_last_enrichment_attempt(hotel_ids: List[int]) -> int:
 
 async def batch_update_cloudbeds_enrichment(
     updates: List[Dict],
+    force_overwrite: bool = False,
 ) -> int:
     """Batch update hotels with Cloudbeds enrichment results.
     
     For Cloudbeds, scraped data overrides existing (crawl sources often have wrong location).
     Supports lat/lon from the property_info API.
+    
+    Args:
+        updates: List of dicts with hotel_id and enrichment fields
+        force_overwrite: If True, always overwrite with API data (even if empty preserves existing)
     """
     if not updates:
         return 0
@@ -813,34 +818,57 @@ async def batch_update_cloudbeds_enrichment(
         zip_codes.append(u.get("zip_code"))
         contact_names.append(u.get("contact_name"))
     
-    # Scraped/API data overrides existing (Cloudbeds page is authoritative)
-    sql = """
-    UPDATE sadie_gtm.hotels h
-    SET 
-        name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
-                    THEN v.name ELSE h.name END,
-        address = CASE WHEN v.address IS NOT NULL AND v.address != '' 
-                       THEN v.address ELSE h.address END,
-        city = CASE WHEN v.city IS NOT NULL AND v.city != '' 
-                    THEN v.city ELSE h.city END,
-        state = CASE WHEN v.state IS NOT NULL AND v.state != '' 
-                     THEN v.state ELSE h.state END,
-        country = CASE WHEN v.country IS NOT NULL AND v.country != '' 
-                       THEN v.country ELSE h.country END,
-        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' 
-                             THEN v.phone ELSE h.phone_website END,
-        email = CASE WHEN v.email IS NOT NULL AND v.email != '' 
-                     THEN v.email ELSE h.email END,
-        location = CASE 
-            WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL 
-            THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography
-            ELSE h.location 
-        END,
-        zip_code = CASE WHEN v.zip_code IS NOT NULL AND v.zip_code != '' 
-                        THEN v.zip_code ELSE h.zip_code END,
-        contact_name = CASE WHEN v.contact_name IS NOT NULL AND v.contact_name != '' 
-                            THEN v.contact_name ELSE h.contact_name END,
-        updated_at = CURRENT_TIMESTAMP
+    # With force_overwrite, use COALESCE to always take API data (fallback to existing if null)
+    # Without force, only overwrite if API returns non-empty value
+    if force_overwrite:
+        sql = """
+        UPDATE sadie_gtm.hotels h
+        SET 
+            name = COALESCE(v.name, h.name),
+            address = COALESCE(v.address, h.address),
+            city = COALESCE(v.city, h.city),
+            state = COALESCE(v.state, h.state),
+            country = COALESCE(v.country, h.country),
+            phone_website = COALESCE(v.phone, h.phone_website),
+            email = COALESCE(v.email, h.email),
+            location = CASE 
+                WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL 
+                THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography
+                ELSE h.location 
+            END,
+            zip_code = COALESCE(v.zip_code, h.zip_code),
+            contact_name = COALESCE(v.contact_name, h.contact_name),
+            updated_at = CURRENT_TIMESTAMP"""
+    else:
+        sql = """
+        UPDATE sadie_gtm.hotels h
+        SET 
+            name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
+                        THEN v.name ELSE h.name END,
+            address = CASE WHEN v.address IS NOT NULL AND v.address != '' 
+                           THEN v.address ELSE h.address END,
+            city = CASE WHEN v.city IS NOT NULL AND v.city != '' 
+                        THEN v.city ELSE h.city END,
+            state = CASE WHEN v.state IS NOT NULL AND v.state != '' 
+                         THEN v.state ELSE h.state END,
+            country = CASE WHEN v.country IS NOT NULL AND v.country != '' 
+                           THEN v.country ELSE h.country END,
+            phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' 
+                                 THEN v.phone ELSE h.phone_website END,
+            email = CASE WHEN v.email IS NOT NULL AND v.email != '' 
+                         THEN v.email ELSE h.email END,
+            location = CASE 
+                WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL 
+                THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography
+                ELSE h.location 
+            END,
+            zip_code = CASE WHEN v.zip_code IS NOT NULL AND v.zip_code != '' 
+                            THEN v.zip_code ELSE h.zip_code END,
+            contact_name = CASE WHEN v.contact_name IS NOT NULL AND v.contact_name != '' 
+                                THEN v.contact_name ELSE h.contact_name END,
+            updated_at = CURRENT_TIMESTAMP"""
+    
+    sql += """
     FROM (
         SELECT * FROM unnest(
             $1::integer[],

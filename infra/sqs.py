@@ -54,7 +54,7 @@ def send_messages_batch(queue_url: str, messages: List[Dict[str, Any]], concurre
         return 0
     
     client = get_sqs_client()
-
+    
     # Prepare all batches (SQS allows max 10 messages per batch)
     batches = []
     for i in range(0, len(messages), 10):
@@ -85,7 +85,7 @@ def send_messages_batch(queue_url: str, messages: List[Dict[str, Any]], concurre
         futures = [executor.submit(send_batch, batch) for batch in batches]
         for future in as_completed(futures):
             sent_count += future.result()
-
+    
     return sent_count
 
 

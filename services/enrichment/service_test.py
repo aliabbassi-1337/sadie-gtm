@@ -410,5 +410,272 @@ class TestServiceEdgeCasesOnline:
         assert success is False
 
 
+# ============================================================================
+# DATA SANITIZATION TESTS
+# ============================================================================
+
+
+@pytest.mark.no_db
+class TestIsGarbage:
+    """Tests for _is_garbage helper method."""
+    
+    @pytest.fixture
+    def service(self):
+        # No DB needed - just testing helper methods
+        return Service(rms_repo=None, rms_queue=MockQueue())
+    
+    # =========================================================================
+    # Obvious garbage - nullish values
+    # =========================================================================
+    @pytest.mark.parametrize("value", [
+        None,
+        '',
+        ' ',
+        '  ',
+        '\t',
+        '\n',
+        '\r\n',
+        '   \t\n   ',
+    ])
+    def test_nullish_values_are_garbage(self, service, value):
+        """Null, empty, whitespace-only should be garbage."""
+        assert service._is_garbage(value, 'name') is True
+    
+    # =========================================================================
+    # Garbage strings - literal garbage words
+    # =========================================================================
+    @pytest.mark.parametrize("value", [
+        # Boolean-like
+        'false', 'False', 'FALSE', 'true', 'True', 'TRUE',
+        # Null-like
+        'null', 'Null', 'NULL', 'none', 'None', 'NONE',
+        'undefined', 'Undefined', 'UNDEFINED',
+        # N/A variants
+        'n/a', 'N/A', 'N/a', 'na', 'NA', 'Na',
+        # Unknown/error
+        'unknown', 'Unknown', 'UNKNOWN',
+        'error', 'Error', 'ERROR',
+        'loading', 'Loading', 'LOADING',
+        'test', 'Test', 'TEST',
+        # Punctuation only
+        '-', '--', '---', '.', '..', '...',
+    ])
+    def test_garbage_words_detected(self, service, value):
+        """Literal garbage words should be detected."""
+        assert service._is_garbage(value, 'name') is True
+    
+    # =========================================================================
+    # Real API garbage - values that actually come from broken APIs
+    # =========================================================================
+    @pytest.mark.parametrize("value", [
+        # JavaScript stringified
+        '[object Object]', '[Object object]',
+        'NaN', 'nan',
+        'Infinity', 'infinity',
+        # HTML garbage
+        '&nbsp;',
+        '&#65279;',  # BOM character
+        '<br>', '<br/>',
+        # Placeholder text
+        'TBD', 'tbd',
+        'TODO', 'todo',
+        'FIXME', 'fixme',
+        'placeholder', 'Placeholder',
+        'example', 'Example',
+        'sample', 'Sample',
+        'demo', 'Demo',
+        # System names
+        'Online Bookings', 'online bookings',
+        'Book Now', 'book now',
+        'Booking Engine', 'booking engine',
+        'Hotel Booking Engine',
+        'Reservation', 'reservation',
+        'Reservations', 'reservations',
+        'Search', 'search',
+        'Home', 'home',
+        # Empty-ish
+        '0', '00', '000', '0.0',
+        # Single chars (except for state)
+        'a', 'b', 'x', 'X', '1', '?', '!', '*',
+    ])
+    def test_api_garbage_detected(self, service, value):
+        """Real garbage from APIs should be detected."""
+        assert service._is_garbage(value, 'name') is True
+    
+    # =========================================================================
+    # Valid values - should NOT be flagged as garbage
+    # =========================================================================
+    @pytest.mark.parametrize("value", [
+        # Normal hotel names
+        'Hilton Hotel',
+        'Miami Beach Resort',
+        'The Grand Hotel',
+        'Hotel & Spa',
+        'Marriott Downtown',
+        "Bob's Inn",
+        'Hôtel de Paris',
+        '7 Stars Resort',
+        'W Hotel',
+        'AC Hotel',
+        # Addresses
+        '123 Main Street',
+        '1 Beach Blvd',
+        '1600 Pennsylvania Ave NW',
+        # Cities
+        'Miami',
+        'New York',
+        'Los Angeles',
+        'San Francisco',
+        'LA',  # 2 chars OK for city
+        'DC',
+        # Countries
+        'USA',
+        'United States',
+        'Australia',
+        'UK',
+        # Contact info
+        'contact@hotel.com',
+        '+1-555-123-4567',
+        '(555) 123-4567',
+        'www.hotel.com',
+        # Edge cases that look like garbage but aren't
+        'The Test Kitchen Hotel',  # contains 'test'
+        'Unknown Soldier Inn',  # contains 'unknown'
+        'Loading Bay Hotel',  # contains 'loading'
+        'True North Lodge',  # contains 'true'
+        'Null Island Resort',  # contains 'null'
+        'False Creek Hotel',  # contains 'false'
+        'Error-Free Suites',  # contains 'error'
+    ])
+    def test_valid_values_not_garbage(self, service, value):
+        """Valid values should NOT be flagged as garbage."""
+        assert service._is_garbage(value, 'name') is False
+    
+    # =========================================================================
+    # State field special cases (2-char codes are valid)
+    # =========================================================================
+    @pytest.mark.parametrize("value", [
+        'CA', 'NY', 'TX', 'FL', 'WA', 'OR', 'AZ', 'NV',
+        'NSW', 'VIC', 'QLD',  # Australian states
+        'ON', 'BC', 'AB',  # Canadian provinces
+    ])
+    def test_state_codes_valid(self, service, value):
+        """2-3 char state/province codes should be valid for state field."""
+        assert service._is_garbage(value, 'state') is False
+    
+    @pytest.mark.parametrize("value", [
+        'C', 'N', 'T', 'a', '1', '-', '',
+    ])
+    def test_single_char_garbage_for_state(self, service, value):
+        """Single char or less should be garbage for state field."""
+        assert service._is_garbage(value, 'state') is True
+    
+    # =========================================================================
+    # Type coercion edge cases
+    # =========================================================================
+    def test_non_string_types_are_garbage(self, service):
+        """Non-string types should be garbage."""
+        assert service._is_garbage(123, 'name') is True
+        assert service._is_garbage(0, 'name') is True
+        assert service._is_garbage(False, 'name') is True
+        assert service._is_garbage(True, 'name') is True
+        assert service._is_garbage([], 'name') is True
+        assert service._is_garbage({}, 'name') is True
+        assert service._is_garbage(['hotel'], 'name') is True
+    
+    # =========================================================================
+    # Whitespace handling
+    # =========================================================================
+    @pytest.mark.parametrize("value", [
+        ' false ',
+        '  null  ',
+        '\ttest\t',
+        ' - ',
+        '  n/a  ',
+    ])
+    def test_garbage_with_whitespace_padding(self, service, value):
+        """Garbage values with whitespace padding should still be garbage."""
+        assert service._is_garbage(value, 'name') is True
+
+
+@pytest.mark.no_db
+class TestSanitizeEnrichmentData:
+    """Tests for _sanitize_enrichment_data method."""
+    
+    @pytest.fixture
+    def service(self):
+        # No DB needed - just testing helper methods
+        return Service(rms_repo=None, rms_queue=MockQueue())
+    
+    def test_garbage_values_set_to_none(self, service):
+        """Should set garbage values to None."""
+        updates = [{
+            'hotel_id': 1,
+            'name': 'Good Hotel',
+            'city': 'Miami',
+            'state': 'false',  # garbage
+            'country': 'USA',
+            'phone': '-',  # garbage
+            'email': 'test@hotel.com',
+            'address': '',  # garbage (empty)
+            'website': 'null',  # garbage
+        }]
+        
+        service._sanitize_enrichment_data(updates)
+        
+        assert updates[0]['name'] == 'Good Hotel'
+        assert updates[0]['city'] == 'Miami'
+        assert updates[0]['state'] is None
+        assert updates[0]['country'] == 'USA'
+        assert updates[0]['phone'] is None
+        assert updates[0]['email'] == 'test@hotel.com'
+        assert updates[0]['address'] is None
+        assert updates[0]['website'] is None
+    
+    def test_valid_state_codes_preserved(self, service):
+        """Should preserve valid 2-char state codes."""
+        updates = [{
+            'hotel_id': 1,
+            'name': 'Hotel',
+            'state': 'CA',
+        }]
+        
+        service._sanitize_enrichment_data(updates)
+        
+        assert updates[0]['state'] == 'CA'
+    
+    def test_multiple_updates_processed(self, service):
+        """Should process all updates in the list."""
+        updates = [
+            {'hotel_id': 1, 'name': 'Hotel A', 'city': 'unknown'},
+            {'hotel_id': 2, 'name': 'false', 'city': 'Miami'},
+            {'hotel_id': 3, 'name': 'Hotel C', 'city': 'Boston'},
+        ]
+        
+        service._sanitize_enrichment_data(updates)
+        
+        assert updates[0]['name'] == 'Hotel A'
+        assert updates[0]['city'] is None  # 'unknown' is garbage
+        assert updates[1]['name'] is None  # 'false' is garbage
+        assert updates[1]['city'] == 'Miami'
+        assert updates[2]['name'] == 'Hotel C'
+        assert updates[2]['city'] == 'Boston'
+    
+    def test_empty_list_handled(self, service):
+        """Should handle empty list without error."""
+        updates = []
+        service._sanitize_enrichment_data(updates)
+        assert updates == []
+    
+    def test_missing_fields_handled(self, service):
+        """Should handle updates with missing fields."""
+        updates = [{'hotel_id': 1, 'name': 'Hotel'}]
+        
+        # Should not raise KeyError
+        service._sanitize_enrichment_data(updates)
+        
+        assert updates[0]['name'] == 'Hotel'
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

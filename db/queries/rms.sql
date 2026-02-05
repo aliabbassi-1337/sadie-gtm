@@ -7,7 +7,7 @@ SELECT id FROM sadie_gtm.booking_engines WHERE name = 'RMS Cloud';
 
 -- name: get_rms_hotels_needing_enrichment
 -- Get RMS hotels that need enrichment (missing name, email, phone, city, etc.)
--- Uses booking_engine_id for filtering (more efficient than name)
+-- RMS Cloud booking_engine_id = 12
 -- Treats "Unknown", "Online Bookings" as garbage that needs enrichment
 -- Includes both pending (0) and live (1) hotels
 SELECT 
@@ -15,7 +15,7 @@ SELECT
     hbe.booking_url
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
-WHERE hbe.booking_engine_id = :booking_engine_id
+WHERE hbe.booking_engine_id = 12
   AND h.status >= 0
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
@@ -42,12 +42,13 @@ LIMIT :limit;
 
 -- name: get_rms_hotels_all
 -- Get ALL RMS hotels for force re-enrichment (ignores current data state)
+-- RMS Cloud booking_engine_id = 12
 SELECT 
     h.id AS hotel_id,
     hbe.booking_url
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
-WHERE hbe.booking_engine_id = :booking_engine_id
+WHERE hbe.booking_engine_id = 12
   AND h.status >= 0
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''

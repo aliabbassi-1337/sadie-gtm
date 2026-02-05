@@ -40,7 +40,7 @@ def handle_shutdown(signum, frame):
     shutdown_requested = True
 
 
-async def run_consumer(concurrency: int = 20, use_legacy: bool = False, use_brightdata: bool = True):
+async def run_consumer(concurrency: int = 20, use_legacy: bool = False, use_brightdata: bool = True, force: bool = False):
     """Run the SQS consumer."""
     global shutdown_requested
 
@@ -58,20 +58,22 @@ async def run_consumer(concurrency: int = 20, use_legacy: bool = False, use_brig
         
         if use_legacy:
             # Legacy Playwright-based consumer
-            logger.info("Using legacy Playwright consumer")
+            logger.info(f"Using legacy Playwright consumer (force={force})")
             result = await service.consume_cloudbeds_queue(
                 queue_url=QUEUE_URL,
                 concurrency=concurrency,
                 should_stop=lambda: shutdown_requested,
+                force_overwrite=force,
             )
         else:
             # Fast API-based consumer (default)
-            logger.info("Using fast API consumer")
+            logger.info(f"Using fast API consumer (force={force})")
             result = await service.consume_cloudbeds_queue_api(
                 queue_url=QUEUE_URL,
                 concurrency=concurrency,
                 use_brightdata=use_brightdata,
                 should_stop=lambda: shutdown_requested,
+                force_overwrite=force,
             )
 
         print("\n" + "=" * 60)
@@ -92,6 +94,7 @@ def main():
     parser.add_argument("--concurrency", type=int, default=100, help="Concurrent requests (default 100 for API, 6 for legacy)")
     parser.add_argument("--legacy", action="store_true", help="Use legacy Playwright-based consumer")
     parser.add_argument("--no-proxy", action="store_true", help="Disable Brightdata proxy")
+    parser.add_argument("--force", action="store_true", help="Force overwrite all fields (even if API returns empty)")
 
     args = parser.parse_args()
     
@@ -104,6 +107,7 @@ def main():
         concurrency=concurrency,
         use_legacy=args.legacy,
         use_brightdata=not args.no_proxy,
+        force=args.force,
     ))
 
 

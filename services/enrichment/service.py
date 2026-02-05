@@ -595,6 +595,75 @@ class Service(IService):
         self._shutdown_requested = True
         logger.info("Shutdown requested")
 
+    # Garbage values that should not overwrite existing data
+    GARBAGE_VALUES = {
+        # Empty/whitespace
+        '', ' ',
+        # Punctuation
+        '-', '--', '---', '.', '..', '...',
+        # Boolean-like
+        'false', 'true',
+        # Null-like
+        'null', 'none', 'undefined',
+        # N/A variants
+        'n/a', 'na',
+        # Status words
+        'unknown', 'error', 'loading', 'test',
+        # JavaScript garbage
+        '[object object]', 'nan', 'infinity',
+        # HTML entities
+        '&nbsp;', '&#65279;', '<br>', '<br/>',
+        # Placeholder text
+        'tbd', 'todo', 'fixme', 'placeholder', 'example', 'sample', 'demo',
+        # System/UI names (booking engine garbage)
+        'online bookings', 'book now', 'booking engine', 'hotel booking engine',
+        'reservation', 'reservations', 'search', 'home',
+        # Numeric garbage
+        '0', '00', '000', '0.0',
+    }
+    
+    def _is_garbage(self, value: Optional[str], field: str = None) -> bool:
+        """Check if a value is garbage and should not be written to DB.
+        
+        Returns True if the value should be discarded.
+        """
+        if value is None:
+            return True
+        if not isinstance(value, str):
+            return True
+        
+        cleaned = value.strip().lower()
+        
+        # Empty or in garbage list
+        if cleaned in self.GARBAGE_VALUES:
+            return True
+        
+        # Too short (except for state which can be 2 chars)
+        if field != 'state' and len(cleaned) < 2:
+            return True
+        
+        # State-specific: must be at least 2 chars
+        if field == 'state' and len(cleaned) < 2:
+            return True
+        
+        return False
+    
+    def _sanitize_enrichment_data(self, updates: List[Dict]) -> List[Dict]:
+        """Sanitize enrichment data by setting garbage values to None.
+        
+        Values set to None will be skipped by COALESCE in SQL (keeps existing).
+        This is called in Service layer before passing to repo for persistence.
+        """
+        fields = ['name', 'address', 'city', 'state', 'country', 'phone', 'email', 'website']
+        
+        for u in updates:
+            for field in fields:
+                value = u.get(field)
+                if self._is_garbage(value, field):
+                    u[field] = None
+        
+        return updates
+    
     def _normalize_states_in_batch(self, updates: List[Dict]) -> List[Dict]:
         """Normalize state abbreviations to full names in a batch of updates.
         
@@ -1548,8 +1617,9 @@ class Service(IService):
                         failed += 1
                         failed_urls.append(hotels[i].booking_url)
         
-        # Batch update all results (normalize states in Service layer)
+        # Batch update all results (sanitize garbage, then normalize states)
         if batch_updates or failed_urls:
+            self._sanitize_enrichment_data(batch_updates)
             self._normalize_states_in_batch(batch_updates)
             updated = await self._rms_repo.batch_update_enrichment(batch_updates, failed_urls, force_overwrite=force_overwrite)
             logger.info(f"Batch update: {updated} hotels updated, {len(failed_urls)} marked failed")
@@ -1711,6 +1781,7 @@ class Service(IService):
                     logger.warning(f"  Hotel {hotel_id}: {error}")
 
         if results_buffer:
+            self._sanitize_enrichment_data(results_buffer)
             self._normalize_states_in_batch(results_buffer)
             total_enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
             logger.info(f"Updated {total_enriched} hotels")
@@ -1793,9 +1864,10 @@ class Service(IService):
         # Process all hotels concurrently
         await asyncio.gather(*[process_hotel(h) for h in hotels])
         
-        # Batch update results (normalize states in Service layer)
+        # Batch update results (sanitize + normalize in Service layer)
         enriched = 0
         if results_buffer:
+            self._sanitize_enrichment_data(results_buffer)
             self._normalize_states_in_batch(results_buffer)
             enriched = await repo.batch_update_cloudbeds_enrichment(results_buffer)
             logger.info(f"Updated {enriched} hotels with Cloudbeds API data")
@@ -1823,8 +1895,9 @@ class Service(IService):
     async def batch_update_cloudbeds_enrichment(self, results: List[Dict]) -> int:
         """Batch update Cloudbeds enrichment results.
         
-        Normalizes states before persisting to database.
+        Sanitizes garbage values and normalizes states before persisting.
         """
+        self._sanitize_enrichment_data(results)
         self._normalize_states_in_batch(results)
         return await repo.batch_update_cloudbeds_enrichment(results)
 
@@ -1838,6 +1911,7 @@ class Service(IService):
         concurrency: int = 100,
         use_brightdata: bool = True,
         should_stop: Optional[Callable[[], bool]] = None,
+        force_overwrite: bool = False,
     ) -> ConsumeResult:
         """Consume Cloudbeds queue using fast API (no Playwright).
         
@@ -1853,6 +1927,7 @@ class Service(IService):
             concurrency: Concurrent API requests (default 100)
             use_brightdata: Use Brightdata proxy (recommended)
             should_stop: Callback to check if we should stop
+            force_overwrite: Always overwrite existing data (default False)
         """
         from lib.cloudbeds.api_client import CloudbedsApiClient, extract_property_code
         from infra.sqs import receive_messages, delete_messages_batch, get_queue_attributes
@@ -1977,16 +2052,13 @@ class Service(IService):
                 )
                 pending_db_tasks.append(delete_task)
 
-                # Batch update to database (non-blocking)
+                # Batch update to database (sanitize + normalize in Service layer)
                 if len(batch_results) >= BATCH_SIZE:
+                    self._sanitize_enrichment_data(batch_results)
                     self._normalize_states_in_batch(batch_results)
-                    results_to_save = batch_results[:]
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
+                    logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
                     batch_results = []
-                    
-                    async def save_batch(results):
-                        return await repo.batch_update_cloudbeds_enrichment(results)
-                    
-                    pending_db_tasks.append(asyncio.create_task(save_batch(results_to_save)))
 
                 if len(batch_failed_ids) >= BATCH_SIZE:
                     failed_to_save = batch_failed_ids[:]
@@ -2010,10 +2082,11 @@ class Service(IService):
             if pending_db_tasks:
                 await asyncio.gather(*pending_db_tasks, return_exceptions=True)
 
-            # Final batch update (normalize states in Service layer)
+            # Final batch update (sanitize + normalize in Service layer)
             if batch_results:
+                self._sanitize_enrichment_data(batch_results)
                 self._normalize_states_in_batch(batch_results)
-                await repo.batch_update_cloudbeds_enrichment(batch_results)
+                await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
             if batch_failed_ids:
                 await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
 
@@ -2029,11 +2102,15 @@ class Service(IService):
         queue_url: str,
         concurrency: int = 5,
         should_stop: Optional[Callable[[], bool]] = None,
+        force_overwrite: bool = False,
     ) -> ConsumeResult:
         """Consume and process Cloudbeds enrichment queue.
         
         This is the main entry point for the SQS consumer workflow.
         Handles browser lifecycle, message processing, and batch updates.
+        
+        Args:
+            force_overwrite: Always overwrite existing data with API data
         """
         from lib.browser import BrowserPool
         from lib.cloudbeds import CloudbedsScraper
@@ -2142,10 +2219,11 @@ class Service(IService):
                     hotels_processed += 1
                     messages_processed += 1
 
-                # Batch update periodically (normalize states in Service layer)
+                # Batch update periodically (sanitize + normalize in Service layer)
                 if len(batch_results) >= BATCH_SIZE:
+                    self._sanitize_enrichment_data(batch_results)
                     self._normalize_states_in_batch(batch_results)
-                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
                     logger.info(f"Batch update: {updated} hotels")
                     batch_results = []
 
@@ -2159,10 +2237,11 @@ class Service(IService):
                 remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
                 logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched, {hotels_failed} failed, ~{remaining} remaining")
 
-            # Final batch flush (normalize states in Service layer)
+            # Final batch flush (sanitize + normalize in Service layer)
             if batch_results:
+                self._sanitize_enrichment_data(batch_results)
                 self._normalize_states_in_batch(batch_results)
-                updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
                 logger.info(f"Final batch update: {updated} hotels")
 
             if batch_failed_ids:
@@ -2257,6 +2336,89 @@ class Service(IService):
             Full state name if abbreviation found, otherwise original value
         """
         return state_utils.normalize_state(state, country)
+
+    async def normalize_states_bulk(self, dry_run: bool = False) -> dict:
+        """Normalize state abbreviations to full names in database.
+        
+        Processes each supported country separately with its own state map:
+        - United States: CA -> California, etc.
+        - Australia: NSW -> New South Wales, etc.
+        
+        Args:
+            dry_run: If True, only report what would be fixed without making changes
+            
+        Returns:
+            dict with 'fixes' (list of tuples) and 'total_fixed' count
+        """
+        from db.client import get_conn
+        
+        # Define supported countries and their state maps
+        COUNTRY_STATE_MAPS = {
+            "United States": state_utils.US_STATES,
+            "Australia": state_utils.AU_STATES,
+        }
+        
+        all_fixes = []
+        total_fixed = 0
+        
+        for country_name, state_map in COUNTRY_STATE_MAPS.items():
+            valid_full_names = set(state_map.values())
+            
+            # Get unique states for this country
+            async with get_conn() as conn:
+                rows = await conn.fetch('''
+                    SELECT state, COUNT(*) as cnt
+                    FROM sadie_gtm.hotels 
+                    WHERE status != -1 
+                      AND country = $1
+                      AND state IS NOT NULL
+                    GROUP BY state
+                    ORDER BY cnt DESC
+                ''', country_name)
+            
+            if not rows:
+                continue
+                
+            logger.info(f"{country_name}: {len(rows)} unique state values")
+            
+            # Find states that need normalization
+            for row in rows:
+                state = row['state']
+                count = row['cnt']
+                
+                # Skip if already a valid full name
+                if state in valid_full_names:
+                    continue
+                
+                # Check if it's an abbreviation we can normalize
+                state_upper = state.strip().upper()
+                if state_upper in state_map:
+                    new_state = state_map[state_upper]
+                    all_fixes.append((state, new_state, country_name, count))
+                    
+                    logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
+                    
+                    if not dry_run:
+                        async with get_conn() as conn:
+                            result = await conn.execute('''
+                                UPDATE sadie_gtm.hotels 
+                                SET state = $2, updated_at = CURRENT_TIMESTAMP
+                                WHERE status != -1 AND country = $3 AND state = $1
+                            ''', state, new_state, country_name)
+                            fixed = int(result.split()[-1]) if result else 0
+                            total_fixed += fixed
+        
+        if not all_fixes:
+            logger.info("No state normalization needed")
+            return {"fixes": [], "total_fixed": 0}
+        
+        if dry_run:
+            would_fix = sum(c for _, _, _, c in all_fixes)
+            logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
+            return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
+        else:
+            logger.success(f"Normalized {total_fixed} hotels.")
+            return {"fixes": all_fixes, "total_fixed": total_fixed}
 
     def extract_state_from_text(self, text: str) -> Optional[str]:
         """Extract US state from a text string (address, city, etc).

@@ -30,16 +30,11 @@ class RMSRepo:
             limit: Max hotels to return
             force: If True, return ALL hotels regardless of current data state
         """
-        booking_engine_id = await self.get_booking_engine_id()
         async with get_conn() as conn:
             if force:
-                results = await queries.get_rms_hotels_all(
-                    conn, booking_engine_id=booking_engine_id, limit=limit
-                )
+                results = await queries.get_rms_hotels_all(conn, limit=limit)
             else:
-                results = await queries.get_rms_hotels_needing_enrichment(
-                    conn, booking_engine_id=booking_engine_id, limit=limit
-                )
+                results = await queries.get_rms_hotels_needing_enrichment(conn, limit=limit)
             return [
                 RMSHotelRecord(hotel_id=r["hotel_id"], booking_url=r["booking_url"])
                 for r in results
@@ -125,18 +120,19 @@ class RMSRepo:
                 longitudes = [u.get("longitude") for u in updates]
                 
                 if force_overwrite:
-                    # Force overwrite: new data always wins (if not null/empty)
+                    # Force overwrite: unconditionally overwrite with new values
+                    # Validation is done in application code before calling this method
                     sql_hotels = """
                     UPDATE sadie_gtm.hotels h
                     SET
-                        name = CASE WHEN v.name IS NOT NULL AND v.name != '' THEN v.name ELSE h.name END,
-                        address = CASE WHEN v.address IS NOT NULL AND v.address != '' THEN v.address ELSE h.address END,
-                        city = CASE WHEN v.city IS NOT NULL AND v.city != '' THEN v.city ELSE h.city END,
-                        state = CASE WHEN v.state IS NOT NULL AND v.state != '' THEN v.state ELSE h.state END,
-                        country = CASE WHEN v.country IS NOT NULL AND v.country != '' THEN v.country ELSE h.country END,
-                        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' THEN v.phone ELSE h.phone_website END,
-                        email = CASE WHEN v.email IS NOT NULL AND v.email != '' THEN v.email ELSE h.email END,
-                        website = CASE WHEN v.website IS NOT NULL AND v.website != '' THEN v.website ELSE h.website END,
+                        name = COALESCE(v.name, h.name),
+                        address = COALESCE(v.address, h.address),
+                        city = COALESCE(v.city, h.city),
+                        state = COALESCE(v.state, h.state),
+                        country = COALESCE(v.country, h.country),
+                        phone_website = COALESCE(v.phone, h.phone_website),
+                        email = COALESCE(v.email, h.email),
+                        website = COALESCE(v.website, h.website),
                         location = CASE 
                             WHEN v.latitude IS NOT NULL AND v.longitude IS NOT NULL 
                             THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography

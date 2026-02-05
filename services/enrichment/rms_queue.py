@@ -36,17 +36,23 @@ class RMSQueue:
         )
     
     def enqueue_hotels(self, hotels: List[RMSHotelRecord], batch_size: int = 10) -> int:
-        """Enqueue hotels for enrichment."""
-        # Build all messages first
+        """Enqueue hotels for enrichment.
+        
+        Groups hotels into batches (batch_size hotels per message),
+        then sends all messages concurrently via send_messages_batch.
+        """
+        # Group hotels into batches (each batch = 1 SQS message)
         messages = []
         for i in range(0, len(hotels), batch_size):
             batch = hotels[i:i + batch_size]
-            messages.append({"hotels": [{"hotel_id": h.hotel_id, "booking_url": h.booking_url} for h in batch]})
+            message = {"hotels": [{"hotel_id": h.hotel_id, "booking_url": h.booking_url} for h in batch]}
+            messages.append(message)
         
-        # Send all messages in batches of 10 (SQS limit)
-        sent = send_messages_batch(self.queue_url, messages)
-        # Return actual hotel count (sent messages * batch_size, capped at total hotels)
-        return min(sent * batch_size, len(hotels))
+        # Send all messages at once (send_messages_batch handles batching + concurrency)
+        messages_sent = send_messages_batch(self.queue_url, messages)
+        
+        # Each message contains batch_size hotels (except possibly the last)
+        return len(hotels) if messages_sent == len(messages) else messages_sent * batch_size
     
     def receive_messages(self, max_messages: int = 10) -> List[QueueMessage]:
         """Receive messages from queue."""
