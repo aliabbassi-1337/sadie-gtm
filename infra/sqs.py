@@ -121,6 +121,58 @@ def delete_message(queue_url: str, receipt_handle: str) -> None:
     )
 
 
+def delete_messages_batch(queue_url: str, receipt_handles: List[str], concurrency: int = 20) -> int:
+    """Delete multiple messages from SQS in batches of 10, with concurrent API calls.
+    
+    Args:
+        queue_url: SQS queue URL
+        receipt_handles: List of receipt handles to delete
+        concurrency: Max concurrent API calls (default 20)
+        
+    Returns:
+        Number of messages successfully deleted.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    if not receipt_handles:
+        return 0
+    
+    client = get_sqs_client()
+    
+    # Prepare all batches (SQS allows max 10 messages per batch)
+    batches = []
+    for i in range(0, len(receipt_handles), 10):
+        batch = receipt_handles[i:i + 10]
+        entries = [
+            {
+                "Id": str(idx),
+                "ReceiptHandle": handle,
+            }
+            for idx, handle in enumerate(batch)
+        ]
+        batches.append(entries)
+    
+    def delete_batch(entries):
+        response = client.delete_message_batch(
+            QueueUrl=queue_url,
+            Entries=entries,
+        )
+        failed = response.get("Failed", [])
+        if failed:
+            for failure in failed:
+                logger.debug(f"Failed to delete message: {failure}")
+        return len(response.get("Successful", []))
+    
+    # Delete batches concurrently
+    deleted_count = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [executor.submit(delete_batch, batch) for batch in batches]
+        for future in as_completed(futures):
+            deleted_count += future.result()
+    
+    return deleted_count
+
+
 def get_queue_attributes(queue_url: str) -> Dict[str, str]:
     """Get queue attributes like message count."""
     client = get_sqs_client()

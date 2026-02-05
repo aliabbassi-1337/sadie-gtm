@@ -1837,7 +1837,7 @@ class Service(IService):
             should_stop: Callback to check if we should stop
         """
         from lib.cloudbeds.api_client import CloudbedsApiClient, extract_property_code
-        from infra.sqs import receive_messages, delete_message, get_queue_attributes
+        from infra.sqs import receive_messages, delete_messages_batch, get_queue_attributes
 
         should_stop = should_stop or (lambda: self._shutdown_requested)
         
@@ -1891,9 +1891,9 @@ class Service(IService):
                         queue_url,
                         max_messages=10,
                         visibility_timeout=VISIBILITY_TIMEOUT,
-                        wait_time_seconds=10,  # Long poll - SQS will wait up to 10s for messages
+                        wait_time_seconds=1,  # Short poll for faster throughput
                     )
-                    for _ in range(5)  # Fetch 5 batches = up to 50 messages
+                    for _ in range(20)  # Fetch 20 batches = up to 200 messages
                 ]
                 batch_results_raw = await asyncio.gather(*batch_tasks)
                 messages = [m for batch in batch_results_raw if batch for m in batch]
@@ -1909,14 +1909,18 @@ class Service(IService):
                 # Process all messages concurrently
                 results = await asyncio.gather(*[process_message(m) for m in messages])
 
-                # Handle results
+                # Handle results - collect receipt handles for batch delete
+                receipt_handles_to_delete = []
+                
                 for msg, hotel_id, success, data, error in results:
+                    receipt_handles_to_delete.append(msg["receipt_handle"])
+                    
                     if hotel_id is None:
-                        # Invalid message - delete it
-                        delete_message(queue_url, msg["receipt_handle"])
+                        # Invalid message
                         continue
 
                     hotels_processed += 1
+                    messages_processed += 1
 
                     if success and data:
                         batch_results.append({
@@ -1941,9 +1945,8 @@ class Service(IService):
                         hotels_failed += 1
                         logger.debug(f"Hotel {hotel_id}: {error}")
 
-                    # Delete message from queue
-                    delete_message(queue_url, msg["receipt_handle"])
-                    messages_processed += 1
+                # Batch delete all messages from queue (concurrent, non-blocking)
+                await asyncio.to_thread(delete_messages_batch, queue_url, receipt_handles_to_delete)
 
                 # Batch update to database (normalize states in Service layer)
                 if len(batch_results) >= BATCH_SIZE:
