@@ -35,8 +35,7 @@ async def get_all_cloudbeds_hotels(limit: int):
             SELECT h.id, hbe.booking_url
             FROM sadie_gtm.hotels h
             JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-            JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-            WHERE be.name ILIKE '%cloudbeds%'
+            WHERE hbe.booking_engine_id = 3
               AND hbe.booking_url IS NOT NULL
               AND hbe.booking_url != ''
               AND h.status >= 0
@@ -101,24 +100,14 @@ async def run(limit: int = 1000, dry_run: bool = False, force: bool = False):
                 logger.info(f"  ... and {len(candidates) - 10} more")
             return len(candidates)
         
-        # Create messages
+        # Create messages (1 hotel per message)
         messages = [
-            {
-                "hotel_id": h.id,
-                "booking_url": h.booking_url,
-            }
+            {"hotel_id": h.id, "booking_url": h.booking_url}
             for h in candidates
         ]
         
-        # Send in batches of 10 (SQS limit)
-        sent = 0
-        for i in range(0, len(messages), 10):
-            batch = messages[i:i+10]
-            success = send_messages_batch(QUEUE_URL, batch)
-            if success:
-                sent += len(batch)
-            else:
-                logger.error(f"Failed to send batch {i//10 + 1}")
+        # Send all messages at once (send_messages_batch handles batching internally)
+        sent = send_messages_batch(QUEUE_URL, messages)
         
         logger.info(f"Enqueued {sent}/{len(candidates)} hotels")
         return sent
@@ -129,7 +118,7 @@ async def run(limit: int = 1000, dry_run: bool = False, force: bool = False):
 
 def main():
     parser = argparse.ArgumentParser(description="Enqueue Cloudbeds hotels for enrichment")
-    parser.add_argument("--limit", type=int, default=10000, help="Max hotels to enqueue")
+    parser.add_argument("--limit", type=int, default=50000, help="Max hotels to enqueue")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be enqueued")
     parser.add_argument("--force", action="store_true", help="Enqueue ALL hotels (for re-enrichment)")
     

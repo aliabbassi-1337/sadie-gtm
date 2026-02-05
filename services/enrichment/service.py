@@ -594,6 +594,75 @@ class Service(IService):
         self._shutdown_requested = True
         logger.info("Shutdown requested")
 
+    # Garbage values that should not overwrite existing data
+    GARBAGE_VALUES = {
+        # Empty/whitespace
+        '', ' ',
+        # Punctuation
+        '-', '--', '---', '.', '..', '...',
+        # Boolean-like
+        'false', 'true',
+        # Null-like
+        'null', 'none', 'undefined',
+        # N/A variants
+        'n/a', 'na',
+        # Status words
+        'unknown', 'error', 'loading', 'test',
+        # JavaScript garbage
+        '[object object]', 'nan', 'infinity',
+        # HTML entities
+        '&nbsp;', '&#65279;', '<br>', '<br/>',
+        # Placeholder text
+        'tbd', 'todo', 'fixme', 'placeholder', 'example', 'sample', 'demo',
+        # System/UI names (booking engine garbage)
+        'online bookings', 'book now', 'booking engine', 'hotel booking engine',
+        'reservation', 'reservations', 'search', 'home',
+        # Numeric garbage
+        '0', '00', '000', '0.0',
+    }
+    
+    def _is_garbage(self, value: Optional[str], field: str = None) -> bool:
+        """Check if a value is garbage and should not be written to DB.
+        
+        Returns True if the value should be discarded.
+        """
+        if value is None:
+            return True
+        if not isinstance(value, str):
+            return True
+        
+        cleaned = value.strip().lower()
+        
+        # Empty or in garbage list
+        if cleaned in self.GARBAGE_VALUES:
+            return True
+        
+        # Too short (except for state which can be 2 chars)
+        if field != 'state' and len(cleaned) < 2:
+            return True
+        
+        # State-specific: must be at least 2 chars
+        if field == 'state' and len(cleaned) < 2:
+            return True
+        
+        return False
+    
+    def _sanitize_enrichment_data(self, updates: List[Dict]) -> List[Dict]:
+        """Sanitize enrichment data by setting garbage values to None.
+        
+        Values set to None will be skipped by COALESCE in SQL (keeps existing).
+        This is called in Service layer before passing to repo for persistence.
+        """
+        fields = ['name', 'address', 'city', 'state', 'country', 'phone', 'email', 'website']
+        
+        for u in updates:
+            for field in fields:
+                value = u.get(field)
+                if self._is_garbage(value, field):
+                    u[field] = None
+        
+        return updates
+    
     def _normalize_states_in_batch(self, updates: List[Dict]) -> List[Dict]:
         """Normalize state abbreviations to full names in a batch of updates.
         
@@ -1535,8 +1604,9 @@ class Service(IService):
                         failed += 1
                         failed_urls.append(hotels[i].booking_url)
         
-        # Batch update all results (normalize states in Service layer)
+        # Batch update all results (sanitize garbage, then normalize states)
         if batch_updates or failed_urls:
+            self._sanitize_enrichment_data(batch_updates)
             self._normalize_states_in_batch(batch_updates)
             updated = await self._rms_repo.batch_update_enrichment(batch_updates, failed_urls, force_overwrite=force_overwrite)
             logger.info(f"Batch update: {updated} hotels updated, {len(failed_urls)} marked failed")

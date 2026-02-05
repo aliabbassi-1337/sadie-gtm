@@ -28,7 +28,7 @@ from services.enrichment.service import Service
 
 def main():
     parser = argparse.ArgumentParser(description="Enqueue RMS hotels for enrichment")
-    parser.add_argument("--limit", type=int, default=5000, help="Max hotels to enqueue")
+    parser.add_argument("--limit", type=int, default=50000, help="Max hotels to enqueue")
     parser.add_argument("--batch-size", type=int, default=10, help="Hotels per SQS message")
     parser.add_argument("--force", action="store_true", help="Enqueue ALL hotels (for re-enrichment)")
     args = parser.parse_args()
