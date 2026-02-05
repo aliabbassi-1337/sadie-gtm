@@ -7,6 +7,9 @@ Usage:
     # Force mode (ALL hotels for re-enrichment)
     uv run python -m workflows.enrich_cloudbeds_enqueue --limit 10000 --force
     
+    # Specific IDs (for testing)
+    uv run python -m workflows.enrich_cloudbeds_enqueue --ids 12345,67890
+    
     # Dry run
     uv run python -m workflows.enrich_cloudbeds_enqueue --dry-run --limit 100
 """
@@ -48,7 +51,21 @@ async def get_all_cloudbeds_hotels(limit: int):
         return [{"id": r["id"], "booking_url": r["booking_url"]} for r in rows]
 
 
-async def run(limit: int = 1000, dry_run: bool = False, force: bool = False):
+async def get_hotels_by_ids(hotel_ids: list):
+    """Get specific hotels by ID for testing."""
+    async with get_conn() as conn:
+        rows = await conn.fetch('''
+            SELECT h.id, hbe.booking_url
+            FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+            WHERE h.id = ANY($1)
+              AND hbe.booking_engine_id = 3
+              AND hbe.booking_url IS NOT NULL
+        ''', hotel_ids)
+        return [{"id": r["id"], "booking_url": r["booking_url"]} for r in rows]
+
+
+async def run(limit: int = 1000, dry_run: bool = False, force: bool = False, ids: list = None):
     """Enqueue Cloudbeds hotels for enrichment."""
     if not QUEUE_URL and not dry_run:
         logger.error("SQS_CLOUDBEDS_ENRICHMENT_QUEUE_URL not set in .env")
@@ -63,8 +80,18 @@ async def run(limit: int = 1000, dry_run: bool = False, force: bool = False):
             waiting = int(attrs.get("ApproximateNumberOfMessages", 0))
             logger.info(f"Queue status: {waiting} waiting, {in_flight} in-flight")
         
-        # Get hotels - either all (force) or only those needing enrichment
-        if force:
+        # Get hotels - by IDs, all (force), or only those needing enrichment
+        if ids:
+            logger.info(f"Getting specific hotels: {ids}")
+            rows = await get_hotels_by_ids(ids)
+            class Hotel:
+                def __init__(self, id, booking_url, name=None, city=None):
+                    self.id = id
+                    self.booking_url = booking_url
+                    self.name = name
+                    self.city = city
+            candidates = [Hotel(r["id"], r["booking_url"]) for r in rows]
+        elif force:
             logger.info("Force mode: getting ALL Cloudbeds hotels")
             rows = await get_all_cloudbeds_hotels(limit)
             # Convert to objects with id/booking_url attributes
@@ -121,9 +148,11 @@ def main():
     parser.add_argument("--limit", type=int, default=50000, help="Max hotels to enqueue")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be enqueued")
     parser.add_argument("--force", action="store_true", help="Enqueue ALL hotels (for re-enrichment)")
+    parser.add_argument("--ids", type=str, help="Comma-separated hotel IDs to enqueue (for testing)")
     
     args = parser.parse_args()
-    asyncio.run(run(limit=args.limit, dry_run=args.dry_run, force=args.force))
+    ids = [int(x.strip()) for x in args.ids.split(",")] if args.ids else None
+    asyncio.run(run(limit=args.limit, dry_run=args.dry_run, force=args.force, ids=ids))
 
 
 if __name__ == "__main__":

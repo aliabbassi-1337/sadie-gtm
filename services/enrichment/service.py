@@ -1895,6 +1895,7 @@ class Service(IService):
         concurrency: int = 20,
         use_brightdata: bool = True,
         should_stop: Optional[Callable[[], bool]] = None,
+        force_overwrite: bool = False,
     ) -> ConsumeResult:
         """Consume Cloudbeds queue using fast API (no Playwright).
         
@@ -1908,6 +1909,7 @@ class Service(IService):
             concurrency: Concurrent API requests (default 20)
             use_brightdata: Use Brightdata proxy (recommended)
             should_stop: Callback to check if we should stop
+            force_overwrite: Always overwrite existing data (default False)
         """
         from lib.cloudbeds.api_client import CloudbedsApiClient, extract_property_code
         from infra.sqs import receive_messages, delete_message, get_queue_attributes
@@ -2022,7 +2024,7 @@ class Service(IService):
                 if len(batch_results) >= BATCH_SIZE:
                     self._sanitize_enrichment_data(batch_results)
                     self._normalize_states_in_batch(batch_results)
-                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
                     logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
                     batch_results = []
 
@@ -2034,7 +2036,7 @@ class Service(IService):
             if batch_results:
                 self._sanitize_enrichment_data(batch_results)
                 self._normalize_states_in_batch(batch_results)
-                await repo.batch_update_cloudbeds_enrichment(batch_results)
+                await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
             if batch_failed_ids:
                 await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
 
@@ -2050,11 +2052,15 @@ class Service(IService):
         queue_url: str,
         concurrency: int = 5,
         should_stop: Optional[Callable[[], bool]] = None,
+        force_overwrite: bool = False,
     ) -> ConsumeResult:
         """Consume and process Cloudbeds enrichment queue.
         
         This is the main entry point for the SQS consumer workflow.
         Handles browser lifecycle, message processing, and batch updates.
+        
+        Args:
+            force_overwrite: Always overwrite existing data with API data
         """
         from lib.browser import BrowserPool
         from lib.cloudbeds import CloudbedsScraper
@@ -2167,7 +2173,7 @@ class Service(IService):
                 if len(batch_results) >= BATCH_SIZE:
                     self._sanitize_enrichment_data(batch_results)
                     self._normalize_states_in_batch(batch_results)
-                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
                     logger.info(f"Batch update: {updated} hotels")
                     batch_results = []
 
@@ -2185,7 +2191,7 @@ class Service(IService):
             if batch_results:
                 self._sanitize_enrichment_data(batch_results)
                 self._normalize_states_in_batch(batch_results)
-                updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
+                updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
                 logger.info(f"Final batch update: {updated} hotels")
 
             if batch_failed_ids:
