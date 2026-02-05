@@ -1,24 +1,26 @@
-"""Deduplicate RMS hotels by client ID and name.
+"""Deduplicate RMS hotels in two stages.
 
 RMS has ~7k unique properties but we have ~17k records due to:
 1. Multiple URL formats (numeric vs hex client IDs) for the same property
-2. Same property ingested from different sources
+2. Same property with different client IDs (RMS re-assigns client IDs)
+3. Same property ingested from different sources
+4. Junk "United States" entries (Australian WA parsed as Washington)
 
 This workflow marks duplicates with status = -1 (preserves data, won't be launched).
 
-PHASE 1 - Numeric Client ID Deduplication:
-- Extracts numeric RMS client ID from booking URLs
-- Groups hotels by client ID to find duplicates
-- Keeps the "best" record (has email, city, etc.)
-- Merges data from duplicates into the keeper
-- Updates external_id to rms_client_id
-- Marks duplicate records with status = -1
+TWO-STAGE DEDUPLICATION:
 
-PHASE 2 - Hex URL Deduplication (by name matching):
-- Finds hex URLs that match numeric hotels by name
-- Merges data from hex record into numeric record (if hex has better data)
-- Marks the hex duplicate with status = -1
-- Hex-only records (no numeric match) are KEPT
+STAGE 1 - BY CLIENT ID (100% accurate, zero false positives):
+- Extracts numeric RMS client ID from booking URLs
+- Groups hotels by client ID - same client ID = definitely same hotel
+- Keeps the "best" record, merges data from duplicates
+- Marks duplicates with status = -1
+
+STAGE 2 - BY NAME + CITY (catches remaining dupes):
+- Only processes survivors from Stage 1
+- Groups by normalized (name + city)
+- Handles cases where RMS reassigned client IDs
+- Keeps best record, marks remaining duplicates
 
 USAGE:
     # Dry run - see what would be done
@@ -44,37 +46,31 @@ from db.client import init_db, close_db, get_conn
 
 RMS_BOOKING_ENGINE_ID = 12
 
+# Garbage names to exclude from deduplication (these are placeholders, not real hotels)
+GARBAGE_NAMES = {
+    'online bookings', 'error', 'search', 'unknown', 'rms', '', ' ',
+    'rates', 'book now', 'reservation', 'reservations', 'hotel',
+    'an unhandled exception occurred while processing the request.',
+}
+
 
 def extract_rms_client_id(url: str) -> Optional[str]:
-    """Extract numeric RMS client ID from booking URL.
-    
-    RMS URLs have multiple formats:
-    - /search/index/{client_id}/...
-    - /rates/index/{client_id}/...
-    - rmscloud.com/{client_id}/1 or rmscloud.com/{client_id}
-    - ibe*.rmscloud.com/{client_id}
-    
-    Only numeric client IDs are valid. Hex IDs are legacy format.
-    """
+    """Extract numeric RMS client ID from booking URL."""
     if not url:
         return None
     
-    # Format 1: /search/index/{numeric_id}/ (case insensitive)
     match = re.search(r'/search/index/(\d+)(?:/|$)', url, re.IGNORECASE)
     if match:
         return match.group(1)
     
-    # Format 2: /rates/index/{numeric_id}/ (beta format, numeric only)
     match = re.search(r'/rates/index/(\d+)(?:/|$)', url, re.IGNORECASE)
     if match:
         return match.group(1)
     
-    # Format 3: rmscloud.com/{numeric_id} (with or without trailing path)
     match = re.search(r'rmscloud\.com/(\d+)(?:/|$)', url, re.IGNORECASE)
     if match:
         return match.group(1)
     
-    # Format 4: ibe*.rmscloud.com/{numeric_id}
     match = re.search(r'ibe\d*\.rmscloud\.com/(\d+)', url, re.IGNORECASE)
     if match:
         return match.group(1)
@@ -82,49 +78,59 @@ def extract_rms_client_id(url: str) -> Optional[str]:
     return None
 
 
-def is_hex_url(url: str) -> bool:
-    """Check if URL uses hex format (not numeric)."""
-    if not url:
-        return False
-    
-    # Hex in /search/index/ format
-    match = re.search(r'/search/index/([A-Fa-f0-9]+)', url, re.IGNORECASE)
-    if match and not match.group(1).isdigit():
-        return True
-    
-    # Hex in /rates/index/ format
-    match = re.search(r'/rates/index/([A-Fa-f0-9]+)', url, re.IGNORECASE)
-    if match and not match.group(1).isdigit():
-        return True
-    
-    # Short hex format: rmscloud.com/{hex}
-    match = re.search(r'rmscloud\.com/([A-Fa-f0-9]+)(?:/|$)', url, re.IGNORECASE)
-    if match and not match.group(1).isdigit() and len(match.group(1)) >= 8:
-        return True
-    
-    return False
-
-
-def normalize_name(name: str) -> str:
-    """Normalize hotel name for matching."""
-    if not name:
+def normalize_text(text: str) -> str:
+    """Normalize text for matching."""
+    if not text:
         return ''
-    return name.strip().lower()
+    return text.strip().lower()
 
 
 def is_garbage_name(name: str) -> bool:
     """Check if name is garbage/placeholder."""
     if not name:
         return True
-    garbage = ('search', 'error', 'online bookings', 'unknown', 'rms')
-    return normalize_name(name) in garbage
+    return normalize_text(name) in GARBAGE_NAMES
 
 
 def is_garbage_city(city: str) -> bool:
     """Check if city is garbage/placeholder."""
     if not city:
         return True
-    return city in ('RMS Online Booking', 'Online Bookings', '')
+    return city.strip() in ('RMS Online Booking', 'Online Bookings', '', 'its bubbling')
+
+
+def country_matches_address(country: str, address: str) -> bool:
+    """Check if country field matches what's in the address."""
+    if not country or not address:
+        return False
+    
+    addr_lower = address.lower()
+    country_lower = country.lower()
+    
+    # Check for obvious mismatches
+    if 'united states' in country_lower:
+        # US shouldn't have Australian addresses
+        if 'australia' in addr_lower or ', au' in addr_lower:
+            return False
+        # WA in address with US country is usually wrong (Western Australia)
+        if ' wa ' in addr_lower or addr_lower.endswith(' wa'):
+            return False
+        # Other Australian state abbreviations in address
+        if any(f' {st} ' in addr_lower or addr_lower.endswith(f' {st}') 
+               for st in ['nsw', 'qld', 'vic', 'tas', 'sa', 'nt', 'act']):
+            return False
+    
+    if 'australia' in country_lower:
+        if 'australia' in addr_lower:
+            return True
+    
+    if 'canada' in country_lower:
+        if 'canada' in addr_lower or any(f' {prov} ' in addr_lower 
+               for prov in ['on', 'bc', 'ab', 'mb', 'sk', 'qc', 'ns', 'nb', 'nl', 'pe']):
+            return True
+    
+    # Default: can't determine, treat as neutral
+    return True
 
 
 def score_record(r: Dict[str, Any]) -> int:
@@ -133,7 +139,18 @@ def score_record(r: Dict[str, Any]) -> int:
     
     # Email is most valuable
     if r.get('email'):
-        score += 10
+        score += 15
+    
+    # Address that matches country (penalize mismatches)
+    if r.get('address') and r.get('country'):
+        if country_matches_address(r['country'], r['address']):
+            score += 10
+        else:
+            score -= 20  # Heavy penalty for country/address mismatch
+    
+    # Has address at all
+    if r.get('address'):
+        score += 5
     
     # Valid city (not garbage)
     if not is_garbage_city(r.get('city')):
@@ -151,11 +168,15 @@ def score_record(r: Dict[str, Any]) -> int:
     if r.get('phone_website'):
         score += 2
     
+    # Country (non-null is better)
+    if r.get('country'):
+        score += 2
+    
     return score
 
 
 async def get_rms_hotels(conn) -> List[Dict[str, Any]]:
-    """Fetch all RMS hotels with their booking URLs."""
+    """Fetch all RMS hotels with their booking URLs, excluding garbage names."""
     records = await conn.fetch('''
         SELECT 
             hbe.hotel_id,
@@ -167,350 +188,375 @@ async def get_rms_hotels(conn) -> List[Dict[str, Any]]:
             h.country,
             h.address,
             h.phone_website,
-            h.external_id,
-            h.external_id_type
+            h.status
         FROM sadie_gtm.hotel_booking_engines hbe
         JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
         WHERE hbe.booking_engine_id = $1
+          AND h.name IS NOT NULL
+          AND h.name != ''
+          AND h.status >= 0  -- Only active hotels
     ''', RMS_BOOKING_ENGINE_ID)
-    return [dict(r) for r in records]
-
-
-def separate_by_url_type(records: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
-    """Separate records into numeric and hex URL types."""
-    numeric = []
-    hex_urls = []
     
+    # Filter out garbage names in Python (more flexible than SQL)
+    valid = []
+    garbage_count = 0
     for r in records:
-        if extract_rms_client_id(r['booking_url']):
-            numeric.append(r)
-        elif is_hex_url(r['booking_url']):
-            hex_urls.append(r)
-        # Skip any other URL formats
+        if is_garbage_name(r['name']):
+            garbage_count += 1
+        else:
+            valid.append(dict(r))
     
-    return numeric, hex_urls
+    logger.info(f"Excluded {garbage_count} records with garbage names")
+    return valid
 
 
-def group_by_client_id(records: List[Dict]) -> Dict[str, List[Dict]]:
-    """Group numeric records by RMS client ID."""
+def group_by_client_id(records: List[Dict]) -> Tuple[Dict[str, List[Dict]], List[Dict]]:
+    """
+    Group records by RMS client ID.
+    
+    Returns:
+        (by_client_id, no_client_id) where:
+        - by_client_id: dict mapping client_id -> list of records
+        - no_client_id: list of records without extractable client ID (hex URLs, etc.)
+    """
     by_client_id = {}
+    no_client_id = []
+    
     for r in records:
         client_id = extract_rms_client_id(r['booking_url'])
         if client_id:
             if client_id not in by_client_id:
                 by_client_id[client_id] = []
             by_client_id[client_id].append(r)
-    return by_client_id
+        else:
+            no_client_id.append(r)
+    
+    return by_client_id, no_client_id
 
 
-def plan_numeric_deduplication(by_client_id: Dict[str, List[Dict]]) -> Tuple[List[Dict], List[int]]:
+def group_by_name_city(records: List[Dict]) -> Dict[Tuple[str, str], List[Dict]]:
+    """Group records by normalized (name + city)."""
+    groups = {}
+    for r in records:
+        key = (normalize_text(r.get('name', '')), normalize_text(r.get('city', '')))
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(r)
+    return groups
+
+
+def merge_records(recs: List[Dict]) -> Tuple[Dict, List[int]]:
     """
-    Plan deduplication for numeric client IDs.
+    Merge a group of duplicate records.
     
     Returns:
-        (to_keep, to_delete) where:
-        - to_keep: list of dicts with hotel_id, client_id, and merged fields
-        - to_delete: list of hotel_ids to delete
+        (keeper, dupe_ids) where:
+        - keeper: the merged record to keep
+        - dupe_ids: list of hotel_ids to mark as duplicates
     """
-    to_keep = []
-    to_delete = []
+    if len(recs) == 1:
+        return recs[0].copy(), []
+    
+    # Sort by score, best first
+    recs_sorted = sorted(recs, key=score_record, reverse=True)
+    keeper = recs_sorted[0].copy()
+    dupe_ids = []
+    
+    # Merge data from duplicates
+    for other in recs_sorted[1:]:
+        if not keeper.get('email') and other.get('email'):
+            keeper['email'] = other['email']
+        if is_garbage_city(keeper.get('city')) and not is_garbage_city(other.get('city')):
+            keeper['city'] = other['city']
+        if not keeper.get('state') and other.get('state'):
+            keeper['state'] = other['state']
+        if not keeper.get('address') and other.get('address'):
+            keeper['address'] = other['address']
+        if not keeper.get('phone_website') and other.get('phone_website'):
+            keeper['phone_website'] = other['phone_website']
+        if is_garbage_name(keeper.get('name')) and not is_garbage_name(other.get('name')):
+            keeper['name'] = other['name']
+        # Fix country if keeper has address/country mismatch
+        if keeper.get('address') and other.get('country'):
+            if not country_matches_address(keeper.get('country', ''), keeper['address']):
+                if country_matches_address(other['country'], keeper['address']):
+                    keeper['country'] = other['country']
+        
+        dupe_ids.append(other['hotel_id'])
+    
+    return keeper, dupe_ids
+
+
+def plan_stage1_deduplication(by_client_id: Dict[str, List[Dict]]) -> Tuple[List[Dict], List[int]]:
+    """
+    Plan Stage 1 deduplication by client ID.
+    
+    Returns:
+        (keepers, dupe_ids) - keepers have client_id set
+    """
+    keepers = []
+    all_dupes = []
     
     for client_id, recs in by_client_id.items():
-        if len(recs) == 1:
-            # Single record - just update external_id
-            r = recs[0]
-            to_keep.append({
-                'hotel_id': r['hotel_id'],
-                'client_id': client_id,
-                'name': r['name'],
-                'email': r['email'],
-                'city': r['city'],
-                'state': r['state'],
-                'country': r['country'],
-                'phone_website': r['phone_website'],
-            })
-        else:
-            # Multiple records - keep best, merge data
-            recs.sort(key=score_record, reverse=True)
-            keeper = recs[0].copy()
-            
-            # Merge data from others
-            for other in recs[1:]:
-                if not keeper.get('email') and other.get('email'):
-                    keeper['email'] = other['email']
-                if is_garbage_city(keeper.get('city')) and not is_garbage_city(other.get('city')):
-                    keeper['city'] = other['city']
-                if not keeper.get('state') and other.get('state'):
-                    keeper['state'] = other['state']
-                if not keeper.get('phone_website') and other.get('phone_website'):
-                    keeper['phone_website'] = other['phone_website']
-                if is_garbage_name(keeper.get('name')) and not is_garbage_name(other.get('name')):
-                    keeper['name'] = other['name']
-                
-                # Mark for deletion
-                to_delete.append(other['hotel_id'])
-            
-            to_keep.append({
-                'hotel_id': keeper['hotel_id'],
-                'client_id': client_id,
-                'name': keeper.get('name'),
-                'email': keeper.get('email'),
-                'city': keeper.get('city'),
-                'state': keeper.get('state'),
-                'country': keeper.get('country'),
-                'phone_website': keeper.get('phone_website'),
-            })
+        keeper, dupe_ids = merge_records(recs)
+        keeper['client_id'] = client_id  # Store for external_id
+        keepers.append(keeper)
+        all_dupes.extend(dupe_ids)
     
-    return to_keep, to_delete
+    return keepers, all_dupes
 
 
-def plan_hex_deduplication(
-    hex_records: List[Dict],
-    numeric_keepers: List[Dict],
-) -> Tuple[List[Dict], List[int], int]:
+def plan_stage2_deduplication(
+    stage1_keepers: List[Dict],
+    no_client_id: List[Dict],
+) -> Tuple[List[Dict], List[int]]:
     """
-    Plan deduplication for hex URLs by matching to numeric hotels.
+    Plan Stage 2 deduplication by name + city.
+    
+    Processes Stage 1 keepers + records without client ID.
     
     Returns:
-        (to_update, to_delete, kept_count) where:
-        - to_update: numeric records to update with merged hex data
-        - to_delete: hex hotel_ids to delete (matched to numeric)
-        - kept_count: number of hex-only records kept (no match)
+        (keepers, dupe_ids)
     """
-    # Build name -> numeric keeper mapping
-    numeric_by_name = {}
-    for r in numeric_keepers:
-        name = normalize_name(r.get('name'))
-        if name and not is_garbage_name(r.get('name')):
-            numeric_by_name[name] = r
+    # Combine stage 1 keepers with no-client-id records
+    all_records = stage1_keepers + no_client_id
     
-    to_update = []
-    to_delete = []
-    kept_count = 0
+    # Group by name + city
+    groups = group_by_name_city(all_records)
     
-    for hex_r in hex_records:
-        hex_name = normalize_name(hex_r.get('name'))
-        
-        if hex_name in numeric_by_name:
-            # Match found - merge hex data into numeric
-            numeric_r = numeric_by_name[hex_name]
-            updated = False
-            
-            # Check if hex has better data
-            if not numeric_r.get('email') and hex_r.get('email'):
-                numeric_r['email'] = hex_r['email']
-                updated = True
-            if is_garbage_city(numeric_r.get('city')) and not is_garbage_city(hex_r.get('city')):
-                numeric_r['city'] = hex_r['city']
-                updated = True
-            if not numeric_r.get('state') and hex_r.get('state'):
-                numeric_r['state'] = hex_r['state']
-                updated = True
-            if not numeric_r.get('phone_website') and hex_r.get('phone_website'):
-                numeric_r['phone_website'] = hex_r['phone_website']
-                updated = True
-            
-            if updated:
-                to_update.append(numeric_r)
-            
-            # Mark the hex record as duplicate
-            to_delete.append(hex_r['hotel_id'])
-        else:
-            # No match - keep the hex record
-            kept_count += 1
+    keepers = []
+    all_dupes = []
     
-    return to_update, to_delete, kept_count
+    for (name_norm, city_norm), recs in groups.items():
+        keeper, dupe_ids = merge_records(recs)
+        keepers.append(keeper)
+        all_dupes.extend(dupe_ids)
+    
+    return keepers, all_dupes
 
 
 async def execute_deduplication(
     conn,
-    numeric_keepers: List[Dict],
-    numeric_dupes: List[int],
-    hex_updates: List[Dict],
-    hex_dupes: List[int],
+    keepers: List[Dict],
+    dupes: List[int],
 ) -> Dict[str, int]:
-    """Execute the deduplication in a transaction.
-    
-    Instead of deleting duplicates, we mark them with status = -1.
-    This preserves the data but ensures they won't be launched.
-    """
+    """Execute the deduplication using batch updates."""
     stats = {
-        'numeric_updated': 0,
-        'numeric_marked_dupe': 0,
-        'hex_merged': 0,
-        'hex_marked_dupe': 0,
+        'updated': 0,
+        'marked_dupe': 0,
     }
     
     async with conn.transaction():
-        # Phase 0: Clear rms_client_id from ALL hotels that will conflict
-        # This handles orphaned hotels from previous partial runs
-        client_ids = [r['client_id'] for r in numeric_keepers]
+        # Step 1: Clear external_id from ALL RMS hotels to avoid unique constraint issues
         await conn.execute('''
             UPDATE sadie_gtm.hotels
             SET external_id = NULL, external_id_type = NULL
-            WHERE external_id_type = 'rms_client_id' AND external_id = ANY($1)
-        ''', client_ids)
+            WHERE external_id_type = 'rms_client_id'
+        ''')
+        logger.info("Cleared existing rms_client_id external_ids")
         
-        # Phase 1: Update numeric keepers with merged data and external_id
-        for r in numeric_keepers:
-            await conn.execute('''
-                UPDATE sadie_gtm.hotels
-                SET 
-                    external_id = $2,
-                    external_id_type = 'rms_client_id',
-                    name = COALESCE(NULLIF($3, ''), name),
-                    email = COALESCE(NULLIF($4, ''), email),
-                    city = CASE 
-                        WHEN $5 IS NOT NULL AND $5 != '' AND $5 != 'RMS Online Booking' 
-                        THEN $5 
-                        ELSE city 
-                    END,
-                    state = COALESCE(NULLIF($6, ''), state),
-                    phone_website = COALESCE(NULLIF($7, ''), phone_website),
-                    updated_at = NOW()
-                WHERE id = $1
-            ''', r['hotel_id'], r['client_id'], r.get('name'), r.get('email'),
-                r.get('city'), r.get('state'), r.get('phone_website'))
-            stats['numeric_updated'] += 1
-        
-        # Phase 2: Update numeric records with hex data (where hex had better data)
-        for r in hex_updates:
-            await conn.execute('''
-                UPDATE sadie_gtm.hotels
-                SET 
-                    email = COALESCE(NULLIF($2, ''), email),
-                    city = CASE 
-                        WHEN $3 IS NOT NULL AND $3 != '' AND $3 != 'RMS Online Booking' 
-                        THEN $3 
-                        ELSE city 
-                    END,
-                    state = COALESCE(NULLIF($4, ''), state),
-                    phone_website = COALESCE(NULLIF($5, ''), phone_website),
-                    updated_at = NOW()
-                WHERE id = $1
-            ''', r['hotel_id'], r.get('email'), r.get('city'),
-                r.get('state'), r.get('phone_website'))
-            stats['hex_merged'] += 1
-        
-        # Phase 3: Mark numeric duplicates as status = -1 (instead of deleting)
-        if numeric_dupes:
+        # Step 2: Mark duplicates as status = -1 (batch)
+        if dupes:
             await conn.execute('''
                 UPDATE sadie_gtm.hotels
                 SET status = -1, updated_at = NOW()
                 WHERE id = ANY($1)
-            ''', numeric_dupes)
-            stats['numeric_marked_dupe'] = len(numeric_dupes)
+            ''', dupes)
+            stats['marked_dupe'] = len(dupes)
+            logger.info(f"Marked {len(dupes)} duplicates as status=-1")
         
-        # Phase 4: Mark hex duplicates as status = -1 (instead of deleting)
-        if hex_dupes:
-            await conn.execute('''
-                UPDATE sadie_gtm.hotels
-                SET status = -1, updated_at = NOW()
-                WHERE id = ANY($1)
-            ''', hex_dupes)
-            stats['hex_marked_dupe'] = len(hex_dupes)
+        # Step 3: Batch update keepers using temp table
+        # Prepare data for batch insert
+        keeper_data = []
+        for r in keepers:
+            client_id = r.get('client_id') or extract_rms_client_id(r.get('booking_url', ''))
+            keeper_data.append((
+                r['hotel_id'],
+                client_id or '',
+                r.get('name') or '',
+                r.get('email') or '',
+                r.get('city') or '',
+                r.get('state') or '',
+                r.get('country') or '',
+                r.get('phone_website') or '',
+            ))
+        
+        # Create temp table
+        await conn.execute('''
+            CREATE TEMP TABLE temp_keeper_updates (
+                hotel_id INTEGER PRIMARY KEY,
+                client_id TEXT,
+                name TEXT,
+                email TEXT,
+                city TEXT,
+                state TEXT,
+                country TEXT,
+                phone_website TEXT
+            ) ON COMMIT DROP
+        ''')
+        
+        # Batch insert into temp table
+        await conn.executemany('''
+            INSERT INTO temp_keeper_updates 
+            (hotel_id, client_id, name, email, city, state, country, phone_website)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ''', keeper_data)
+        logger.info(f"Loaded {len(keeper_data)} keepers into temp table")
+        
+        # Single UPDATE from temp table
+        result = await conn.execute('''
+            UPDATE sadie_gtm.hotels h
+            SET 
+                external_id = NULLIF(t.client_id, ''),
+                external_id_type = CASE WHEN t.client_id != '' THEN 'rms_client_id' ELSE h.external_id_type END,
+                name = COALESCE(NULLIF(t.name, ''), h.name),
+                email = COALESCE(NULLIF(t.email, ''), h.email),
+                city = CASE 
+                    WHEN t.city != '' AND t.city != 'RMS Online Booking' 
+                    THEN t.city 
+                    ELSE h.city 
+                END,
+                state = COALESCE(NULLIF(t.state, ''), h.state),
+                country = COALESCE(NULLIF(t.country, ''), h.country),
+                phone_website = COALESCE(NULLIF(t.phone_website, ''), h.phone_website),
+                updated_at = NOW()
+            FROM temp_keeper_updates t
+            WHERE h.id = t.hotel_id
+        ''')
+        stats['updated'] = len(keeper_data)
+        logger.info(f"Updated {stats['updated']} keeper hotels")
     
     return stats
 
 
 async def run_dedupe(dry_run: bool = True) -> None:
-    """Run the deduplication workflow."""
+    """Run the two-stage deduplication workflow."""
     await init_db()
     
     try:
         async with get_conn() as conn:
             logger.info("Fetching RMS hotels...")
             records = await get_rms_hotels(conn)
-            logger.info(f"Total RMS records: {len(records)}")
+            logger.info(f"Valid RMS records (non-garbage names, active): {len(records)}")
             
-            # Separate by URL type
-            numeric_records, hex_records = separate_by_url_type(records)
-            logger.info(f"Numeric URL records: {len(numeric_records)}")
-            logger.info(f"Hex URL records: {len(hex_records)}")
-            
-            # Phase 1: Plan numeric deduplication
+            # ================================================================
+            # STAGE 1: Deduplicate by Client ID
+            # ================================================================
             logger.info("")
             logger.info("=" * 60)
-            logger.info("PHASE 1: Numeric Client ID Deduplication")
+            logger.info("STAGE 1: DEDUPLICATE BY CLIENT ID")
+            logger.info("(Same client ID = definitely same hotel, 100% accurate)")
             logger.info("=" * 60)
             
-            by_client_id = group_by_client_id(numeric_records)
-            logger.info(f"Unique numeric client IDs: {len(by_client_id)}")
+            by_client_id, no_client_id = group_by_client_id(records)
+            logger.info(f"Records with numeric client ID: {sum(len(v) for v in by_client_id.values())}")
+            logger.info(f"Records without client ID (hex URLs): {len(no_client_id)}")
+            logger.info(f"Unique client IDs: {len(by_client_id)}")
             
-            numeric_keepers, numeric_dupes = plan_numeric_deduplication(by_client_id)
-            logger.info(f"Records to keep/update: {len(numeric_keepers)}")
-            logger.info(f"Duplicates to mark (status=-1): {len(numeric_dupes)}")
+            # Plan stage 1
+            stage1_keepers, stage1_dupes = plan_stage1_deduplication(by_client_id)
+            dup_groups_s1 = sum(1 for recs in by_client_id.values() if len(recs) > 1)
+            logger.info(f"Client ID groups with duplicates: {dup_groups_s1}")
+            logger.info(f"Stage 1 keepers: {len(stage1_keepers)}")
+            logger.info(f"Stage 1 duplicates: {len(stage1_dupes)}")
             
-            # Phase 2: Plan hex deduplication
+            # ================================================================
+            # STAGE 2: Deduplicate by Name + City
+            # ================================================================
             logger.info("")
             logger.info("=" * 60)
-            logger.info("PHASE 2: Hex URL Deduplication (by name)")
+            logger.info("STAGE 2: DEDUPLICATE BY NAME + CITY")
+            logger.info("(Catches hotels with different client IDs)")
             logger.info("=" * 60)
             
-            hex_updates, hex_dupes, hex_kept = plan_hex_deduplication(
-                hex_records, numeric_keepers
-            )
-            logger.info(f"Hex duplicates to mark (status=-1): {len(hex_dupes)}")
-            logger.info(f"Hex records with better data (to merge): {len(hex_updates)}")
-            logger.info(f"Hex-only records (KEPT): {hex_kept}")
+            # Stage 2 processes stage 1 keepers + no-client-id records
+            stage2_input = len(stage1_keepers) + len(no_client_id)
+            logger.info(f"Stage 2 input: {stage2_input} records")
             
-            # Summary
+            final_keepers, stage2_dupes = plan_stage2_deduplication(stage1_keepers, no_client_id)
+            
+            # Count stage 2 duplicate groups
+            groups = group_by_name_city(stage1_keepers + no_client_id)
+            dup_groups_s2 = sum(1 for recs in groups.values() if len(recs) > 1)
+            logger.info(f"Name+City groups with duplicates: {dup_groups_s2}")
+            logger.info(f"Stage 2 keepers: {len(final_keepers)}")
+            logger.info(f"Stage 2 duplicates: {len(stage2_dupes)}")
+            
+            # ================================================================
+            # SUMMARY
+            # ================================================================
             logger.info("")
             logger.info("=" * 60)
             logger.info("SUMMARY")
             logger.info("=" * 60)
-            total_dupes = len(numeric_dupes) + len(hex_dupes)
-            active_count = len(numeric_keepers) + hex_kept
-            logger.info(f"Current records: {len(records)}")
-            logger.info(f"To mark as duplicate (status=-1): {total_dupes}")
-            logger.info(f"Active records after dedup: {active_count}")
+            total_dupes = len(stage1_dupes) + len(stage2_dupes)
+            logger.info(f"Original records: {len(records)}")
+            logger.info(f"Stage 1 duplicates (by client ID): {len(stage1_dupes)}")
+            logger.info(f"Stage 2 duplicates (by name+city): {len(stage2_dupes)}")
+            logger.info(f"Total duplicates: {total_dupes}")
+            logger.info(f"Final unique hotels: {len(final_keepers)}")
+            logger.info(f"Reduction: {total_dupes} ({100*total_dupes/len(records):.1f}%)")
             
             if dry_run:
                 logger.info("")
                 logger.info("DRY RUN - No changes made")
                 logger.info("")
                 
-                # Show sample numeric merges
-                logger.info("Sample numeric merges:")
+                # Show sample Stage 1 merges
+                logger.info("Sample Stage 1 merges (by client ID):")
                 shown = 0
-                for r in numeric_keepers:
-                    if shown >= 3:
+                for client_id, recs in by_client_id.items():
+                    if shown >= 3 and len(recs) > 1:
                         break
-                    client_recs = by_client_id.get(r['client_id'], [])
-                    if len(client_recs) > 1:
-                        logger.info(f"  Client {r['client_id']}: Keep hotel {r['hotel_id']}")
-                        logger.info(f"    -> {r['name']} | {r['city']}, {r['state']} | {r['email']}")
-                        for orig in client_recs:
-                            if orig['hotel_id'] != r['hotel_id']:
-                                logger.info(f"    Mark as dupe hotel {orig['hotel_id']}: {orig['name']} | {orig['city']}")
+                    if len(recs) > 1:
+                        recs_sorted = sorted(recs, key=score_record, reverse=True)
+                        keeper = recs_sorted[0]
+                        logger.info(f"  Client {client_id}: {len(recs)} records")
+                        logger.info(f"    KEEP [{keeper['hotel_id']}]: {keeper['name'][:30] if keeper['name'] else 'NULL'} | {keeper['country']}")
+                        for orig in recs_sorted[1:2]:
+                            logger.info(f"    DUPE [{orig['hotel_id']}]: {orig['name'][:30] if orig['name'] else 'NULL'} | {orig['country']}")
+                        if len(recs) > 2:
+                            logger.info(f"    ... and {len(recs) - 2} more")
                         shown += 1
                 
-                # Show sample hex merges
-                if hex_updates:
-                    logger.info("")
-                    logger.info("Sample hex->numeric merges (hex had better data):")
-                    for r in hex_updates[:3]:
-                        logger.info(f"  Updated hotel {r['hotel_id']} with: {r['city']} | {r['email']}")
+                # Show sample Stage 2 merges
+                logger.info("")
+                logger.info("Sample Stage 2 merges (by name+city):")
+                shown = 0
+                for (name_norm, city_norm), recs in groups.items():
+                    if shown >= 3:
+                        break
+                    if len(recs) > 1:
+                        recs_sorted = sorted(recs, key=score_record, reverse=True)
+                        keeper = recs_sorted[0]
+                        # Check if these have different client IDs
+                        client_ids = set(r.get('client_id') or extract_rms_client_id(r.get('booking_url', '')) for r in recs)
+                        if len(client_ids) > 1:
+                            logger.info(f"  '{name_norm[:30]}' | city='{city_norm}' | {len(client_ids)} different client IDs")
+                            logger.info(f"    KEEP [{keeper['hotel_id']}]: {keeper['country']} | score={score_record(keeper)}")
+                            for orig in recs_sorted[1:2]:
+                                logger.info(f"    DUPE [{orig['hotel_id']}]: {orig['country']} | score={score_record(orig)}")
+                            shown += 1
                 
                 logger.info("")
                 logger.info("Run with --execute to apply changes")
             else:
                 logger.info("")
                 logger.info("Executing deduplication...")
-                stats = await execute_deduplication(
-                    conn, numeric_keepers, numeric_dupes, hex_updates, hex_dupes
-                )
+                
+                # Combine all duplicates
+                all_dupes = stage1_dupes + stage2_dupes
+                
+                stats = await execute_deduplication(conn, final_keepers, all_dupes)
                 
                 logger.info("")
                 logger.info("=" * 60)
                 logger.info("DEDUPLICATION COMPLETE")
                 logger.info("=" * 60)
-                logger.info(f"Numeric hotels updated: {stats['numeric_updated']}")
-                logger.info(f"Numeric duplicates marked (status=-1): {stats['numeric_marked_dupe']}")
-                logger.info(f"Hex data merged into numeric: {stats['hex_merged']}")
-                logger.info(f"Hex duplicates marked (status=-1): {stats['hex_marked_dupe']}")
+                logger.info(f"Hotels updated: {stats['updated']}")
+                logger.info(f"Duplicates marked (status=-1): {stats['marked_dupe']}")
                 
-                # Verify final count (active hotels only)
+                # Verify final count
                 active = await conn.fetchval('''
                     SELECT COUNT(DISTINCT h.id)
                     FROM sadie_gtm.hotels h
@@ -524,7 +570,9 @@ async def run_dedupe(dry_run: bool = True) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Deduplicate RMS hotels by client ID and name")
+    parser = argparse.ArgumentParser(
+        description="Deduplicate RMS hotels in two stages: (1) by client ID, (2) by name+city"
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -537,10 +585,7 @@ def main():
     )
     
     args = parser.parse_args()
-    
-    # Default to dry-run if neither specified
     dry_run = not args.execute
-    
     asyncio.run(run_dedupe(dry_run=dry_run))
 
 
