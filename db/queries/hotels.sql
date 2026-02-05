@@ -646,7 +646,7 @@ WHERE h.status = 0
   -- Valid name requirements (filter out junk/test/system names)
   AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
   AND LENGTH(h.name) > 2
-  AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK')
+  AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Hotel Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK', 'Rates', 'Hotel')
   AND h.name NOT ILIKE '%test%'
   AND h.name NOT ILIKE '%demo%'
   AND h.name NOT ILIKE '%sandbox%'
@@ -654,9 +654,11 @@ WHERE h.status = 0
   AND h.name NOT ILIKE 'unknown%'
   AND h.name NOT ILIKE '%internal%server%error%'
   AND h.name NOT ILIKE '%check availability%'
+  AND h.name NOT ILIKE '%booking engine%'
   AND h.name NOT LIKE '% RMS %'
   AND h.name NOT LIKE 'RMS %'
   AND h.name NOT LIKE '% RMS'
+  AND h.name !~ '^[0-9-]+$'
 LIMIT :limit;
 
 -- name: get_launchable_count^
@@ -671,7 +673,7 @@ WHERE h.status = 0
   -- Valid name requirements (filter out junk/test/system names)
   AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
   AND LENGTH(h.name) > 2
-  AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK')
+  AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Hotel Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK', 'Rates', 'Hotel')
   AND h.name NOT ILIKE '%test%'
   AND h.name NOT ILIKE '%demo%'
   AND h.name NOT ILIKE '%sandbox%'
@@ -679,9 +681,11 @@ WHERE h.status = 0
   AND h.name NOT ILIKE 'unknown%'
   AND h.name NOT ILIKE '%internal%server%error%'
   AND h.name NOT ILIKE '%check availability%'
+  AND h.name NOT ILIKE '%booking engine%'
   AND h.name NOT LIKE '% RMS %'
   AND h.name NOT LIKE 'RMS %'
-  AND h.name NOT LIKE '% RMS';
+  AND h.name NOT LIKE '% RMS'
+  AND h.name !~ '^[0-9-]+$';
 
 -- name: launch_hotels
 -- Atomically claim and launch hotels (multi-worker safe)
@@ -700,7 +704,7 @@ WITH claimed AS (
       -- Valid name requirements (filter out junk/test/system names)
       AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
       AND LENGTH(h.name) > 2
-      AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Hotel Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK')
+      AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Hotel Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK', 'Rates', 'Hotel')
       AND h.name NOT ILIKE '%test%'
       AND h.name NOT ILIKE '%demo%'
       AND h.name NOT ILIKE '%sandbox%'
@@ -736,7 +740,7 @@ WITH claimed AS (
       -- Valid name requirements (filter out junk/test/system names)
       AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
       AND LENGTH(h.name) > 2
-      AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Hotel Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK')
+      AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Error', 'Online Bookings', 'Search', 'Book Now', 'Booking Engine', 'Hotel Booking Engine', 'Reservation', 'Reservations', 'View or Change a Reservation', 'My reservations', 'Modify/Cancel reservation', 'Book Now Pay on Check-in', 'DEACTIVATED ACCOUNT DO NO BOOK', 'Rates', 'Hotel')
       AND h.name NOT ILIKE '%test%'
       AND h.name NOT ILIKE '%demo%'
       AND h.name NOT ILIKE '%sandbox%'
