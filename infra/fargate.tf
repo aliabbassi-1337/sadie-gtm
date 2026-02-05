@@ -5,7 +5,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 5.0"
     }
   }
 }
@@ -36,6 +36,11 @@ variable "sqs_rms_scan_queue_arn" {
 
 variable "sqs_cloudbeds_enrichment_queue_arn" {
   description = "ARN of the Cloudbeds enrichment SQS queue"
+  type        = string
+}
+
+variable "sqs_detection_queue_arn" {
+  description = "ARN of the Detection SQS queue"
   type        = string
 }
 
@@ -110,13 +115,28 @@ resource "aws_iam_role_policy" "ecs_task_sqs" {
         Action = [
           "sqs:ReceiveMessage",
           "sqs:DeleteMessage",
+          "sqs:SendMessage",
+          "sqs:SendMessageBatch",
           "sqs:GetQueueAttributes",
           "sqs:GetQueueUrl"
         ]
         Resource = [
           var.sqs_rms_enrichment_queue_arn,
           var.sqs_rms_scan_queue_arn,
-          var.sqs_cloudbeds_enrichment_queue_arn
+          var.sqs_cloudbeds_enrichment_queue_arn,
+          var.sqs_detection_queue_arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::sadie-gtm-exports",
+          "arn:aws:s3:::sadie-gtm-exports/*"
         ]
       }
     ]
@@ -143,7 +163,7 @@ resource "aws_ecs_task_definition" "rms_enrichment" {
     name  = "consumer"
     image = "${var.ecr_repo_url}:latest"
     
-    command = ["uv", "run", "python", "-m", "workflows.enrich_rms_consumer", "--concurrency", "50"]
+    command = ["uv", "run", "python", "-m", "workflows.enrich_rms_consumer", "--concurrency", "100"]
     
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" }
@@ -182,7 +202,7 @@ resource "aws_ecs_task_definition" "rms_scan" {
     name  = "consumer"
     image = "${var.ecr_repo_url}:latest"
     
-    command = ["uv", "run", "python", "-m", "workflows.consume_rms_scan", "--concurrency", "50"]
+    command = ["uv", "run", "python", "-m", "workflows.consume_rms_scan", "--concurrency", "100"]
     
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" }
@@ -276,7 +296,7 @@ resource "aws_ecs_task_definition" "cloudbeds_consumer" {
     name  = "consumer"
     image = "${var.ecr_repo_url}:latest"
     
-    command = ["uv", "run", "python", "-m", "workflows.enrich_cloudbeds_consumer", "--concurrency", "20"]
+    command = ["uv", "run", "python", "-m", "workflows.enrich_cloudbeds_consumer", "--concurrency", "100"]
     
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" }
@@ -407,6 +427,158 @@ resource "aws_cloudwatch_metric_alarm" "cloudbeds_queue_low" {
   }
 
   alarm_actions = [aws_appautoscaling_policy.cloudbeds_consumer_scale_down.arn]
+}
+
+# =============================================================================
+# DETECTION SQS CONSUMER (scales based on queue depth)
+# Uses Playwright for browser-based booking engine detection
+# =============================================================================
+
+# ECS Task Definition - Detection Consumer
+resource "aws_ecs_task_definition" "detection_consumer" {
+  family                   = "${var.app_name}-detection-consumer"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "2048"   # 2 vCPU for browser automation
+  memory                   = "8192"   # 8GB RAM for Playwright browsers
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "consumer"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "-m", "workflows.detection_consumer", "--preset", "small"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" },
+      { name = "PLAYWRIGHT_BROWSERS_PATH", value = "/root/.cache/ms-playwright" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "SQS_DETECTION_QUEUE_URL", valueFrom = "/${var.app_name}/sqs-detection-queue-url" },
+      { name = "BRIGHTDATA_CUSTOMER_ID", valueFrom = "/${var.app_name}/brightdata-customer-id" },
+      { name = "BRIGHTDATA_DC_PASSWORD", valueFrom = "/${var.app_name}/brightdata-dc-password" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "detection-consumer"
+      }
+    }
+  }])
+}
+
+# ECS Service - Detection Consumer (scales based on SQS)
+resource "aws_ecs_service" "detection_consumer" {
+  name            = "${var.app_name}-detection-consumer"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.detection_consumer.arn
+  desired_count   = 0  # Starts at 0, auto-scaling kicks in
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = data.aws_subnets.default.ids
+    security_groups  = [aws_security_group.fargate.id]
+    assign_public_ip = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]  # Managed by auto-scaling
+  }
+}
+
+# Auto-scaling for Detection Consumer
+resource "aws_appautoscaling_target" "detection_consumer" {
+  max_capacity       = 10
+  min_capacity       = 0
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.detection_consumer.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "detection_consumer_scale_up" {
+  name               = "${var.app_name}-detection-consumer-scale-up"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.detection_consumer.resource_id
+  scalable_dimension = aws_appautoscaling_target.detection_consumer.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.detection_consumer.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = 2
+      metric_interval_lower_bound = 0
+      metric_interval_upper_bound = 100
+    }
+    step_adjustment {
+      scaling_adjustment          = 5
+      metric_interval_lower_bound = 100
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "detection_consumer_scale_down" {
+  name               = "${var.app_name}-detection-consumer-scale-down"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.detection_consumer.resource_id
+  scalable_dimension = aws_appautoscaling_target.detection_consumer.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.detection_consumer.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 300
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = -1
+      metric_interval_upper_bound = 0
+    }
+  }
+}
+
+# CloudWatch Alarms for Detection queue scaling
+resource "aws_cloudwatch_metric_alarm" "detection_queue_high" {
+  alarm_name          = "${var.app_name}-detection-queue-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_description   = "Scale up when messages in detection queue"
+
+  dimensions = {
+    QueueName = "detection-queue"
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.detection_consumer_scale_up.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "detection_queue_low" {
+  alarm_name          = "${var.app_name}-detection-queue-empty"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  evaluation_periods  = 5
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_description   = "Scale down when detection queue is empty"
+
+  dimensions = {
+    QueueName = "detection-queue"
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.detection_consumer_scale_down.arn]
 }
 
 # Auto-scaling for RMS Enrichment based on SQS queue depth
@@ -556,7 +728,7 @@ resource "aws_ecs_task_definition" "cloudbeds_enrichment" {
     name  = "enrichment"
     image = "${var.ecr_repo_url}:latest"
     
-    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "cloudbeds", "--limit", "500", "--concurrency", "20"]
+    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "cloudbeds", "--limit", "2000", "--concurrency", "100"]
     
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" }
@@ -594,7 +766,7 @@ resource "aws_ecs_task_definition" "rms_api_enrichment" {
     name  = "enrichment"
     image = "${var.ecr_repo_url}:latest"
     
-    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "rms", "--limit", "200", "--concurrency", "10"]
+    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "rms", "--limit", "1000", "--concurrency", "100"]
     
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" }
@@ -632,7 +804,7 @@ resource "aws_ecs_task_definition" "siteminder_enrichment" {
     name  = "enrichment"
     image = "${var.ecr_repo_url}:latest"
     
-    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "siteminder", "--limit", "200", "--concurrency", "20"]
+    command = ["uv", "run", "python", "workflows/enrich_booking_engines.py", "siteminder", "--limit", "1000", "--concurrency", "100"]
     
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" }
@@ -795,6 +967,490 @@ resource "aws_cloudwatch_event_target" "proximity_enrichment" {
   }
 }
 
+# =============================================================================
+# ENQUEUE TASKS (fill SQS queues for consumers)
+# =============================================================================
+
+# Task Definition - Cloudbeds Enqueue
+resource "aws_ecs_task_definition" "cloudbeds_enqueue" {
+  family                   = "${var.app_name}-cloudbeds-enqueue"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "enqueue"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/enrich_cloudbeds_enqueue.py", "--limit", "5000"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "SQS_CLOUDBEDS_ENRICHMENT_QUEUE_URL", valueFrom = "/${var.app_name}/sqs-cloudbeds-enrichment-queue-url" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "cloudbeds-enqueue"
+      }
+    }
+  }])
+}
+
+# EventBridge Rule - Cloudbeds Enqueue (every 15 min)
+resource "aws_cloudwatch_event_rule" "cloudbeds_enqueue" {
+  name                = "${var.app_name}-cloudbeds-enqueue"
+  description         = "Enqueue Cloudbeds hotels for enrichment every 15 minutes"
+  schedule_expression = "rate(15 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "cloudbeds_enqueue" {
+  rule      = aws_cloudwatch_event_rule.cloudbeds_enqueue.name
+  target_id = "cloudbeds-enqueue"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.cloudbeds_enqueue.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# Task Definition - RMS Enqueue
+resource "aws_ecs_task_definition" "rms_enqueue" {
+  family                   = "${var.app_name}-rms-enqueue"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "enqueue"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/enrich_rms_enqueue.py", "--limit", "5000"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "SQS_RMS_ENRICHMENT_QUEUE_URL", valueFrom = "/${var.app_name}/sqs-rms-enrichment-queue-url" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "rms-enqueue"
+      }
+    }
+  }])
+}
+
+# Task Definition - Detection Enqueue
+resource "aws_ecs_task_definition" "detection_enqueue" {
+  family                   = "${var.app_name}-detection-enqueue"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "enqueue"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/enqueue_detection.py", "--limit", "5000"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "SQS_DETECTION_QUEUE_URL", valueFrom = "/${var.app_name}/sqs-detection-queue-url" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "detection-enqueue"
+      }
+    }
+  }])
+}
+
+# EventBridge Rule - Detection Enqueue (every 30 min)
+resource "aws_cloudwatch_event_rule" "detection_enqueue" {
+  name                = "${var.app_name}-detection-enqueue"
+  description         = "Enqueue hotels for detection every 30 minutes"
+  schedule_expression = "rate(30 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "detection_enqueue" {
+  rule      = aws_cloudwatch_event_rule.detection_enqueue.name
+  target_id = "detection-enqueue"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.detection_enqueue.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# EventBridge Rule - RMS Enqueue (every 4 hours)
+resource "aws_cloudwatch_event_rule" "rms_enqueue" {
+  name                = "${var.app_name}-rms-enqueue"
+  description         = "Enqueue RMS hotels for enrichment every 4 hours"
+  schedule_expression = "rate(4 hours)"
+}
+
+resource "aws_cloudwatch_event_target" "rms_enqueue" {
+  rule      = aws_cloudwatch_event_rule.rms_enqueue.name
+  target_id = "rms-enqueue"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.rms_enqueue.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# =============================================================================
+# ROOM COUNT ENRICHMENT (Groq LLM)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "room_count_enrichment" {
+  family                   = "${var.app_name}-room-count-enrichment"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "enrichment"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/enrichment.py", "room-counts", "--limit", "100"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "GROQ_API_KEY", valueFrom = "/${var.app_name}/groq-api-key" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "room-count-enrichment"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "room_count_enrichment" {
+  name                = "${var.app_name}-room-count-enrichment"
+  description         = "Enrich hotels with room counts every 2 minutes"
+  schedule_expression = "rate(2 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "room_count_enrichment" {
+  rule      = aws_cloudwatch_event_rule.room_count_enrichment.name
+  target_id = "room-count-enrichment"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.room_count_enrichment.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# =============================================================================
+# LAUNCHER (mark fully enriched hotels as live)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "launcher" {
+  family                   = "${var.app_name}-launcher"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "launcher"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/launcher.py", "launch-all"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "launcher"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "launcher" {
+  name                = "${var.app_name}-launcher"
+  description         = "Launch fully enriched hotels every 2 minutes"
+  schedule_expression = "rate(2 minutes)"
+}
+
+resource "aws_cloudwatch_event_target" "launcher" {
+  rule      = aws_cloudwatch_event_rule.launcher.name
+  target_id = "launcher"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.launcher.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# =============================================================================
+# EXPORTS (S3)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "export_states" {
+  family                   = "${var.app_name}-export-states"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "export"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/export.py", "--all"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "AWS_ACCESS_KEY_ID", valueFrom = "/${var.app_name}/aws-access-key-id" },
+      { name = "AWS_SECRET_ACCESS_KEY", valueFrom = "/${var.app_name}/aws-secret-access-key" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "export-states"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "export_states" {
+  name                = "${var.app_name}-export-states"
+  description         = "Export all state reports to S3 every 6 hours"
+  schedule_expression = "rate(6 hours)"
+}
+
+resource "aws_cloudwatch_event_target" "export_states" {
+  rule      = aws_cloudwatch_event_rule.export_states.name
+  target_id = "export-states"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.export_states.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+resource "aws_ecs_task_definition" "export_crawl" {
+  family                   = "${var.app_name}-export-crawl"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "export"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "-m", "workflows.export_crawl", "--all"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "AWS_ACCESS_KEY_ID", valueFrom = "/${var.app_name}/aws-access-key-id" },
+      { name = "AWS_SECRET_ACCESS_KEY", valueFrom = "/${var.app_name}/aws-secret-access-key" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "export-crawl"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "export_crawl" {
+  name                = "${var.app_name}-export-crawl"
+  description         = "Export crawl data by booking engine every 6 hours"
+  schedule_expression = "rate(6 hours)"
+}
+
+resource "aws_cloudwatch_event_target" "export_crawl" {
+  rule      = aws_cloudwatch_event_rule.export_crawl.name
+  target_id = "export-crawl"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.export_crawl.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# =============================================================================
+# NORMALIZE STATES (one-time or periodic cleanup)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "normalize_states" {
+  family                   = "${var.app_name}-normalize-states"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "normalize"
+    image = "${var.ecr_repo_url}:latest"
+    
+    command = ["uv", "run", "python", "workflows/normalize_states.py"]
+    
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+    
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" }
+    ]
+    
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "normalize-states"
+      }
+    }
+  }])
+}
+
+# Note: normalize_states is run on-demand, not scheduled
+# To run manually: aws ecs run-task --cluster sadie-gtm-cluster --task-definition sadie-gtm-normalize-states ...
+
 # Outputs
 output "cluster_name" {
   value = aws_ecs_cluster.main.name
@@ -812,11 +1468,36 @@ output "cloudbeds_consumer_service_name" {
   value = aws_ecs_service.cloudbeds_consumer.name
 }
 
+output "detection_consumer_service_name" {
+  value = aws_ecs_service.detection_consumer.name
+}
+
 output "scheduled_tasks" {
   value = {
-    cloudbeds  = aws_cloudwatch_event_rule.cloudbeds_enrichment.name
-    rms_api    = aws_cloudwatch_event_rule.rms_api_enrichment.name
-    siteminder = aws_cloudwatch_event_rule.siteminder_enrichment.name
-    proximity  = aws_cloudwatch_event_rule.proximity_enrichment.name
+    # Enrichment tasks
+    cloudbeds_enrichment  = aws_cloudwatch_event_rule.cloudbeds_enrichment.name
+    rms_api_enrichment    = aws_cloudwatch_event_rule.rms_api_enrichment.name
+    siteminder_enrichment = aws_cloudwatch_event_rule.siteminder_enrichment.name
+    proximity_enrichment  = aws_cloudwatch_event_rule.proximity_enrichment.name
+    room_count_enrichment = aws_cloudwatch_event_rule.room_count_enrichment.name
+    
+    # Enqueue tasks
+    cloudbeds_enqueue = aws_cloudwatch_event_rule.cloudbeds_enqueue.name
+    rms_enqueue       = aws_cloudwatch_event_rule.rms_enqueue.name
+    detection_enqueue = aws_cloudwatch_event_rule.detection_enqueue.name
+    
+    # Launcher
+    launcher = aws_cloudwatch_event_rule.launcher.name
+    
+    # Exports
+    export_states = aws_cloudwatch_event_rule.export_states.name
+    export_crawl  = aws_cloudwatch_event_rule.export_crawl.name
+  }
+}
+
+output "on_demand_tasks" {
+  description = "Tasks that can be run manually via aws ecs run-task"
+  value = {
+    normalize_states = aws_ecs_task_definition.normalize_states.family
   }
 }

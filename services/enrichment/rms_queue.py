@@ -5,9 +5,10 @@ from typing import Optional, List
 
 from lib.rms import RMSHotelRecord, QueueStats, QueueMessage
 from infra.sqs import (
-    send_message,
+    send_messages_batch,
     receive_messages,
     delete_message,
+    delete_messages_batch,
     get_queue_attributes,
 )
 
@@ -36,13 +37,16 @@ class RMSQueue:
     
     def enqueue_hotels(self, hotels: List[RMSHotelRecord], batch_size: int = 10) -> int:
         """Enqueue hotels for enrichment."""
-        enqueued = 0
+        # Build all messages first
+        messages = []
         for i in range(0, len(hotels), batch_size):
             batch = hotels[i:i + batch_size]
-            message = {"hotels": [{"hotel_id": h.hotel_id, "booking_url": h.booking_url} for h in batch]}
-            send_message(self.queue_url, message)
-            enqueued += len(batch)
-        return enqueued
+            messages.append({"hotels": [{"hotel_id": h.hotel_id, "booking_url": h.booking_url} for h in batch]})
+        
+        # Send all messages in batches of 10 (SQS limit)
+        sent = send_messages_batch(self.queue_url, messages)
+        # Return actual hotel count (sent messages * batch_size, capped at total hotels)
+        return min(sent * batch_size, len(hotels))
     
     def receive_messages(self, max_messages: int = 10) -> List[QueueMessage]:
         """Receive messages from queue."""
@@ -62,6 +66,10 @@ class RMSQueue:
     def delete_message(self, receipt_handle: str) -> None:
         """Delete a processed message."""
         delete_message(self.queue_url, receipt_handle)
+    
+    def delete_messages_batch(self, receipt_handles: List[str]) -> int:
+        """Delete multiple messages in batch."""
+        return delete_messages_batch(self.queue_url, receipt_handles)
 
 
 class MockQueue:
@@ -88,3 +96,8 @@ class MockQueue:
     
     def delete_message(self, receipt_handle: str) -> None:
         self.in_flight = max(0, self.in_flight - 1)
+    
+    def delete_messages_batch(self, receipt_handles: List[str]) -> int:
+        deleted = len(receipt_handles)
+        self.in_flight = max(0, self.in_flight - deleted)
+        return deleted

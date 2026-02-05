@@ -31,13 +31,30 @@ AU_STATES = {
 STATE_NAMES = {name.lower(): name for name in US_STATES.values()}
 STATE_ABBREVS = {abbrev.lower(): full for abbrev, full in US_STATES.items()}
 
+# Valid full state names (for validation)
+VALID_STATE_NAMES = set(US_STATES.values())
+
+# Common variations/typos that map to valid states
+STATE_VARIATIONS = {
+    # Case variations
+    "CALIFORNIA": "California", "TEXAS": "Texas", "FLORIDA": "Florida",
+    "NEW YORK": "New York", "GEORGIA": "Georgia",
+    # Lowercase
+    "california": "California", "texas": "Texas", "florida": "Florida",
+    # Typos and variations
+    "Calif": "California", "Calif.": "California", "Ca": "California",
+    "Tx": "Texas", "Fl": "Florida", "Ny": "New York", "N.Y.": "New York",
+    "D.C.": "District of Columbia", "Washington DC": "District of Columbia",
+    "Washington D.C.": "District of Columbia",
+}
+
 
 def normalize_state(state: Optional[str], country: Optional[str] = None) -> Optional[str]:
     """Normalize state abbreviation to full name.
     
     Args:
         state: State value (could be abbreviation or full name)
-        country: Country hint (unused currently, but available for future logic)
+        country: Country hint to resolve ambiguous abbreviations (e.g., WA, SA)
     
     Returns:
         Full state name if abbreviation found, otherwise original value
@@ -46,12 +63,27 @@ def normalize_state(state: Optional[str], country: Optional[str] = None) -> Opti
         return state
     
     state_upper = state.upper().strip()
+    country_lower = country.lower().strip() if country else None
     
-    # Check Australian states first (avoid WA conflict with Washington)
+    # Use country context to resolve conflicts (WA = Washington vs Western Australia)
+    if country_lower in ('united states', 'usa', 'us', 'united states of america'):
+        # US context - check US states only
+        if state_upper in US_STATES:
+            return US_STATES[state_upper]
+        return state
+    
+    if country_lower in ('australia', 'au'):
+        # Australian context - check AU states only
+        if state_upper in AU_STATES:
+            return AU_STATES[state_upper]
+        return state
+    
+    # No country context - check AU first for safety (less common)
+    # This avoids accidentally converting "WA" to "Washington" for Australian hotels
     if state_upper in AU_STATES:
         return AU_STATES[state_upper]
     
-    # Check US states
+    # Then check US states
     if state_upper in US_STATES:
         return US_STATES[state_upper]
     
@@ -131,3 +163,80 @@ def extract_state(address: Optional[str], city: Optional[str]) -> Optional[str]:
             return state
     
     return None
+
+
+# Known garbage/invalid state values to reject
+GARBAGE_STATES = {
+    '-', '--', 'XX', 'N/A', 'NA', 'NONE', 'NULL', 'UNKNOWN', 'OTHER',
+    'MEASURE', 'TEST', 'TBD', 'TBA', 'PENDING', '.',
+}
+
+
+def is_valid_state(state: str, country: Optional[str] = None) -> bool:
+    """Check if a state value is valid (not garbage).
+    
+    Args:
+        state: State value to validate
+        country: Optional country for context-aware validation
+        
+    Returns:
+        True if state appears valid, False if garbage
+    """
+    if not state:
+        return False
+    
+    state_stripped = state.strip()
+    
+    # Check against known garbage values
+    if state_stripped.upper() in GARBAGE_STATES:
+        return False
+    
+    # Too short (single char) is garbage
+    if len(state_stripped) < 2:
+        return False
+    
+    # If we have country context, validate against known states
+    if country:
+        country_lower = country.lower().strip()
+        
+        # US context - must be valid US state
+        if country_lower in ('united states', 'usa', 'us', 'united states of america'):
+            state_upper = state_stripped.upper()
+            # Valid if it's a full name or abbreviation
+            return (
+                state_stripped in VALID_STATE_NAMES or
+                state_upper in US_STATES or
+                state_stripped in STATE_VARIATIONS
+            )
+        
+        # Australia context
+        if country_lower in ('australia', 'au'):
+            state_upper = state_stripped.upper()
+            au_full_names = set(AU_STATES.values())
+            return state_upper in AU_STATES or state_stripped in au_full_names
+    
+    # Without country context, just reject known garbage
+    return True
+
+
+def validate_and_normalize_state(state: str, country: Optional[str] = None) -> Optional[str]:
+    """Validate and normalize a state value. Returns None if invalid.
+    
+    Use this when saving state values to ensure no garbage gets persisted.
+    
+    Args:
+        state: State value to validate and normalize
+        country: Country for context-aware normalization
+        
+    Returns:
+        Normalized state name if valid, None if garbage/invalid
+    """
+    if not state:
+        return None
+    
+    # Check if it's garbage
+    if not is_valid_state(state, country):
+        return None
+    
+    # Normalize and return
+    return normalize_state(state, country)

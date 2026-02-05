@@ -313,7 +313,7 @@ WHERE h.state = :state
 
 -- name: get_leads_by_booking_engine
 -- Get hotel leads by booking engine name and source pattern
--- For crawl data exports (doesn't require launched status)
+-- Only exports launched hotels with active booking engine status
 SELECT
     h.id,
     h.name AS hotel_name,
@@ -342,8 +342,9 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE be.name = :booking_engine
-  AND h.source LIKE :source_pattern
-ORDER BY h.city, h.name;
+  AND h.status = 1
+  AND hbe.status = 1
+ORDER BY h.country, h.state, h.city, h.name;
 
 -- name: get_leads_by_source
 -- Get hotel leads by source pattern (for IPMS247, etc.)
@@ -1192,8 +1193,11 @@ ORDER BY state;
 
 -- name: get_hotels_needing_geocoding
 -- Get hotels with names but missing location data (for Serper Places geocoding)
--- Targets crawl data hotels that have been name-enriched but need location
--- NOTE: Excludes Cloudbeds (handled by booking page enrichment with archive fallback)
+-- Targets hotels that have been name-enriched but need location (city or state)
+-- Uses same name validation as launcher to exclude junk names (see launch_conditions.py)
+-- Use :engine parameter to filter by booking engine (e.g., 'Cloudbeds', 'RMS Cloud')
+-- When :engine is NULL, excludes Cloudbeds by default (handled by booking page enrichment)
+-- Note: Hotels with valid 2-letter state abbreviations (CA, TX) don't need geocoding - just normalization
 SELECT 
     h.id,
     h.name,
@@ -1205,30 +1209,84 @@ SELECT
     hbe.booking_url,
     be.name as engine_name
 FROM sadie_gtm.hotels h
-LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-WHERE h.name IS NOT NULL 
-  AND h.name != ''
-  AND h.name NOT LIKE 'Unknown%'
-  AND (h.city IS NULL OR h.city = '')
-  AND (be.name IS NULL OR be.name != 'Cloudbeds')  -- Exclude Cloudbeds
+WHERE 
+  -- Not rejected
+  h.status >= 0
+  -- Missing location (need geocoding) - empty state, not abbreviations
+  AND ((h.city IS NULL OR h.city = '') OR (h.state IS NULL OR h.state = ''))
+  -- Engine filter
+  AND (
+    CAST(:engine AS TEXT) IS NOT NULL AND be.name = :engine  -- Filter by specific engine
+    OR (CAST(:engine AS TEXT) IS NULL AND (be.name IS NULL OR be.name != 'Cloudbeds'))  -- Default: exclude Cloudbeds
+  )
   AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source)
+  AND (CAST(:country AS TEXT) IS NULL OR h.country = :country)
+  -- Name validation (same as launcher - see launch_conditions.py)
+  AND h.name IS NOT NULL
+  AND h.name != ''
+  AND h.name != ' '
+  AND LENGTH(h.name) > 2
+  AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Book Now', 'Book Now Pay on Check-in', 
+      'Booking Engine', 'DEACTIVATED ACCOUNT DO NO BOOK', 'Error', 'Hotel', 'Hotel Booking Engine',
+      'Modify/Cancel reservation', 'My reservations', 'Online Bookings', 'Rates', 'Reservation', 
+      'Reservations', 'Search', 'View or Change a Reservation')
+  AND h.name NOT ILIKE '%test%'
+  AND h.name NOT ILIKE '%demo%'
+  AND h.name NOT ILIKE '%sandbox%'
+  AND h.name NOT ILIKE '%sample%'
+  AND h.name NOT ILIKE 'unknown%'
+  AND h.name NOT ILIKE '%internal%server%error%'
+  AND h.name NOT ILIKE '%check availability%'
+  AND h.name NOT ILIKE '%booking engine%'
+  AND h.name NOT LIKE '% RMS %'
+  AND h.name NOT LIKE 'RMS %'
+  AND h.name NOT LIKE '% RMS'
+  AND h.name !~ '^[0-9-]+$'
 ORDER BY h.id
 LIMIT :limit;
 
 
 -- name: get_hotels_needing_geocoding_count^
--- Count hotels needing geocoding
+-- Count hotels needing geocoding (uses same filters as above)
 SELECT COUNT(*) as count
 FROM sadie_gtm.hotels h
-LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-WHERE h.name IS NOT NULL 
+WHERE 
+  -- Not rejected
+  h.status >= 0
+  -- Missing location (need geocoding) - empty state, not abbreviations
+  AND ((h.city IS NULL OR h.city = '') OR (h.state IS NULL OR h.state = ''))
+  -- Engine filter
+  AND (
+    CAST(:engine AS TEXT) IS NOT NULL AND be.name = :engine  -- Filter by specific engine
+    OR (CAST(:engine AS TEXT) IS NULL AND (be.name IS NULL OR be.name != 'Cloudbeds'))  -- Default: exclude Cloudbeds
+  )
+  AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source)
+  AND (CAST(:country AS TEXT) IS NULL OR h.country = :country)
+  -- Name validation (same as launcher - see launch_conditions.py)
+  AND h.name IS NOT NULL
   AND h.name != ''
-  AND h.name NOT LIKE 'Unknown%'
-  AND (h.city IS NULL OR h.city = '')
-  AND (be.name IS NULL OR be.name != 'Cloudbeds')  -- Exclude Cloudbeds
-  AND (CAST(:source AS TEXT) IS NULL OR h.source LIKE :source);
+  AND h.name != ' '
+  AND LENGTH(h.name) > 2
+  AND h.name NOT IN ('&#65279;', '-', '--', '---', '.', '..', 'Book Now', 'Book Now Pay on Check-in', 
+      'Booking Engine', 'DEACTIVATED ACCOUNT DO NO BOOK', 'Error', 'Hotel', 'Hotel Booking Engine',
+      'Modify/Cancel reservation', 'My reservations', 'Online Bookings', 'Rates', 'Reservation', 
+      'Reservations', 'Search', 'View or Change a Reservation')
+  AND h.name NOT ILIKE '%test%'
+  AND h.name NOT ILIKE '%demo%'
+  AND h.name NOT ILIKE '%sandbox%'
+  AND h.name NOT ILIKE '%sample%'
+  AND h.name NOT ILIKE 'unknown%'
+  AND h.name NOT ILIKE '%internal%server%error%'
+  AND h.name NOT ILIKE '%check availability%'
+  AND h.name NOT ILIKE '%booking engine%'
+  AND h.name NOT LIKE '% RMS %'
+  AND h.name NOT LIKE 'RMS %'
+  AND h.name NOT LIKE '% RMS'
+  AND h.name !~ '^[0-9-]+$';
 
 
 -- name: update_hotel_geocoding!

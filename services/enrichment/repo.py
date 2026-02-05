@@ -521,22 +521,37 @@ class HotelGeocodingCandidate(BaseModel):
 async def get_hotels_needing_geocoding(
     limit: int = 1000,
     source: Optional[str] = None,
+    engine: Optional[str] = None,
+    country: Optional[str] = None,
 ) -> List[HotelGeocodingCandidate]:
-    """Get hotels with names but missing location data for Serper Places geocoding."""
+    """Get hotels with names but missing location data for Serper Places geocoding.
+    
+    Args:
+        limit: Max hotels to return
+        source: Optional source filter (e.g., 'cloudbeds_crawl')
+        engine: Optional booking engine filter (e.g., 'Cloudbeds', 'RMS Cloud')
+                When specified, filters to that engine only.
+                When None, excludes Cloudbeds by default.
+        country: Optional country filter (e.g., 'United States')
+    """
     async with get_conn() as conn:
         source_pattern = f"%{source}%" if source else None
         results = await queries.get_hotels_needing_geocoding(
-            conn, limit=limit, source=source_pattern
+            conn, limit=limit, source=source_pattern, engine=engine, country=country
         )
         return [HotelGeocodingCandidate.model_validate(dict(row)) for row in results]
 
 
-async def get_hotels_needing_geocoding_count(source: Optional[str] = None) -> int:
+async def get_hotels_needing_geocoding_count(
+    source: Optional[str] = None,
+    engine: Optional[str] = None,
+    country: Optional[str] = None,
+) -> int:
     """Count hotels needing geocoding."""
     async with get_conn() as conn:
         source_pattern = f"%{source}%" if source else None
         result = await queries.get_hotels_needing_geocoding_count(
-            conn, source=source_pattern
+            conn, source=source_pattern, engine=engine, country=country
         )
         return result["count"] if result else 0
 

@@ -89,7 +89,7 @@ async def run_consumer(concurrency: int = 20, use_legacy: bool = False, use_brig
 
 def main():
     parser = argparse.ArgumentParser(description="Cloudbeds enrichment consumer")
-    parser.add_argument("--concurrency", type=int, default=20, help="Concurrent requests (default 20 for API, 6 for legacy)")
+    parser.add_argument("--concurrency", type=int, default=100, help="Concurrent requests (default 100 for API, 6 for legacy)")
     parser.add_argument("--legacy", action="store_true", help="Use legacy Playwright-based consumer")
     parser.add_argument("--no-proxy", action="store_true", help="Disable Brightdata proxy")
 
@@ -97,7 +97,7 @@ def main():
     
     # Adjust default concurrency for legacy mode
     concurrency = args.concurrency
-    if args.legacy and args.concurrency == 20:
+    if args.legacy and args.concurrency == 100:
         concurrency = 6  # Lower for Playwright
     
     asyncio.run(run_consumer(

@@ -37,20 +37,26 @@ def send_message(queue_url: str, body: Dict[str, Any]) -> str:
     return response["MessageId"]
 
 
-def send_messages_batch(queue_url: str, messages: List[Dict[str, Any]]) -> int:
-    """Send multiple messages to SQS in batches of 10.
+def send_messages_batch(queue_url: str, messages: List[Dict[str, Any]], concurrency: int = 20) -> int:
+    """Send multiple messages to SQS in batches of 10, with concurrent API calls.
 
     Args:
         queue_url: SQS queue URL
         messages: List of message bodies (dicts)
+        concurrency: Max concurrent API calls (default 20)
 
     Returns:
         Number of messages successfully sent.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    if not messages:
+        return 0
+    
     client = get_sqs_client()
-    sent_count = 0
 
-    # SQS allows max 10 messages per batch
+    # Prepare all batches (SQS allows max 10 messages per batch)
+    batches = []
     for i in range(0, len(messages), 10):
         batch = messages[i:i + 10]
         entries = [
@@ -60,17 +66,25 @@ def send_messages_batch(queue_url: str, messages: List[Dict[str, Any]]) -> int:
             }
             for idx, msg in enumerate(batch)
         ]
-
+        batches.append(entries)
+    
+    def send_batch(entries):
         response = client.send_message_batch(
             QueueUrl=queue_url,
             Entries=entries,
         )
-
-        sent_count += len(response.get("Successful", []))
-
-        if response.get("Failed"):
-            for failure in response["Failed"]:
+        failed = response.get("Failed", [])
+        if failed:
+            for failure in failed:
                 logger.error(f"Failed to send message: {failure}")
+        return len(response.get("Successful", []))
+    
+    # Send batches concurrently
+    sent_count = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [executor.submit(send_batch, batch) for batch in batches]
+        for future in as_completed(futures):
+            sent_count += future.result()
 
     return sent_count
 

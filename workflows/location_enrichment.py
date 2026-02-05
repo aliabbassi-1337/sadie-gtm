@@ -5,12 +5,16 @@ USAGE:
 1. Check status:
    uv run python workflows/location_enrichment.py status
 
-2. Enrich locations (respects Nominatim rate limit of 1 req/sec):
-   uv run python workflows/location_enrichment.py enrich --limit 100
+2. Enrich locations using Serper (fast, concurrent):
+   uv run python workflows/location_enrichment.py enrich --limit 100 --concurrency 50
+
+3. Enrich locations using Nominatim (free, slow - 1 req/sec):
+   uv run python workflows/location_enrichment.py enrich --limit 100 --use-nominatim
 
 NOTES:
-- Uses OpenStreetMap Nominatim API (free, 1 request per second rate limit)
-- Only processes hotels that have coordinates but missing city
+- Default uses Serper Places API (fast, supports concurrency)
+- Optional: Use Nominatim (free, 1 request per second rate limit) with --use-nominatim
+- Only processes hotels that have coordinates but missing state
 - Normalizes state abbreviations to full names (CA -> California)
 - Idempotent (can be re-run safely)
 """
@@ -29,7 +33,12 @@ from services.enrichment.service import Service
 from infra import slack
 
 
-async def run_location_enrichment(limit: int, notify: bool = True) -> None:
+async def run_location_enrichment(
+    limit: int,
+    concurrency: int = 10,
+    use_nominatim: bool = False,
+    notify: bool = True,
+) -> None:
     """Run location enrichment for hotels missing city data."""
     await init_db()
     try:
@@ -44,7 +53,14 @@ async def run_location_enrichment(limit: int, notify: bool = True) -> None:
             return
 
         # Run enrichment
-        stats = await service.enrich_locations_reverse_geocode(limit=limit)
+        api_name = "Nominatim" if use_nominatim else "Serper"
+        logger.info(f"Using {api_name} API (concurrency={concurrency})")
+        
+        stats = await service.enrich_locations_reverse_geocode(
+            limit=limit,
+            concurrency=concurrency,
+            use_nominatim=use_nominatim,
+        )
 
         logger.info("=" * 60)
         logger.info("LOCATION ENRICHMENT COMPLETE")
@@ -92,8 +108,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Enrich locations for up to 100 hotels
-  uv run python workflows/location_enrichment.py enrich --limit 100
+  # Enrich locations using Serper (fast, default)
+  uv run python workflows/location_enrichment.py enrich --limit 100 --concurrency 10
+
+  # Enrich locations using Nominatim (free but slow)
+  uv run python workflows/location_enrichment.py enrich --limit 100 --use-nominatim
 
   # Check status
   uv run python workflows/location_enrichment.py status
@@ -114,6 +133,17 @@ Examples:
         help="Max hotels to process (default: 100)"
     )
     enrich_parser.add_argument(
+        "--concurrency", "-c",
+        type=int,
+        default=50,
+        help="Number of concurrent requests (default: 50, only for Serper)"
+    )
+    enrich_parser.add_argument(
+        "--use-nominatim",
+        action="store_true",
+        help="Use free Nominatim API (slow, 1 req/sec) instead of Serper"
+    )
+    enrich_parser.add_argument(
         "--no-notify",
         action="store_true",
         help="Disable Slack notification"
@@ -128,9 +158,11 @@ Examples:
     logger.add(sys.stderr, level="INFO", format="<level>{level: <8}</level> | {message}")
 
     if args.command == "enrich":
-        logger.info(f"Running location enrichment (limit={args.limit})")
+        logger.info(f"Running location enrichment (limit={args.limit}, concurrency={args.concurrency})")
         asyncio.run(run_location_enrichment(
             limit=args.limit,
+            concurrency=args.concurrency,
+            use_nominatim=args.use_nominatim,
             notify=not args.no_notify,
         ))
     elif args.command == "status":

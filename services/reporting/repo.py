@@ -196,6 +196,29 @@ async def get_distinct_states() -> List[str]:
         return [r["state"] for r in results]
 
 
+async def get_distinct_states_for_country(country: str) -> List[str]:
+    """Get all distinct states for a specific country that have launched leads.
+    
+    Only returns full state names (not abbreviations like CA, FL, TX, NSW, QLD).
+    """
+    async with get_conn() as conn:
+        results = await conn.fetch("""
+            SELECT DISTINCT h.state
+            FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id
+            WHERE h.country = $1
+              AND h.status = 1
+              AND hbe.status = 1
+              AND h.state IS NOT NULL
+              AND h.state != ''
+              AND LENGTH(h.state) > 3  -- Exclude abbreviations (US 2-char, AU 3-char)
+              AND h.state NOT LIKE '%-%'  -- Exclude junk like '-'
+              AND h.state NOT IN ('ACT', 'NSW', 'QLD', 'VIC', 'TAS', 'WA', 'SA', 'NT')  -- Exclude AU abbrevs
+            ORDER BY h.state
+        """, country)
+        return [r["state"] for r in results]
+
+
 # ============================================================================
 # ENRICHMENT STATS FUNCTIONS
 # ============================================================================

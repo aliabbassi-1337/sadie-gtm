@@ -11,7 +11,10 @@ USAGE:
 3. Launch a batch of ready hotels:
    uv run python workflows/launcher.py launch --limit 100
 
-LAUNCH CRITERIA (all required):
+4. Debug why hotels aren't launching:
+   uv run python workflows/launcher.py debug --hotel-id 12345
+
+LAUNCH CRITERIA (defined in services/reporting/launch_conditions.py):
 - status = 0 (pending)
 - valid name (not null, not empty, not junk/test names)
 - state + country (location required, city optional)
@@ -37,8 +40,9 @@ import asyncio
 import argparse
 from loguru import logger
 
-from db.client import init_db, close_db
+from db.client import init_db, close_db, get_conn
 from services.reporting.service import Service
+from services.reporting.launch_conditions import get_rejection_reason, is_launchable
 from infra import slack
 
 
@@ -89,6 +93,54 @@ async def preview_launchable(limit: int) -> None:
         logger.info(f"Showing {len(hotels)} of {total} total launchable hotels")
         logger.info("=" * 60)
 
+    finally:
+        await close_db()
+
+
+async def debug_hotel(hotel_id: int) -> None:
+    """Debug why a specific hotel isn't launching."""
+    await init_db()
+    try:
+        async with get_conn() as conn:
+            # Get hotel details
+            row = await conn.fetchrow("""
+                SELECT 
+                    h.id, h.name, h.status, h.state, h.country, h.city,
+                    hbe.status as be_status,
+                    be.name as booking_engine_name
+                FROM sadie_gtm.hotels h
+                LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+                LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+                WHERE h.id = $1
+            """, hotel_id)
+            
+            if not row:
+                logger.error(f"Hotel {hotel_id} not found")
+                return
+            
+            logger.info("=" * 60)
+            logger.info(f"DEBUG: Hotel {hotel_id}")
+            logger.info("=" * 60)
+            logger.info(f"Name: {row['name']}")
+            logger.info(f"Status: {row['status']}")
+            logger.info(f"Location: {row['city']}, {row['state']}, {row['country']}")
+            logger.info(f"Booking Engine: {row['booking_engine_name']} (status={row['be_status']})")
+            logger.info("")
+            
+            has_be = row['be_status'] == 1
+            reason = get_rejection_reason(
+                status=row['status'],
+                name=row['name'],
+                state=row['state'],
+                country=row['country'],
+                has_booking_engine=has_be,
+            )
+            
+            if reason:
+                logger.warning(f"NOT LAUNCHABLE: {reason}")
+            else:
+                logger.success("LAUNCHABLE: Hotel meets all criteria")
+                
     finally:
         await close_db()
 
@@ -162,6 +214,18 @@ Notes:
     # Status command
     subparsers.add_parser("status", help="Show launcher status")
 
+    # Debug command
+    debug_parser = subparsers.add_parser(
+        "debug",
+        help="Debug why a specific hotel isn't launching"
+    )
+    debug_parser.add_argument(
+        "--hotel-id", "-i",
+        type=int,
+        required=True,
+        help="Hotel ID to debug"
+    )
+
     # Preview command
     preview_parser = subparsers.add_parser(
         "preview",
@@ -201,6 +265,8 @@ Notes:
 
     if args.command == "status":
         asyncio.run(show_status())
+    elif args.command == "debug":
+        asyncio.run(debug_hotel(hotel_id=args.hotel_id))
     elif args.command == "preview":
         asyncio.run(preview_launchable(limit=args.limit))
     elif args.command == "launch":

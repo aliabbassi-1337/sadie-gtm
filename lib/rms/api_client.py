@@ -143,7 +143,7 @@ class RMSApiClient:
         """Get httpx client kwargs with optional proxy."""
         kwargs = {
             "timeout": self.timeout,
-            "limits": httpx.Limits(max_connections=100, max_keepalive_connections=50),
+            "limits": httpx.Limits(max_connections=200, max_keepalive_connections=100),
         }
         if self._proxy_url:
             kwargs["proxy"] = self._proxy_url

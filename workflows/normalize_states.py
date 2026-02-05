@@ -3,6 +3,8 @@ Workflow: Normalize State Names
 ===============================
 Normalizes US state abbreviations to full names and fixes common variations.
 
+Uses centralized state mappings from services/enrichment/state_utils.py
+
 USAGE:
     # Check what would be fixed (dry run)
     uv run python workflows/normalize_states.py --dry-run
@@ -24,67 +26,15 @@ import argparse
 from loguru import logger
 
 from db.client import init_db, close_db, get_conn
+from services.enrichment.state_utils import (
+    US_STATES,
+    AU_STATES,
+    GARBAGE_STATES,
+    normalize_state,
+)
 
 
-# US state abbreviations to full names
-US_STATES = {
-    "AL": "Alabama",
-    "AK": "Alaska",
-    "AZ": "Arizona",
-    "AR": "Arkansas",
-    "CA": "California",
-    "CO": "Colorado",
-    "CT": "Connecticut",
-    "DE": "Delaware",
-    "FL": "Florida",
-    "GA": "Georgia",
-    "HI": "Hawaii",
-    "ID": "Idaho",
-    "IL": "Illinois",
-    "IN": "Indiana",
-    "IA": "Iowa",
-    "KS": "Kansas",
-    "KY": "Kentucky",
-    "LA": "Louisiana",
-    "ME": "Maine",
-    "MD": "Maryland",
-    "MA": "Massachusetts",
-    "MI": "Michigan",
-    "MN": "Minnesota",
-    "MS": "Mississippi",
-    "MO": "Missouri",
-    "MT": "Montana",
-    "NE": "Nebraska",
-    "NV": "Nevada",
-    "NH": "New Hampshire",
-    "NJ": "New Jersey",
-    "NM": "New Mexico",
-    "NY": "New York",
-    "NC": "North Carolina",
-    "ND": "North Dakota",
-    "OH": "Ohio",
-    "OK": "Oklahoma",
-    "OR": "Oregon",
-    "PA": "Pennsylvania",
-    "RI": "Rhode Island",
-    "SC": "South Carolina",
-    "SD": "South Dakota",
-    "TN": "Tennessee",
-    "TX": "Texas",
-    "UT": "Utah",
-    "VT": "Vermont",
-    "VA": "Virginia",
-    "WA": "Washington",
-    "WV": "West Virginia",
-    "WI": "Wisconsin",
-    "WY": "Wyoming",
-    "DC": "District of Columbia",
-    "PR": "Puerto Rico",
-    "VI": "Virgin Islands",
-    "GU": "Guam",
-}
-
-# Common variations/typos to fix
+# Common variations/typos to fix (extends base mappings)
 STATE_VARIATIONS = {
     # Case variations (all caps)
     "ALABAMA": "Alabama",
@@ -156,6 +106,9 @@ STATE_VARIATIONS = {
     "Washington D.C.": "District of Columbia",
 }
 
+# Australian states that might be incorrectly in US data
+AU_STATE_NAMES = set(AU_STATES.values())
+
 
 async def get_state_variations():
     """Get all unique state values and their counts."""
@@ -172,7 +125,7 @@ async def get_state_variations():
         return [(r['state'], r['cnt']) for r in rows]
 
 
-async def normalize_state(old_value: str, new_value: str, dry_run: bool = False) -> int:
+async def normalize_state_in_db(old_value: str, new_value: str, dry_run: bool = False) -> int:
     """Normalize a state value to the correct full name."""
     async with get_conn() as conn:
         if dry_run:
@@ -192,11 +145,74 @@ async def normalize_state(old_value: str, new_value: str, dry_run: bool = False)
             return count
 
 
+async def fix_australian_states_in_us(dry_run: bool = False) -> int:
+    """Fix Australian states incorrectly marked as US."""
+    async with get_conn() as conn:
+        total = 0
+        for au_state in AU_STATE_NAMES:
+            if dry_run:
+                count = await conn.fetchval('''
+                    SELECT COUNT(*) FROM sadie_gtm.hotels 
+                    WHERE status != -1 AND country = 'United States' AND state = $1
+                ''', au_state)
+            else:
+                result = await conn.execute('''
+                    UPDATE sadie_gtm.hotels 
+                    SET country = 'Australia', updated_at = CURRENT_TIMESTAMP
+                    WHERE status != -1 AND country = 'United States' AND state = $1
+                ''', au_state)
+                count = int(result.split()[-1]) if result else 0
+            
+            if count > 0:
+                logger.warning(f"  Australian state in US: {au_state} ({count} hotels) -> country = Australia")
+                total += count
+        
+        return total
+
+
+async def fix_garbage_states(dry_run: bool = False) -> int:
+    """Set garbage state values to NULL."""
+    async with get_conn() as conn:
+        total = 0
+        for garbage in GARBAGE_STATES:
+            if dry_run:
+                count = await conn.fetchval('''
+                    SELECT COUNT(*) FROM sadie_gtm.hotels 
+                    WHERE status != -1 AND country = 'United States' AND state = $1
+                ''', garbage)
+            else:
+                result = await conn.execute('''
+                    UPDATE sadie_gtm.hotels 
+                    SET state = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE status != -1 AND country = 'United States' AND state = $1
+                ''', garbage)
+                count = int(result.split()[-1]) if result else 0
+            
+            if count > 0:
+                logger.info(f"  Garbage state: '{garbage}' ({count} hotels) -> NULL")
+                total += count
+        
+        return total
+
+
 async def run_normalization(dry_run: bool = False):
     """Run state normalization."""
     await init_db()
     
     try:
+        # First fix Australian states in US data
+        logger.info("Checking for Australian states in US data...")
+        au_fixed = await fix_australian_states_in_us(dry_run)
+        if au_fixed > 0:
+            logger.info(f"{'Would fix' if dry_run else 'Fixed'} {au_fixed} Australian states")
+        
+        # Fix garbage states
+        logger.info("Checking for garbage state values...")
+        garbage_fixed = await fix_garbage_states(dry_run)
+        if garbage_fixed > 0:
+            logger.info(f"{'Would fix' if dry_run else 'Fixed'} {garbage_fixed} garbage states")
+        
+        # Get current state variations
         variations = await get_state_variations()
         
         logger.info(f"Found {len(variations)} unique state values")
@@ -209,6 +225,12 @@ async def run_normalization(dry_run: bool = False):
         for state, count in variations:
             # Skip if already a valid full state name
             if state in valid_states:
+                continue
+            
+            # Use centralized normalize_state function
+            normalized = normalize_state(state, 'United States')
+            if normalized != state and normalized in valid_states:
+                fixes.append((state, normalized, count))
                 continue
                 
             # Check if it's an abbreviation
@@ -231,7 +253,7 @@ async def run_normalization(dry_run: bool = False):
         for old_val, new_val, count in fixes:
             logger.info(f"  \"{old_val}\" -> \"{new_val}\" ({count} hotels)")
             if not dry_run:
-                fixed = await normalize_state(old_val, new_val, dry_run=False)
+                fixed = await normalize_state_in_db(old_val, new_val, dry_run=False)
                 total_fixed += fixed
         
         if dry_run:
@@ -254,16 +276,24 @@ async def show_status():
         logger.info("=" * 50)
         
         needs_fix = []
+        valid_states = set(US_STATES.values())
         
         for state, count in variations:
+            # Check if it's an Australian state
+            if state in AU_STATE_NAMES:
+                needs_fix.append((state, f"country -> Australia", count))
+                logger.error(f"  {state:25} {count:6} (Australian state in US!)")
             # Check if it needs normalization
-            if state.upper() in US_STATES and state != US_STATES[state.upper()]:
+            elif state.upper() in US_STATES and state != US_STATES[state.upper()]:
                 needs_fix.append((state, US_STATES[state.upper()], count))
                 logger.warning(f"  {state:25} {count:6} -> {US_STATES[state.upper()]}")
             elif state in STATE_VARIATIONS or state.lower() in STATE_VARIATIONS:
                 target = STATE_VARIATIONS.get(state, STATE_VARIATIONS.get(state.lower()))
                 needs_fix.append((state, target, count))
                 logger.warning(f"  {state:25} {count:6} -> {target}")
+            elif state.upper() in GARBAGE_STATES or state in GARBAGE_STATES:
+                needs_fix.append((state, "NULL", count))
+                logger.warning(f"  {state:25} {count:6} -> NULL (garbage)")
             else:
                 logger.info(f"  {state:25} {count:6}")
         

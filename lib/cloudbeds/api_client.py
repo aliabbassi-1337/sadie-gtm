@@ -12,7 +12,7 @@ import httpx
 from loguru import logger
 
 
-API_TIMEOUT = 15.0
+API_TIMEOUT = 8.0  # Fast API, 8s is plenty
 
 
 def clean_phone(phone: Optional[str]) -> Optional[str]:
@@ -264,7 +264,8 @@ class CloudbedsApiClient:
                 "Referer": "https://hotels.cloudbeds.com/",
             },
             "follow_redirects": True,
-            "limits": httpx.Limits(max_connections=100, max_keepalive_connections=50),
+            "limits": httpx.Limits(max_connections=500, max_keepalive_connections=200),
+            "http2": True,  # Enable HTTP/2 for better connection reuse
         }
         if use_proxy and self._proxy_url:
             kwargs["proxy"] = self._proxy_url

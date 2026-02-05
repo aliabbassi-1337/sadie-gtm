@@ -6,6 +6,7 @@ import html
 import json
 import os
 import re
+import time
 
 import httpx
 from loguru import logger
@@ -1244,20 +1245,28 @@ class Service(IService):
     # GEOCODING BY NAME (Serper Places API)
     # =========================================================================
 
-    async def get_hotels_needing_geocoding_count(self, source: str = None) -> int:
-        """Count hotels needing geocoding (have name, missing city)."""
-        return await repo.get_hotels_needing_geocoding_count(source=source)
+    async def get_hotels_needing_geocoding_count(
+        self, source: str = None, engine: str = None, country: str = None
+    ) -> int:
+        """Count hotels needing geocoding (have name, missing city/state)."""
+        return await repo.get_hotels_needing_geocoding_count(
+            source=source, engine=engine, country=country
+        )
 
     async def get_hotels_needing_geocoding(
-        self, limit: int = 1000, source: str = None
+        self, limit: int = 1000, source: str = None, engine: str = None, country: str = None
     ) -> List[repo.HotelGeocodingCandidate]:
-        """Get hotels needing geocoding (have name, missing city)."""
-        return await repo.get_hotels_needing_geocoding(limit=limit, source=source)
+        """Get hotels needing geocoding (have name, missing city/state)."""
+        return await repo.get_hotels_needing_geocoding(
+            limit=limit, source=source, engine=engine, country=country
+        )
 
     async def geocode_hotels_by_name(
         self,
         limit: int = 100,
         source: str = None,
+        engine: str = None,
+        country: str = None,
         concurrency: int = 10,
     ) -> dict:
         """
@@ -1269,6 +1278,8 @@ class Service(IService):
         Args:
             limit: Max hotels to process
             source: Optional source filter (e.g., 'cloudbeds_crawl')
+            engine: Optional booking engine filter (e.g., 'Cloudbeds', 'RMS Cloud')
+            country: Optional country filter (e.g., 'United States')
             concurrency: Max concurrent API requests
 
         Returns dict with enriched/not_found/errors/api_calls counts.
@@ -1280,7 +1291,9 @@ class Service(IService):
             return {"total": 0, "enriched": 0, "not_found": 0, "errors": 0, "api_calls": 0}
 
         # Get hotels needing geocoding
-        hotels = await repo.get_hotels_needing_geocoding(limit=limit, source=source)
+        hotels = await repo.get_hotels_needing_geocoding(
+            limit=limit, source=source, engine=engine, country=country
+        )
 
         if not hotels:
             log("No hotels found needing geocoding")
@@ -1592,22 +1605,25 @@ class Service(IService):
                 continue
             empty_receives = 0
             logger.info(f"Processing {len(messages)} messages")
+            receipt_handles_to_delete = []
             for msg in messages:
                 if should_stop():
                     break
+                receipt_handles_to_delete.append(msg.receipt_handle)
                 if not msg.hotels:
-                    self._rms_queue.delete_message(msg.receipt_handle)
                     continue
                 try:
                     result = await self.enrich_rms_hotels(msg.hotels, concurrency, force_overwrite=force_overwrite)
                     hotels_processed += result.processed
                     hotels_enriched += result.enriched
                     hotels_failed += result.failed
-                    self._rms_queue.delete_message(msg.receipt_handle)
                     messages_processed += 1
                 except Exception as e:
                     logger.error(f"Error: {e}")
                     hotels_failed += len(msg.hotels)
+            # Batch delete all processed messages
+            if receipt_handles_to_delete:
+                await asyncio.to_thread(self._rms_queue.delete_messages_batch, receipt_handles_to_delete)
             logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched")
         return ConsumeResult(messages_processed=messages_processed, hotels_processed=hotels_processed, hotels_enriched=hotels_enriched, hotels_failed=hotels_failed)
 
@@ -1819,7 +1835,7 @@ class Service(IService):
     async def consume_cloudbeds_queue_api(
         self,
         queue_url: str,
-        concurrency: int = 20,
+        concurrency: int = 100,
         use_brightdata: bool = True,
         should_stop: Optional[Callable[[], bool]] = None,
     ) -> ConsumeResult:
@@ -1827,12 +1843,14 @@ class Service(IService):
         
         This is MUCH faster than the browser-based consumer:
         - No Playwright overhead
-        - High concurrency (20+)
+        - High concurrency (100+ concurrent API requests)
         - Gets lat/lng directly from API
+        - HTTP/2 connection pooling
+        - Non-blocking DB writes
         
         Args:
             queue_url: SQS queue URL
-            concurrency: Concurrent API requests (default 20)
+            concurrency: Concurrent API requests (default 100)
             use_brightdata: Use Brightdata proxy (recommended)
             should_stop: Callback to check if we should stop
         """
@@ -1848,14 +1866,18 @@ class Service(IService):
         
         batch_results = []
         batch_failed_ids = []
-        BATCH_SIZE = 50
-        VISIBILITY_TIMEOUT = 60  # Shorter timeout since API is fast
+        BATCH_SIZE = 200  # Larger batches = fewer DB round trips
+        VISIBILITY_TIMEOUT = 120  # 2 min to handle large batches
+        SQS_FETCH_PARALLEL = min(concurrency // 5, 50)  # Scale with concurrency
+        
+        # Background task for DB writes (don't block main loop)
+        pending_db_tasks = []
 
         # Use context manager for connection pooling
         async with CloudbedsApiClient(use_brightdata=use_brightdata) as client:
             semaphore = asyncio.Semaphore(concurrency)
 
-            logger.info(f"Starting Cloudbeds API consumer (concurrency={concurrency}, brightdata={use_brightdata}, connection_pooling=True)")
+            logger.info(f"Starting Cloudbeds API consumer (concurrency={concurrency}, brightdata={use_brightdata}, sqs_parallel={SQS_FETCH_PARALLEL})")
 
             async def process_message(msg: dict) -> tuple:
                 """Process a single SQS message."""
@@ -1881,32 +1903,36 @@ class Service(IService):
                         return (msg, hotel_id, False, None, str(e)[:50])
 
             empty_receives = 0
+            last_log_time = time.time()
+            
             while not should_stop():
                 # Receive multiple batches concurrently to maximize throughput
                 # SQS limits to 10 messages per request, so fetch multiple batches
-                # Use longer wait time for long-polling to avoid busy-waiting
                 batch_tasks = [
                     asyncio.to_thread(
                         receive_messages,
                         queue_url,
                         max_messages=10,
                         visibility_timeout=VISIBILITY_TIMEOUT,
-                        wait_time_seconds=1,  # Short poll for faster throughput
+                        wait_time_seconds=0,  # No wait - poll aggressively when queue has messages
                     )
-                    for _ in range(20)  # Fetch 20 batches = up to 200 messages
+                    for _ in range(SQS_FETCH_PARALLEL)
                 ]
                 batch_results_raw = await asyncio.gather(*batch_tasks)
                 messages = [m for batch in batch_results_raw if batch for m in batch]
 
                 if not messages:
                     empty_receives += 1
-                    if empty_receives % 6 == 0:  # Log every ~60 seconds (6 * 10s wait)
+                    if empty_receives >= 3:
+                        # Queue might be empty, switch to long polling
+                        await asyncio.sleep(2)
+                    if empty_receives % 10 == 0:
                         logger.info("Queue empty, waiting for messages...")
                     continue
                 
                 empty_receives = 0
 
-                # Process all messages concurrently
+                # Process all messages concurrently (semaphore limits actual concurrency)
                 results = await asyncio.gather(*[process_message(m) for m in messages])
 
                 # Handle results - collect receipt handles for batch delete
@@ -1945,19 +1971,44 @@ class Service(IService):
                         hotels_failed += 1
                         logger.debug(f"Hotel {hotel_id}: {error}")
 
-                # Batch delete all messages from queue (concurrent, non-blocking)
-                await asyncio.to_thread(delete_messages_batch, queue_url, receipt_handles_to_delete)
+                # Batch delete all messages from queue (fire and forget)
+                delete_task = asyncio.create_task(
+                    asyncio.to_thread(delete_messages_batch, queue_url, receipt_handles_to_delete)
+                )
+                pending_db_tasks.append(delete_task)
 
-                # Batch update to database (normalize states in Service layer)
+                # Batch update to database (non-blocking)
                 if len(batch_results) >= BATCH_SIZE:
                     self._normalize_states_in_batch(batch_results)
-                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
-                    logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
+                    results_to_save = batch_results[:]
                     batch_results = []
+                    
+                    async def save_batch(results):
+                        return await repo.batch_update_cloudbeds_enrichment(results)
+                    
+                    pending_db_tasks.append(asyncio.create_task(save_batch(results_to_save)))
 
                 if len(batch_failed_ids) >= BATCH_SIZE:
-                    await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
+                    failed_to_save = batch_failed_ids[:]
                     batch_failed_ids = []
+                    pending_db_tasks.append(
+                        asyncio.create_task(repo.batch_set_last_enrichment_attempt(failed_to_save))
+                    )
+
+                # Clean up completed tasks periodically
+                pending_db_tasks = [t for t in pending_db_tasks if not t.done()]
+
+                # Log throughput every 10 seconds
+                now = time.time()
+                if now - last_log_time >= 10:
+                    elapsed = now - last_log_time
+                    rate = hotels_processed / max(1, (now - last_log_time + hotels_processed / 100))
+                    logger.info(f"Progress: {hotels_processed} processed, {hotels_enriched} enriched ({hotels_enriched*100//max(1,hotels_processed)}% success), ~{len(messages)} msg/batch")
+                    last_log_time = now
+
+            # Wait for all pending DB tasks to complete
+            if pending_db_tasks:
+                await asyncio.gather(*pending_db_tasks, return_exceptions=True)
 
             # Final batch update (normalize states in Service layer)
             if batch_results:
@@ -2300,27 +2351,42 @@ class Service(IService):
         """Count hotels needing location enrichment (have coords, missing city)."""
         return await repo.get_pending_location_enrichment_count()
 
-    async def enrich_locations_reverse_geocode(self, limit: int = 100) -> dict:
+    async def enrich_locations_reverse_geocode(
+        self,
+        limit: int = 100,
+        concurrency: int = 50,
+        use_nominatim: bool = False,
+    ) -> dict:
         """
         Reverse geocode hotels that have coordinates but missing city/state.
         
-        Uses Nominatim API (free, 1 req/sec rate limit).
+        Uses Serper Places API by default (fast, supports concurrency).
+        Falls back to Nominatim if requested (free, 1 req/sec rate limit).
         Normalizes state abbreviations to full names.
         
         Args:
             limit: Max hotels to process
+            concurrency: Number of concurrent requests (only for Serper)
+            use_nominatim: Use free Nominatim API (slow) instead of Serper
             
         Returns dict with total/enriched/failed counts.
         """
-        from services.leadgen.geocoding import reverse_geocode
-        
         hotels = await repo.get_hotels_pending_location_enrichment(limit=limit)
         
         if not hotels:
             logger.info("No hotels pending location enrichment")
             return {"total": 0, "enriched": 0, "failed": 0}
         
-        logger.info(f"Reverse geocoding {len(hotels)} hotels...")
+        logger.info(f"Reverse geocoding {len(hotels)} hotels (concurrency={concurrency})...")
+        
+        if use_nominatim:
+            return await self._enrich_locations_nominatim(hotels)
+        else:
+            return await self._enrich_locations_serper(hotels, concurrency)
+
+    async def _enrich_locations_nominatim(self, hotels: list) -> dict:
+        """Reverse geocode using Nominatim (slow, 1 req/sec)."""
+        from services.leadgen.geocoding import reverse_geocode
         
         enriched = 0
         failed = 0
@@ -2333,11 +2399,9 @@ class Service(IService):
             
             logger.info(f"  {name[:50]} ({lat}, {lng})...")
             
-            # Call Nominatim reverse geocoding
             result = await reverse_geocode(lat, lng)
             
             if result and result.city:
-                # Normalize state to full name if it's a US state abbreviation
                 state = result.state
                 if state and state.upper() in self.US_STATE_NAMES:
                     state = self.US_STATE_NAMES[state.upper()]
@@ -2356,8 +2420,70 @@ class Service(IService):
                 logger.warning(f"    -> No city found")
                 failed += 1
             
-            # Rate limit: Nominatim requires 1 request per second
-            await asyncio.sleep(1.1)
+            await asyncio.sleep(1.1)  # Nominatim rate limit
+        
+        logger.info(f"Location enrichment complete: {enriched} enriched, {failed} failed")
+        return {"total": len(hotels), "enriched": enriched, "failed": failed}
+
+    async def _enrich_locations_serper(self, hotels: list, concurrency: int = 50) -> dict:
+        """Reverse geocode using Serper Places API (fast, concurrent)."""
+        from services.enrichment.website_enricher import WebsiteEnricher
+        
+        api_key = os.getenv("SERPER_API_KEY")
+        if not api_key:
+            logger.error("SERPER_API_KEY not set, falling back to Nominatim")
+            return await self._enrich_locations_nominatim(hotels)
+        
+        enriched = 0
+        failed = 0
+        semaphore = asyncio.Semaphore(concurrency)
+        
+        async def process_hotel(enricher: WebsiteEnricher, hotel: dict) -> bool:
+            """Process a single hotel with rate limiting."""
+            async with semaphore:
+                hotel_id = hotel['id']
+                name = hotel['name']
+                lat = hotel['latitude']
+                lng = hotel['longitude']
+                country = hotel.get('country', 'United States')
+                
+                result = await enricher.reverse_geocode(lat, lng)
+                
+                if result and result.get('city'):
+                    # Normalize state using country-aware logic
+                    state = result.get('state')
+                    result_country = result.get('country') or country
+                    
+                    if state:
+                        # Validate and normalize - rejects garbage like "MEASURE", "XX", etc.
+                        state = state_utils.validate_and_normalize_state(state, result_country)
+                    
+                    await repo.update_hotel_location_fields(
+                        hotel_id=hotel_id,
+                        address=result.get('address'),
+                        city=result.get('city'),
+                        state=state,
+                        country=result_country,
+                    )
+                    
+                    logger.debug(f"  {name[:40]}: {result.get('city')}, {state}")
+                    return True
+                else:
+                    logger.debug(f"  {name[:40]}: no location found")
+                    return False
+        
+        async with WebsiteEnricher(api_key, max_concurrent=concurrency) as enricher:
+            tasks = [process_hotel(enricher, h) for h in hotels]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.error(f"Error: {r}")
+                    failed += 1
+                elif r:
+                    enriched += 1
+                else:
+                    failed += 1
         
         logger.info(f"Location enrichment complete: {enriched} enriched, {failed} failed")
         return {"total": len(hotels), "enriched": enriched, "failed": failed}

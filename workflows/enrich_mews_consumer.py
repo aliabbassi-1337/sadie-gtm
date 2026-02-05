@@ -30,7 +30,7 @@ from loguru import logger
 
 from db.client import init_db, close_db
 from services.enrichment import repo
-from infra.sqs import receive_messages, delete_message, get_queue_attributes
+from infra.sqs import receive_messages, delete_messages_batch, get_queue_attributes
 from lib.mews.api_client import MewsApiClient
 
 QUEUE_URL = os.getenv("SQS_MEWS_ENRICHMENT_QUEUE_URL", "")
@@ -142,35 +142,38 @@ async def run_consumer(concurrency: int = 10):
                 logger.debug("No messages, waiting...")
                 continue
             
-            # Filter valid messages
+            # Filter valid messages and collect all receipt handles
             valid_messages = []
+            receipt_handles_to_delete = []
+            
             for msg in messages:
+                receipt_handles_to_delete.append(msg["receipt_handle"])
                 body = msg["body"]
                 hotel_id = body.get("hotel_id")
                 booking_url = body.get("booking_url")
                 if hotel_id and booking_url:
                     valid_messages.append((msg, hotel_id, booking_url))
-                else:
-                    delete_message(QUEUE_URL, msg["receipt_handle"])
             
             if not valid_messages:
+                # Batch delete invalid messages
+                delete_messages_batch(QUEUE_URL, receipt_handles_to_delete)
                 continue
             
             # Process all messages in parallel
-            async def process_and_delete(msg, hotel_id, booking_url):
+            async def process_hotel(hotel_id, booking_url):
                 try:
-                    result = await process_hotel_with_client(client, hotel_id, booking_url)
-                    delete_message(QUEUE_URL, msg["receipt_handle"])
-                    return result
+                    return await process_hotel_with_client(client, hotel_id, booking_url)
                 except Exception as e:
                     logger.error(f"Error processing hotel {hotel_id}: {e}")
-                    delete_message(QUEUE_URL, msg["receipt_handle"])
                     return EnrichmentResult(hotel_id=hotel_id, success=False, error=str(e)[:50])
             
             results = await asyncio.gather(*[
-                process_and_delete(msg, hotel_id, url) 
+                process_hotel(hotel_id, url) 
                 for msg, hotel_id, url in valid_messages
             ])
+            
+            # Batch delete all messages after processing
+            delete_messages_batch(QUEUE_URL, receipt_handles_to_delete)
             
             # Collect results
             for result in results:

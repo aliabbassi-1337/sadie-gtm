@@ -31,7 +31,7 @@ def main():
     parser = argparse.ArgumentParser(description="RMS Enrichment Consumer")
     parser.add_argument("--concurrency", type=int, default=50, help="Concurrent API requests")
     parser.add_argument("--max-messages", type=int, default=0, help="Max messages (0=infinite)")
-    parser.add_argument("--force-overwrite", action="store_true", help="Overwrite existing data (default: only fill empty fields)")
+    parser.add_argument("--force-overwrite", "--force", action="store_true", help="Overwrite existing data (default: only fill empty fields)")
     args = parser.parse_args()
     
     asyncio.run(run(args))

@@ -450,6 +450,164 @@ class WebsiteEnricher:
             logger.debug(f"Error searching coordinates ({lat}, {lon}): {e}")
             return None
 
+    async def reverse_geocode(
+        self,
+        lat: float,
+        lon: float,
+    ) -> Optional[Dict]:
+        """
+        Reverse geocode coordinates to address components using Serper Places API.
+
+        More reliable and faster than Nominatim (supports concurrency).
+
+        Args:
+            lat: Latitude
+            lon: Longitude
+
+        Returns:
+            Dict with address, city, state, country, or None if not found
+        """
+        try:
+            # Search for any business at these exact coordinates
+            resp = await self._request_with_retry(
+                "POST",
+                SERPER_PLACES_URL,
+                headers={
+                    "X-API-KEY": self.api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "q": "hotel",  # Generic search
+                    "ll": f"@{lat},{lon},17z",
+                },
+            )
+
+            if not resp or resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            places = data.get("places", [])
+
+            if not places:
+                return None
+
+            # Get the first result's address
+            best = places[0]
+            address = best.get("address")
+
+            if not address:
+                return None
+
+            # Parse address into components
+            city, state, country = self._parse_address_string(address)
+
+            return {
+                "address": address,
+                "city": city,
+                "state": state,
+                "country": country,
+            }
+
+        except Exception as e:
+            logger.debug(f"Reverse geocode error for ({lat}, {lon}): {e}")
+            return None
+
+    def _parse_address_string(self, address: str) -> tuple:
+        """
+        Parse city, state, country from a formatted address string.
+
+        Handles formats like:
+            "123 Main St, Miami, FL 33101, USA"
+            "456 Beach Rd, Sydney NSW 2000, Australia"
+            "789 First Ave, New York, NY 10001"
+
+        Returns:
+            Tuple of (city, state, country)
+        """
+        if not address:
+            return None, None, None
+
+        # Split by comma
+        parts = [p.strip() for p in address.split(",")]
+
+        if len(parts) < 2:
+            return None, None, None
+
+        city = None
+        state = None
+        country = None
+
+        # Last part is usually country or state+zip
+        last = parts[-1].strip()
+
+        # Known country names
+        country_names = {
+            "USA", "US", "UNITED STATES", "UNITED STATES OF AMERICA",
+            "CANADA", "AUSTRALIA", "UK", "UNITED KINGDOM", "GREAT BRITAIN",
+            "NEW ZEALAND", "IRELAND", "SOUTH AFRICA", "INDIA", "GERMANY",
+            "FRANCE", "SPAIN", "ITALY", "MEXICO", "BRAZIL", "JAPAN", "CHINA",
+        }
+
+        # Check if last part is a known country
+        if last.upper() in country_names:
+            country = self._normalize_country(last)
+            # Second to last should be state/province + zip
+            if len(parts) >= 3:
+                state_zip = parts[-2].strip()
+                # Extract state code (usually 2-3 letters before optional zip)
+                state_match = re.match(r"([A-Z]{2,3})\s*\d*", state_zip.upper())
+                if state_match:
+                    state = state_match.group(1)
+                # City is the part before state
+                if len(parts) >= 4:
+                    city = parts[-3].strip()
+                elif len(parts) == 3:
+                    # Handle "City, State ZIP, Country"
+                    city = parts[0].strip()
+                    # Remove street number if present
+                    city_parts = city.split()
+                    if city_parts and city_parts[0].isdigit():
+                        city = " ".join(city_parts[1:])
+        else:
+            # Last part might be state+zip with no country (common in US)
+            state_match = re.match(r"([A-Z]{2,3})\s*\d*", last.upper())
+            if state_match:
+                state = state_match.group(1)
+                country = "United States"  # Assume US if no country and state code found
+                if len(parts) >= 3:
+                    city = parts[-2].strip()
+                elif len(parts) == 2:
+                    # Handle "123 Main St City, State ZIP"
+                    first_part = parts[0].strip()
+                    # Try to extract city from first part
+                    words = first_part.split()
+                    if len(words) > 2:
+                        # Skip numbers at start (street address)
+                        start_idx = 0
+                        for i, w in enumerate(words):
+                            if not w.isdigit():
+                                start_idx = i
+                                break
+                        city = " ".join(words[start_idx:])
+            else:
+                # Just try to get city from second to last
+                if len(parts) >= 2:
+                    city = parts[-2].strip()
+
+        return city, state, country
+
+    def _normalize_country(self, country: str) -> str:
+        """Normalize country name to standard form."""
+        mappings = {
+            "USA": "United States",
+            "US": "United States",
+            "UNITED STATES": "United States",
+            "UNITED STATES OF AMERICA": "United States",
+            "UK": "United Kingdom",
+            "GREAT BRITAIN": "United Kingdom",
+        }
+        return mappings.get(country.upper(), country.title())
+
     async def find_by_name(
         self,
         name: str,
