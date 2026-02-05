@@ -10,19 +10,30 @@ from db.models.existing_customer import ExistingCustomer
 from db.models.hotel_customer_proximity import HotelCustomerProximity
 
 
-async def get_hotels_pending_enrichment(limit: int = 100) -> List[Hotel]:
+async def get_hotels_pending_enrichment(
+    limit: int = 100,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> List[Hotel]:
     """Get hotels that need room count enrichment (read-only, for status display).
 
     Criteria:
     - has website
     - not already in hotel_room_count table
+    - optionally filtered by state and/or country
     """
     async with get_conn() as conn:
-        results = await queries.get_hotels_pending_enrichment(conn, limit=limit)
+        results = await queries.get_hotels_pending_enrichment(
+            conn, limit=limit, state=state, country=country
+        )
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
-async def claim_hotels_for_enrichment(limit: int = 100) -> List[Hotel]:
+async def claim_hotels_for_enrichment(
+    limit: int = 100,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> List[Hotel]:
     """Atomically claim hotels for enrichment (multi-worker safe).
 
     Inserts status=-1 (processing) records into hotel_room_count.
@@ -30,11 +41,15 @@ async def claim_hotels_for_enrichment(limit: int = 100) -> List[Hotel]:
 
     Args:
         limit: Max hotels to claim
+        state: Optional state filter (e.g., "California")
+        country: Optional country filter (e.g., "United States")
 
     Returns list of successfully claimed hotels.
     """
     async with get_conn() as conn:
-        results = await queries.claim_hotels_for_enrichment(conn, limit=limit)
+        results = await queries.claim_hotels_for_enrichment(
+            conn, limit=limit, state=state, country=country
+        )
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
@@ -47,10 +62,20 @@ async def reset_stale_enrichment_claims() -> None:
         await queries.reset_stale_enrichment_claims(conn)
 
 
-async def get_pending_enrichment_count() -> int:
-    """Count hotels waiting for enrichment (has website, not yet in hotel_room_count)."""
+async def get_pending_enrichment_count(
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> int:
+    """Count hotels waiting for enrichment (has website, not yet in hotel_room_count).
+    
+    Args:
+        state: Optional state filter (e.g., "California")
+        country: Optional country filter (e.g., "United States")
+    """
     async with get_conn() as conn:
-        result = await queries.get_pending_enrichment_count(conn)
+        result = await queries.get_pending_enrichment_count(
+            conn, state=state, country=country
+        )
         return result["count"] if result else 0
 
 
@@ -1166,3 +1191,234 @@ async def batch_update_extracted_states(updates: List[Dict[str, Any]]) -> int:
             conn, hotel_ids=hotel_ids, states=states
         )
         return int(result.split()[-1]) if result else 0
+
+
+# ============================================================================
+# SITEMINDER ENRICHMENT FUNCTIONS
+# ============================================================================
+
+
+class SiteMinderHotelCandidate(BaseModel):
+    """Hotel needing SiteMinder enrichment."""
+    id: int
+    name: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    address: Optional[str] = None
+    booking_url: str
+
+
+async def get_siteminder_hotels_needing_enrichment(
+    limit: int = 100,
+) -> List[SiteMinderHotelCandidate]:
+    """Get SiteMinder hotels that need name enrichment."""
+    async with get_conn() as conn:
+        rows = await queries.get_siteminder_hotels_needing_enrichment(conn, limit=limit)
+        return [SiteMinderHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_siteminder_hotels_needing_enrichment_count() -> int:
+    """Count SiteMinder hotels needing name enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_siteminder_hotels_needing_enrichment_count(conn)
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def get_siteminder_hotels_missing_location(
+    limit: int = 100,
+    country: Optional[str] = None,
+) -> List[SiteMinderHotelCandidate]:
+    """Get SiteMinder hotels with booking URLs but missing state."""
+    async with get_conn() as conn:
+        rows = await queries.get_siteminder_hotels_missing_location(
+            conn, limit=limit, country=country
+        )
+        return [SiteMinderHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_siteminder_hotels_missing_location_count(
+    country: Optional[str] = None,
+) -> int:
+    """Count SiteMinder hotels needing location enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_siteminder_hotels_missing_location_count(
+            conn, country=country
+        )
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def get_siteminder_hotels_total_count() -> int:
+    """Count total SiteMinder hotels."""
+    async with get_conn() as conn:
+        result = await queries.get_siteminder_hotels_total_count(conn)
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def batch_update_siteminder_enrichment(
+    updates: List[Dict],
+    force_overwrite: bool = False,
+) -> int:
+    """Batch update hotels with SiteMinder enrichment results.
+    
+    Supports: name, address, city, state, country, email, phone, website
+    
+    Args:
+        updates: List of dicts with hotel_id and enrichment data
+        force_overwrite: If True, overwrite existing values. If False, use COALESCE.
+    
+    Returns:
+        Number of hotels updated
+    """
+    if not updates:
+        return 0
+    
+    hotel_ids = []
+    names = []
+    addresses = []
+    cities = []
+    states = []
+    countries = []
+    emails = []
+    phones = []
+    websites = []
+    
+    for u in updates:
+        hotel_ids.append(u.get("hotel_id"))
+        names.append(u.get("name"))
+        addresses.append(u.get("address"))
+        cities.append(u.get("city"))
+        states.append(u.get("state"))
+        countries.append(u.get("country"))
+        emails.append(u.get("email"))
+        phones.append(u.get("phone"))
+        websites.append(u.get("website"))
+    
+    async with get_conn() as conn:
+        # Use COALESCE to preserve existing values unless force_overwrite
+        if force_overwrite:
+            sql = '''
+                UPDATE sadie_gtm.hotels h
+                SET 
+                    name = v.name,
+                    address = v.address,
+                    city = v.city,
+                    state = v.state,
+                    country = v.country,
+                    email = v.email,
+                    phone_website = v.phone,
+                    website = v.website,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM (
+                    SELECT 
+                        unnest($1::int[]) as id,
+                        unnest($2::text[]) as name,
+                        unnest($3::text[]) as address,
+                        unnest($4::text[]) as city,
+                        unnest($5::text[]) as state,
+                        unnest($6::text[]) as country,
+                        unnest($7::text[]) as email,
+                        unnest($8::text[]) as phone,
+                        unnest($9::text[]) as website
+                ) v
+                WHERE h.id = v.id
+                  AND v.name IS NOT NULL
+            '''
+        else:
+            sql = '''
+                UPDATE sadie_gtm.hotels h
+                SET 
+                    name = COALESCE(NULLIF(v.name, ''), h.name),
+                    address = COALESCE(NULLIF(v.address, ''), h.address),
+                    city = COALESCE(NULLIF(v.city, ''), h.city),
+                    state = COALESCE(NULLIF(v.state, ''), h.state),
+                    country = COALESCE(NULLIF(v.country, ''), h.country),
+                    email = COALESCE(NULLIF(v.email, ''), h.email),
+                    phone_website = COALESCE(NULLIF(v.phone, ''), h.phone_website),
+                    website = COALESCE(NULLIF(v.website, ''), h.website),
+                    updated_at = CURRENT_TIMESTAMP
+                FROM (
+                    SELECT 
+                        unnest($1::int[]) as id,
+                        unnest($2::text[]) as name,
+                        unnest($3::text[]) as address,
+                        unnest($4::text[]) as city,
+                        unnest($5::text[]) as state,
+                        unnest($6::text[]) as country,
+                        unnest($7::text[]) as email,
+                        unnest($8::text[]) as phone,
+                        unnest($9::text[]) as website
+                ) v
+                WHERE h.id = v.id
+            '''
+        
+        result = await conn.execute(
+            sql, hotel_ids, names, addresses, cities, states, countries, emails, phones, websites
+        )
+        count = int(result.split()[-1]) if result else len(updates)
+    
+    # Also update enrichment status on hotel_booking_engines
+    async with get_conn() as conn:
+        await conn.execute('''
+            UPDATE sadie_gtm.hotel_booking_engines hbe
+            SET enrichment_status = 1, last_enrichment_attempt = CURRENT_TIMESTAMP
+            FROM sadie_gtm.booking_engines be
+            WHERE hbe.hotel_id = ANY($1)
+              AND hbe.booking_engine_id = be.id
+              AND be.name = 'SiteMinder'
+        ''', hotel_ids)
+    
+    return count
+
+
+async def batch_set_siteminder_enrichment_failed(hotel_ids: List[int]) -> int:
+    """Mark SiteMinder hotels as enrichment failed (status=-1)."""
+    if not hotel_ids:
+        return 0
+    
+    async with get_conn() as conn:
+        result = await conn.execute('''
+            UPDATE sadie_gtm.hotel_booking_engines hbe
+            SET enrichment_status = -1, last_enrichment_attempt = CURRENT_TIMESTAMP
+            FROM sadie_gtm.booking_engines be
+            WHERE hbe.hotel_id = ANY($1)
+              AND hbe.booking_engine_id = be.id
+              AND be.name = 'SiteMinder'
+        ''', hotel_ids)
+        return int(result.split()[-1]) if result else 0
+
+
+# ============================================================================
+# MEWS LOCATION ENRICHMENT FUNCTIONS
+# ============================================================================
+
+
+async def get_mews_hotels_missing_location(
+    limit: int = 100,
+    country: Optional[str] = None,
+) -> List[MewsHotelCandidate]:
+    """Get Mews hotels with booking URLs but missing state."""
+    async with get_conn() as conn:
+        rows = await queries.get_mews_hotels_missing_location(
+            conn, limit=limit, country=country
+        )
+        return [MewsHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_mews_hotels_missing_location_count(
+    country: Optional[str] = None,
+) -> int:
+    """Count Mews hotels needing location enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_mews_hotels_missing_location_count(
+            conn, country=country
+        )
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0

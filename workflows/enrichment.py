@@ -37,26 +37,43 @@ from services.enrichment.service import Service
 from infra import slack
 
 
-async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int = 15, notify: bool = True) -> None:
+async def run_room_counts(
+    limit: int,
+    free_tier: bool = False,
+    concurrency: int = 15,
+    notify: bool = True,
+    state: str = None,
+    country: str = None,
+) -> None:
     """Run room count enrichment."""
     await init_db()
     try:
         service = Service()
 
         # Get pending count first
-        pending = await service.get_pending_enrichment_count()
-        logger.info(f"Hotels pending room count enrichment: {pending}")
+        pending = await service.get_pending_enrichment_count(state=state, country=country)
+        
+        filters = []
+        if state:
+            filters.append(f"state={state}")
+        if country:
+            filters.append(f"country={country}")
+        filter_str = f" ({', '.join(filters)})" if filters else ""
+        
+        logger.info(f"Hotels pending room count enrichment{filter_str}: {pending}")
 
         if pending == 0:
             logger.info("No hotels pending enrichment")
             return
 
         mode = "free tier (sequential)" if free_tier else f"paid tier ({concurrency} concurrent)"
-        logger.info(f"Starting room count enrichment (limit={limit}, {mode})...")
+        logger.info(f"Starting room count enrichment (limit={limit}, {mode}){filter_str}...")
         count = await service.enrich_room_counts(
             limit=limit,
             free_tier=free_tier,
             concurrency=concurrency,
+            state=state,
+            country=country,
         )
 
         logger.info("=" * 60)
@@ -70,6 +87,8 @@ async def run_room_counts(limit: int, free_tier: bool = False, concurrency: int 
                 f"*Room Count Enrichment Complete*\n"
                 f"• Hotels enriched: {count}\n"
                 f"• Mode: {mode}"
+                + (f"\n• State: {state}" if state else "")
+                + (f"\n• Country: {country}" if country else "")
             )
 
     except Exception as e:
@@ -188,6 +207,18 @@ Examples:
         action="store_true",
         help="Disable Slack notification"
     )
+    room_parser.add_argument(
+        "--state", "-s",
+        type=str,
+        default=None,
+        help="Filter by state (e.g., 'California')"
+    )
+    room_parser.add_argument(
+        "--country",
+        type=str,
+        default=None,
+        help="Filter by country (e.g., 'United States')"
+    )
 
     # Proximity command
     prox_parser = subparsers.add_parser(
@@ -219,12 +250,20 @@ Examples:
 
     if args.command == "room-counts":
         mode = "free tier" if args.free_tier else f"paid tier ({args.concurrency} concurrent)"
-        logger.info(f"Running room count enrichment (limit={args.limit}, {mode})")
+        filters = []
+        if args.state:
+            filters.append(f"state={args.state}")
+        if args.country:
+            filters.append(f"country={args.country}")
+        filter_str = f", {', '.join(filters)}" if filters else ""
+        logger.info(f"Running room count enrichment (limit={args.limit}, {mode}{filter_str})")
         asyncio.run(run_room_counts(
             limit=args.limit,
             free_tier=args.free_tier,
             concurrency=args.concurrency,
             notify=not args.no_notify,
+            state=args.state,
+            country=args.country,
         ))
     elif args.command == "proximity":
         logger.info(f"Running proximity calculation (limit={args.limit}, max_distance={args.max_distance}km)")

@@ -37,14 +37,36 @@ class SiteMinderHotelData(BaseModel):
     """Extracted hotel data from SiteMinder API."""
     name: Optional[str] = None
     website: Optional[str] = None
+    # Location fields - TODO: Add API integration to extract these
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    postal_code: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    # Contact fields - TODO: Add API integration to extract these
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    # Social media
     facebook: Optional[str] = None
     instagram: Optional[str] = None
     twitter: Optional[str] = None
     youtube: Optional[str] = None
     linkedin: Optional[str] = None
+    # Internal IDs
     siteminder_property_id: Optional[str] = None
     timezone: Optional[str] = None
-    # We can extract more fields if needed
+    
+    @property
+    def is_valid(self) -> bool:
+        """Check if we got meaningful data."""
+        return bool(self.name and self.name != "Unknown")
+    
+    @property
+    def has_location(self) -> bool:
+        """Check if we have location data."""
+        return bool(self.city or self.state or self.country)
 
 
 def extract_channel_code(booking_url: str) -> Optional[str]:

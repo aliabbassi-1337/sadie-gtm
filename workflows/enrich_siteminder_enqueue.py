@@ -1,14 +1,14 @@
-"""Enqueue Mews hotels for distributed enrichment via SQS.
+"""Enqueue SiteMinder hotels for distributed enrichment via SQS.
 
 Usage:
     # Enqueue hotels needing name enrichment
-    uv run python -m workflows.enrich_mews_enqueue --limit 5000
+    uv run python -m workflows.enrich_siteminder_enqueue --limit 5000
     
     # Enqueue hotels missing location (state) for US
-    uv run python -m workflows.enrich_mews_enqueue --missing-location --country "United States" --limit 1000
+    uv run python -m workflows.enrich_siteminder_enqueue --missing-location --country "United States" --limit 1000
     
     # Dry run
-    uv run python -m workflows.enrich_mews_enqueue --dry-run --limit 100
+    uv run python -m workflows.enrich_siteminder_enqueue --dry-run --limit 100
 """
 
 import sys
@@ -25,7 +25,7 @@ from db.client import init_db, close_db
 from services.enrichment import repo
 from infra.sqs import send_messages_batch, get_queue_attributes
 
-QUEUE_URL = os.getenv("SQS_MEWS_ENRICHMENT_QUEUE_URL", "")
+QUEUE_URL = os.getenv("SQS_SITEMINDER_ENRICHMENT_QUEUE_URL", "")
 
 
 async def run(
@@ -34,9 +34,9 @@ async def run(
     missing_location: bool = False,
     country: str = None,
 ):
-    """Enqueue Mews hotels for enrichment."""
+    """Enqueue SiteMinder hotels for enrichment."""
     if not QUEUE_URL and not dry_run:
-        logger.error("SQS_MEWS_ENRICHMENT_QUEUE_URL not set in .env")
+        logger.error("SQS_SITEMINDER_ENRICHMENT_QUEUE_URL not set in .env")
         return 0
     
     await init_db()
@@ -48,26 +48,26 @@ async def run(
             waiting = int(attrs.get("ApproximateNumberOfMessages", 0))
             logger.info(f"Queue status: {waiting} waiting, {in_flight} in-flight")
             
-            # Skip if queue already has significant backlog (avoid duplicates)
+            # Skip if queue already has significant backlog
             if waiting > 100:
                 logger.info(f"Skipping enqueue - queue already has {waiting} messages")
                 return 0
         
         # Get hotels based on mode
         if missing_location:
-            candidates = await repo.get_mews_hotels_missing_location(
+            candidates = await repo.get_siteminder_hotels_missing_location(
                 limit=limit, country=country
             )
             mode_desc = f"missing location (country={country or 'all'})"
         else:
-            candidates = await repo.get_mews_hotels_needing_enrichment(limit=limit)
+            candidates = await repo.get_siteminder_hotels_needing_enrichment(limit=limit)
             mode_desc = "needing name enrichment"
         
         if not candidates:
-            logger.info(f"No Mews hotels {mode_desc}")
+            logger.info(f"No SiteMinder hotels {mode_desc}")
             return 0
         
-        logger.info(f"Found {len(candidates)} Mews hotels {mode_desc}")
+        logger.info(f"Found {len(candidates)} SiteMinder hotels {mode_desc}")
         
         if dry_run:
             logger.info("Dry run - not sending to SQS")
@@ -97,7 +97,7 @@ async def run(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Enqueue Mews hotels for enrichment")
+    parser = argparse.ArgumentParser(description="Enqueue SiteMinder hotels for enrichment")
     parser.add_argument("--limit", type=int, default=50000, help="Max hotels to enqueue")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be enqueued")
     parser.add_argument(
