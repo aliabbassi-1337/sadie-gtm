@@ -8,21 +8,33 @@ from db.models.hotel import Hotel
 from db.models.hotel_room_count import HotelRoomCount
 from db.models.existing_customer import ExistingCustomer
 from db.models.hotel_customer_proximity import HotelCustomerProximity
+from db.queries import enrichment_batch as batch_sql
 
 
-async def get_hotels_pending_enrichment(limit: int = 100) -> List[Hotel]:
+async def get_hotels_pending_enrichment(
+    limit: int = 100,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> List[Hotel]:
     """Get hotels that need room count enrichment (read-only, for status display).
 
     Criteria:
     - has website
     - not already in hotel_room_count table
+    - optionally filtered by state and/or country
     """
     async with get_conn() as conn:
-        results = await queries.get_hotels_pending_enrichment(conn, limit=limit)
+        results = await queries.get_hotels_pending_enrichment(
+            conn, limit=limit, state=state, country=country
+        )
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
-async def claim_hotels_for_enrichment(limit: int = 100) -> List[Hotel]:
+async def claim_hotels_for_enrichment(
+    limit: int = 100,
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> List[Hotel]:
     """Atomically claim hotels for enrichment (multi-worker safe).
 
     Inserts status=-1 (processing) records into hotel_room_count.
@@ -30,11 +42,15 @@ async def claim_hotels_for_enrichment(limit: int = 100) -> List[Hotel]:
 
     Args:
         limit: Max hotels to claim
+        state: Optional state filter (e.g., "California")
+        country: Optional country filter (e.g., "United States")
 
     Returns list of successfully claimed hotels.
     """
     async with get_conn() as conn:
-        results = await queries.claim_hotels_for_enrichment(conn, limit=limit)
+        results = await queries.claim_hotels_for_enrichment(
+            conn, limit=limit, state=state, country=country
+        )
         return [Hotel.model_validate(dict(row)) for row in results]
 
 
@@ -47,10 +63,20 @@ async def reset_stale_enrichment_claims() -> None:
         await queries.reset_stale_enrichment_claims(conn)
 
 
-async def get_pending_enrichment_count() -> int:
-    """Count hotels waiting for enrichment (has website, not yet in hotel_room_count)."""
+async def get_pending_enrichment_count(
+    state: Optional[str] = None,
+    country: Optional[str] = None,
+) -> int:
+    """Count hotels waiting for enrichment (has website, not yet in hotel_room_count).
+    
+    Args:
+        state: Optional state filter (e.g., "California")
+        country: Optional country filter (e.g., "United States")
+    """
     async with get_conn() as conn:
-        result = await queries.get_pending_enrichment_count(conn)
+        result = await queries.get_pending_enrichment_count(
+            conn, state=state, country=country
+        )
         return result["count"] if result else 0
 
 
@@ -616,41 +642,9 @@ async def batch_update_hotel_geocoding(
         phones.append(u.get("phone"))
         emails.append(u.get("email"))
     
-    # Bulk UPDATE using unnest - single query for all updates
-    sql = """
-    UPDATE sadie_gtm.hotels h
-    SET 
-        address = COALESCE(v.address, h.address),
-        city = COALESCE(v.city, h.city),
-        state = COALESCE(v.state, h.state),
-        country = COALESCE(v.country, h.country),
-        location = CASE 
-            WHEN v.latitude IS NOT NULL AND v.longitude IS NOT NULL 
-            THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
-            ELSE h.location
-        END,
-        phone_google = COALESCE(v.phone, h.phone_google),
-        email = COALESCE(v.email, h.email),
-        updated_at = CURRENT_TIMESTAMP
-    FROM (
-        SELECT * FROM unnest(
-            $1::integer[],
-            $2::text[],
-            $3::text[],
-            $4::text[],
-            $5::text[],
-            $6::float[],
-            $7::float[],
-            $8::text[],
-            $9::text[]
-        ) AS t(hotel_id, address, city, state, country, latitude, longitude, phone, email)
-    ) v
-    WHERE h.id = v.hotel_id
-    """
-    
     async with get_conn() as conn:
         result = await conn.execute(
-            sql,
+            batch_sql.BATCH_UPDATE_GEOCODING,
             hotel_ids,
             addresses,
             cities,
@@ -740,35 +734,19 @@ async def batch_mark_enrichment_dead(hotel_ids: List[int]) -> int:
         return 0
     
     async with get_conn() as conn:
-        sql = """
-        UPDATE sadie_gtm.hotel_booking_engines
-        SET enrichment_status = -1,
-            last_enrichment_attempt = NOW()
-        WHERE hotel_id = ANY($1::integer[])
-        """
-        result = await conn.execute(sql, hotel_ids)
+        result = await conn.execute(batch_sql.BATCH_MARK_ENRICHMENT_DEAD, hotel_ids)
         if result and result.startswith("UPDATE"):
             return int(result.split()[1])
         return 0
 
 
 async def batch_set_last_enrichment_attempt(hotel_ids: List[int]) -> int:
-    """Batch set last enrichment attempt for failed hotels.
-    
-    Note: Inline SQL required because aiosql doesn't support array parameters
-    with ANY($1::integer[]) syntax.
-    """
+    """Batch set last enrichment attempt for failed hotels."""
     if not hotel_ids:
         return 0
     
     async with get_conn() as conn:
-        sql = """
-        UPDATE sadie_gtm.hotel_booking_engines
-        SET last_enrichment_attempt = NOW()
-        WHERE hotel_id = ANY($1::integer[])
-        """
-        result = await conn.execute(sql, hotel_ids)
-        # Parse "UPDATE N" to get count
+        result = await conn.execute(batch_sql.BATCH_SET_LAST_ENRICHMENT_ATTEMPT, hotel_ids)
         if result and result.startswith("UPDATE"):
             return int(result.split()[1])
         return 0
@@ -776,16 +754,11 @@ async def batch_set_last_enrichment_attempt(hotel_ids: List[int]) -> int:
 
 async def batch_update_cloudbeds_enrichment(
     updates: List[Dict],
-    force_overwrite: bool = False,
 ) -> int:
     """Batch update hotels with Cloudbeds enrichment results.
     
     For Cloudbeds, scraped data overrides existing (crawl sources often have wrong location).
     Supports lat/lon from the property_info API.
-    
-    Args:
-        updates: List of dicts with hotel_id and enrichment fields
-        force_overwrite: If True, always overwrite with API data (even if empty preserves existing)
     """
     if not updates:
         return 0
@@ -818,75 +791,8 @@ async def batch_update_cloudbeds_enrichment(
         zip_codes.append(u.get("zip_code"))
         contact_names.append(u.get("contact_name"))
     
-    # With force_overwrite, use COALESCE to always take API data (fallback to existing if null)
-    # Without force, only overwrite if API returns non-empty value
-    if force_overwrite:
-        sql = """
-        UPDATE sadie_gtm.hotels h
-        SET 
-            name = COALESCE(v.name, h.name),
-            address = COALESCE(v.address, h.address),
-            city = COALESCE(v.city, h.city),
-            state = COALESCE(v.state, h.state),
-            country = COALESCE(v.country, h.country),
-            phone_website = COALESCE(v.phone, h.phone_website),
-            email = COALESCE(v.email, h.email),
-            location = CASE 
-                WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL 
-                THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography
-                ELSE h.location 
-            END,
-            zip_code = COALESCE(v.zip_code, h.zip_code),
-            contact_name = COALESCE(v.contact_name, h.contact_name),
-            updated_at = CURRENT_TIMESTAMP"""
-    else:
-        sql = """
-        UPDATE sadie_gtm.hotels h
-        SET 
-            name = CASE WHEN v.name IS NOT NULL AND v.name != '' 
-                        THEN v.name ELSE h.name END,
-            address = CASE WHEN v.address IS NOT NULL AND v.address != '' 
-                           THEN v.address ELSE h.address END,
-            city = CASE WHEN v.city IS NOT NULL AND v.city != '' 
-                        THEN v.city ELSE h.city END,
-            state = CASE WHEN v.state IS NOT NULL AND v.state != '' 
-                         THEN v.state ELSE h.state END,
-            country = CASE WHEN v.country IS NOT NULL AND v.country != '' 
-                           THEN v.country ELSE h.country END,
-            phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' 
-                                 THEN v.phone ELSE h.phone_website END,
-            email = CASE WHEN v.email IS NOT NULL AND v.email != '' 
-                         THEN v.email ELSE h.email END,
-            location = CASE 
-                WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL 
-                THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography
-                ELSE h.location 
-            END,
-            zip_code = CASE WHEN v.zip_code IS NOT NULL AND v.zip_code != '' 
-                            THEN v.zip_code ELSE h.zip_code END,
-            contact_name = CASE WHEN v.contact_name IS NOT NULL AND v.contact_name != '' 
-                                THEN v.contact_name ELSE h.contact_name END,
-            updated_at = CURRENT_TIMESTAMP"""
-    
-    sql += """
-    FROM (
-        SELECT * FROM unnest(
-            $1::integer[],
-            $2::text[],
-            $3::text[],
-            $4::text[],
-            $5::text[],
-            $6::text[],
-            $7::text[],
-            $8::text[],
-            $9::float[],
-            $10::float[],
-            $11::text[],
-            $12::text[]
-        ) AS t(hotel_id, name, address, city, state, country, phone, email, lat, lon, zip_code, contact_name)
-    ) v
-    WHERE h.id = v.hotel_id
-    """
+    # Cloudbeds: API data always overwrites (COALESCE handles NULLs)
+    sql = batch_sql.BATCH_UPDATE_CLOUDBEDS_ENRICHMENT
     
     async with get_conn() as conn:
         result = await conn.execute(
@@ -955,11 +861,20 @@ async def get_mews_hotels_total_count() -> int:
 
 async def batch_update_mews_enrichment(
     updates: List[Dict],
+    force_overwrite: bool = False,
 ) -> int:
     """Batch update hotels with Mews enrichment results.
     
     Supports: name, address, city, country, email, phone, lat, lon
     Uses phone_website column and PostGIS location geography.
+    
+    Default behavior: API data always wins when non-empty (overwrites DB values).
+    This is correct because these hotels were scraped from the booking engine,
+    so the API is the source of truth.
+    
+    Args:
+        updates: List of dicts with hotel_id and enrichment data
+        force_overwrite: If True, even overwrite with NULL. Default False = only overwrite with non-empty.
     """
     if not updates:
         return 0
@@ -985,44 +900,10 @@ async def batch_update_mews_enrichment(
         lats.append(u.get("lat"))
         lons.append(u.get("lon"))
     
-    sql = """
-    UPDATE sadie_gtm.hotels h
-    SET 
-        name = CASE WHEN v.name IS NOT NULL AND v.name != '' AND h.name LIKE 'Unknown (%'
-                    THEN v.name ELSE h.name END,
-        address = CASE WHEN v.address IS NOT NULL AND v.address != '' AND h.address IS NULL
-                    THEN v.address ELSE h.address END,
-        city = CASE WHEN v.city IS NOT NULL AND v.city != '' AND h.city IS NULL
-                    THEN v.city ELSE h.city END,
-        country = CASE WHEN v.country IS NOT NULL AND v.country != '' AND h.country IS NULL
-                    THEN v.country ELSE h.country END,
-        email = CASE WHEN v.email IS NOT NULL AND v.email != '' AND h.email IS NULL
-                    THEN v.email ELSE h.email END,
-        phone_website = CASE WHEN v.phone IS NOT NULL AND v.phone != '' AND h.phone_website IS NULL
-                    THEN v.phone ELSE h.phone_website END,
-        location = CASE WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL AND h.location IS NULL
-                    THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography 
-                    ELSE h.location END,
-        updated_at = CURRENT_TIMESTAMP
-    FROM (
-        SELECT * FROM unnest(
-            $1::integer[],
-            $2::text[],
-            $3::text[],
-            $4::text[],
-            $5::text[],
-            $6::text[],
-            $7::text[],
-            $8::float[],
-            $9::float[]
-        ) AS t(hotel_id, name, address, city, country, email, phone, lat, lon)
-    ) v
-    WHERE h.id = v.hotel_id
-    """
-    
     async with get_conn() as conn:
         result = await conn.execute(
-            sql, hotel_ids, names, addresses, cities, countries, emails, phones, lats, lons
+            batch_sql.BATCH_UPDATE_MEWS_ENRICHMENT,
+            hotel_ids, names, addresses, cities, countries, emails, phones, lats, lons
         )
         count = int(result.split()[-1]) if result else len(updates)
     
@@ -1166,3 +1047,161 @@ async def batch_update_extracted_states(updates: List[Dict[str, Any]]) -> int:
             conn, hotel_ids=hotel_ids, states=states
         )
         return int(result.split()[-1]) if result else 0
+
+
+# ============================================================================
+# SITEMINDER ENRICHMENT FUNCTIONS
+# ============================================================================
+
+
+class SiteMinderHotelCandidate(BaseModel):
+    """Hotel needing SiteMinder enrichment."""
+    id: int
+    name: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    address: Optional[str] = None
+    booking_url: str
+
+
+async def get_siteminder_hotels_needing_enrichment(
+    limit: int = 100,
+) -> List[SiteMinderHotelCandidate]:
+    """Get SiteMinder hotels that need name enrichment."""
+    async with get_conn() as conn:
+        rows = await queries.get_siteminder_hotels_needing_enrichment(conn, limit=limit)
+        return [SiteMinderHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_siteminder_hotels_needing_enrichment_count() -> int:
+    """Count SiteMinder hotels needing name enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_siteminder_hotels_needing_enrichment_count(conn)
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def get_siteminder_hotels_missing_location(
+    limit: int = 100,
+    country: Optional[str] = None,
+) -> List[SiteMinderHotelCandidate]:
+    """Get SiteMinder hotels with booking URLs but missing state."""
+    async with get_conn() as conn:
+        rows = await queries.get_siteminder_hotels_missing_location(
+            conn, limit=limit, country=country
+        )
+        return [SiteMinderHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_siteminder_hotels_missing_location_count(
+    country: Optional[str] = None,
+) -> int:
+    """Count SiteMinder hotels needing location enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_siteminder_hotels_missing_location_count(
+            conn, country=country
+        )
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def get_siteminder_hotels_total_count() -> int:
+    """Count total SiteMinder hotels."""
+    async with get_conn() as conn:
+        result = await queries.get_siteminder_hotels_total_count(conn)
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0
+
+
+async def batch_update_siteminder_enrichment(
+    updates: List[Dict],
+) -> int:
+    """Batch update hotels with SiteMinder enrichment results.
+    
+    API data always wins when non-empty (overwrites DB values).
+    Falls back to existing DB value only when API returns NULL/empty.
+    """
+    if not updates:
+        return 0
+    
+    hotel_ids = []
+    names = []
+    addresses = []
+    cities = []
+    states = []
+    countries = []
+    emails = []
+    phones = []
+    websites = []
+    
+    for u in updates:
+        hotel_ids.append(u.get("hotel_id"))
+        names.append(u.get("name"))
+        addresses.append(u.get("address"))
+        cities.append(u.get("city"))
+        states.append(u.get("state"))
+        countries.append(u.get("country"))
+        emails.append(u.get("email"))
+        phones.append(u.get("phone"))
+        websites.append(u.get("website"))
+    
+    async with get_conn() as conn:
+        result = await conn.execute(
+            batch_sql.BATCH_UPDATE_SITEMINDER_ENRICHMENT,
+            hotel_ids, names, addresses, cities, states, countries, emails, phones, websites
+        )
+        count = int(result.split()[-1]) if result else len(updates)
+    
+    # Also update enrichment status on hotel_booking_engines
+    async with get_conn() as conn:
+        await conn.execute(
+            batch_sql.BATCH_SET_SITEMINDER_ENRICHMENT_STATUS, hotel_ids, 1
+        )
+    
+    return count
+
+
+async def batch_set_siteminder_enrichment_failed(hotel_ids: List[int]) -> int:
+    """Mark SiteMinder hotels as enrichment failed (status=-1)."""
+    if not hotel_ids:
+        return 0
+    
+    async with get_conn() as conn:
+        result = await conn.execute(
+            batch_sql.BATCH_SET_SITEMINDER_ENRICHMENT_STATUS, hotel_ids, -1
+        )
+        return int(result.split()[-1]) if result else 0
+
+
+# ============================================================================
+# MEWS LOCATION ENRICHMENT FUNCTIONS
+# ============================================================================
+
+
+async def get_mews_hotels_missing_location(
+    limit: int = 100,
+    country: Optional[str] = None,
+) -> List[MewsHotelCandidate]:
+    """Get Mews hotels with booking URLs but missing state."""
+    async with get_conn() as conn:
+        rows = await queries.get_mews_hotels_missing_location(
+            conn, limit=limit, country=country
+        )
+        return [MewsHotelCandidate(**dict(r)) for r in rows]
+
+
+async def get_mews_hotels_missing_location_count(
+    country: Optional[str] = None,
+) -> int:
+    """Count Mews hotels needing location enrichment."""
+    async with get_conn() as conn:
+        result = await queries.get_mews_hotels_missing_location_count(
+            conn, country=country
+        )
+        if hasattr(result, 'get'):
+            return result.get('count', 0) or 0
+        return result or 0

@@ -63,6 +63,62 @@ class ConsumeResult(BaseModel):
     hotels_failed: int
 
 
+class SiteMinderEnrichmentResult(BaseModel):
+    """Result of enriching a hotel via SiteMinder API."""
+    hotel_id: int
+    success: bool
+    name: Optional[str] = None
+    website: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    error: Optional[str] = None
+
+    def to_update_dict(self) -> Dict[str, Any]:
+        return {
+            "hotel_id": self.hotel_id,
+            "name": self.name,
+            "website": self.website,
+            "address": self.address,
+            "city": self.city,
+            "state": self.state,
+            "country": self.country,
+            "email": self.email,
+            "phone": self.phone,
+        }
+
+
+class MewsEnrichmentResult(BaseModel):
+    """Result of enriching a hotel via Mews API."""
+    hotel_id: int
+    success: bool
+    name: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    error: Optional[str] = None
+
+    def to_update_dict(self) -> Dict[str, Any]:
+        return {
+            "hotel_id": self.hotel_id,
+            "name": self.name,
+            "address": self.address,
+            "city": self.city,
+            "country": self.country,
+            "email": self.email,
+            "phone": self.phone,
+            "lat": self.lat,
+            "lon": self.lon,
+        }
+
+
 # ============================================================================
 # BOOKING PAGE ENRICHMENT (name + address extraction)
 # ============================================================================
@@ -541,6 +597,32 @@ class IService(ABC):
         """Consume and process RMS enrichment queue."""
         pass
 
+    # SiteMinder Enrichment
+    @abstractmethod
+    async def process_siteminder_hotel(self, hotel_id: int, booking_url: str) -> "SiteMinderEnrichmentResult":
+        """Process a single hotel via SiteMinder property API."""
+        pass
+
+    @abstractmethod
+    async def enqueue_siteminder_for_enrichment(
+        self, limit: int = 1000, missing_location: bool = False, country: str = None, dry_run: bool = False,
+    ) -> int:
+        """Enqueue SiteMinder hotels for SQS-based enrichment."""
+        pass
+
+    # Mews Enrichment
+    @abstractmethod
+    async def process_mews_hotel(self, hotel_id: int, booking_url: str) -> "MewsEnrichmentResult":
+        """Process a single hotel via Mews API."""
+        pass
+
+    @abstractmethod
+    async def enqueue_mews_for_enrichment(
+        self, limit: int = 1000, missing_location: bool = False, country: str = None, dry_run: bool = False,
+    ) -> int:
+        """Enqueue Mews hotels for SQS-based enrichment."""
+        pass
+
     # Cloudbeds Enrichment
     @abstractmethod
     async def enrich_cloudbeds_hotels(self, limit: int = 100, concurrency: int = 6, delay: float = 1.0) -> EnrichResult:
@@ -684,6 +766,8 @@ class Service(IService):
         limit: int = 100,
         free_tier: bool = False,
         concurrency: int = 15,
+        state: str = None,
+        country: str = None,
     ) -> int:
         """
         Get room counts for hotels with websites.
@@ -694,6 +778,8 @@ class Service(IService):
             limit: Max hotels to process
             free_tier: If True, use slow sequential mode (30 RPM). Default False (1000 RPM).
             concurrency: Max concurrent requests when not in free_tier mode. Default 15.
+            state: Optional state filter (e.g., "California")
+            country: Optional country filter (e.g., "United States")
 
         Returns number of hotels successfully enriched.
         """
@@ -703,7 +789,7 @@ class Service(IService):
             return 0
 
         # Claim hotels for enrichment (multi-worker safe)
-        hotels = await repo.claim_hotels_for_enrichment(limit=limit)
+        hotels = await repo.claim_hotels_for_enrichment(limit=limit, state=state, country=country)
 
         if not hotels:
             log("No hotels pending enrichment")
@@ -838,9 +924,18 @@ class Service(IService):
         )
         return processed_count
 
-    async def get_pending_enrichment_count(self) -> int:
-        """Count hotels waiting for enrichment (has website, not yet in hotel_room_count)."""
-        return await repo.get_pending_enrichment_count()
+    async def get_pending_enrichment_count(
+        self,
+        state: str = None,
+        country: str = None,
+    ) -> int:
+        """Count hotels waiting for enrichment (has website, not yet in hotel_room_count).
+        
+        Args:
+            state: Optional state filter (e.g., "California")
+            country: Optional country filter (e.g., "United States")
+        """
+        return await repo.get_pending_enrichment_count(state=state, country=country)
 
     async def get_pending_proximity_count(self) -> int:
         """Count hotels waiting for proximity calculation."""
@@ -2056,7 +2151,7 @@ class Service(IService):
                 if len(batch_results) >= BATCH_SIZE:
                     self._sanitize_enrichment_data(batch_results)
                     self._normalize_states_in_batch(batch_results)
-                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                     logger.info(f"Batch update: {updated} hotels | Total: {hotels_processed} processed, {hotels_enriched} enriched")
                     batch_results = []
 
@@ -2086,7 +2181,7 @@ class Service(IService):
             if batch_results:
                 self._sanitize_enrichment_data(batch_results)
                 self._normalize_states_in_batch(batch_results)
-                await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
+                await repo.batch_update_cloudbeds_enrichment(batch_results)
             if batch_failed_ids:
                 await repo.batch_set_last_enrichment_attempt(batch_failed_ids)
 
@@ -2223,7 +2318,7 @@ class Service(IService):
                 if len(batch_results) >= BATCH_SIZE:
                     self._sanitize_enrichment_data(batch_results)
                     self._normalize_states_in_batch(batch_results)
-                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
+                    updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                     logger.info(f"Batch update: {updated} hotels")
                     batch_results = []
 
@@ -2241,7 +2336,7 @@ class Service(IService):
             if batch_results:
                 self._sanitize_enrichment_data(batch_results)
                 self._normalize_states_in_batch(batch_results)
-                updated = await repo.batch_update_cloudbeds_enrichment(batch_results, force_overwrite=force_overwrite)
+                updated = await repo.batch_update_cloudbeds_enrichment(batch_results)
                 logger.info(f"Final batch update: {updated} hotels")
 
             if batch_failed_ids:
@@ -2322,6 +2417,203 @@ class Service(IService):
         "WA": "Western Australia", "SA": "South Australia", "TAS": "Tasmania",
         "ACT": "Australian Capital Territory", "NT": "Northern Territory",
     }
+
+    # =========================================================================
+    # SITEMINDER ENRICHMENT
+    # =========================================================================
+
+    async def batch_update_siteminder_enrichment(self, updates: List[Dict]) -> int:
+        """Batch update hotels with SiteMinder enrichment data."""
+        return await repo.batch_update_siteminder_enrichment(updates)
+
+    async def batch_set_siteminder_enrichment_failed(self, hotel_ids: List[int]) -> int:
+        """Mark SiteMinder hotels as enrichment failed."""
+        return await repo.batch_set_siteminder_enrichment_failed(hotel_ids)
+
+    async def get_siteminder_hotels_needing_enrichment(self, limit: int = 100):
+        """Get SiteMinder hotels needing enrichment."""
+        return await repo.get_siteminder_hotels_needing_enrichment(limit=limit)
+
+    # =========================================================================
+    # MEWS ENRICHMENT
+    # =========================================================================
+
+    async def batch_update_mews_enrichment(self, updates: List[Dict]) -> int:
+        """Batch update hotels with Mews enrichment data."""
+        return await repo.batch_update_mews_enrichment(updates)
+
+    async def get_mews_hotels_needing_enrichment(self, limit: int = 100):
+        """Get Mews hotels needing enrichment."""
+        return await repo.get_mews_hotels_needing_enrichment(limit=limit)
+
+    async def process_siteminder_hotel(
+        self, hotel_id: int, booking_url: str, client=None,
+    ) -> "SiteMinderEnrichmentResult":
+        """Process a single hotel using the SiteMinder property API."""
+        from lib.siteminder.api_client import SiteMinderClient, extract_channel_code
+
+        try:
+            if client is None:
+                async with SiteMinderClient() as c:
+                    data = await c.get_property_data_from_url(booking_url)
+            else:
+                data = await client.get_property_data_from_url(booking_url)
+
+            if not data or not data.name:
+                return SiteMinderEnrichmentResult(hotel_id=hotel_id, success=False, error="no_data")
+
+            return SiteMinderEnrichmentResult(
+                hotel_id=hotel_id,
+                success=True,
+                name=data.name,
+                website=data.website,
+                address=data.address,
+                city=data.city,
+                state=data.state,
+                country=data.country,
+                email=data.email,
+                phone=data.phone,
+            )
+        except Exception as e:
+            return SiteMinderEnrichmentResult(hotel_id=hotel_id, success=False, error=str(e)[:100])
+
+    async def enqueue_siteminder_for_enrichment(
+        self,
+        limit: int = 1000,
+        missing_location: bool = False,
+        country: str = None,
+        dry_run: bool = False,
+    ) -> int:
+        """Enqueue SiteMinder hotels for SQS-based enrichment."""
+        from infra.sqs import send_messages_batch, get_queue_attributes
+
+        queue_url = os.getenv("SQS_SITEMINDER_ENRICHMENT_QUEUE_URL", "")
+        if not queue_url and not dry_run:
+            logger.error("SQS_SITEMINDER_ENRICHMENT_QUEUE_URL not set")
+            return 0
+
+        # Check queue backlog
+        if queue_url and not dry_run:
+            attrs = get_queue_attributes(queue_url)
+            waiting = int(attrs.get("ApproximateNumberOfMessages", 0))
+            if waiting > 100:
+                logger.info(f"Skipping enqueue - queue has {waiting} messages")
+                return 0
+
+        # Fetch candidates
+        if missing_location:
+            candidates = await repo.get_siteminder_hotels_missing_location(limit=limit, country=country)
+        else:
+            candidates = await repo.get_siteminder_hotels_needing_enrichment(limit=limit)
+
+        if not candidates:
+            logger.info("No SiteMinder hotels to enqueue")
+            return 0
+
+        logger.info(f"Found {len(candidates)} SiteMinder hotels to enqueue")
+
+        if dry_run:
+            for h in candidates[:10]:
+                logger.info(f"  Would enqueue: {h.id} - {h.booking_url[:50]}...")
+            return len(candidates)
+
+        messages = [{"hotel_id": h.id, "booking_url": h.booking_url} for h in candidates]
+        sent = send_messages_batch(queue_url, messages)
+        logger.info(f"Enqueued {sent}/{len(candidates)} hotels")
+        return sent
+
+    # =========================================================================
+    # MEWS ENRICHMENT
+    # =========================================================================
+
+    async def process_mews_hotel(
+        self, hotel_id: int, booking_url: str, client=None,
+    ) -> "MewsEnrichmentResult":
+        """Process a single hotel using the Mews API client."""
+        from lib.mews.api_client import MewsApiClient
+
+        try:
+            slug = booking_url.rstrip("/").split("/")[-1]
+        except Exception:
+            return MewsEnrichmentResult(hotel_id=hotel_id, success=False, error="invalid_url")
+
+        try:
+            if client is None:
+                c = MewsApiClient(timeout=30.0, use_brightdata=True)
+                await c.initialize()
+                try:
+                    data = await c.extract(slug)
+                finally:
+                    await c.close()
+            else:
+                data = await client.extract(slug)
+
+            if not data or not data.is_valid:
+                return MewsEnrichmentResult(hotel_id=hotel_id, success=False, error="no_data")
+
+            return MewsEnrichmentResult(
+                hotel_id=hotel_id,
+                success=True,
+                name=data.name,
+                address=data.address,
+                city=data.city,
+                country=data.country,
+                email=data.email,
+                phone=data.phone,
+                lat=data.lat,
+                lon=data.lon,
+            )
+        except Exception as e:
+            return MewsEnrichmentResult(hotel_id=hotel_id, success=False, error=str(e)[:100])
+
+    async def enqueue_mews_for_enrichment(
+        self,
+        limit: int = 1000,
+        missing_location: bool = False,
+        country: str = None,
+        dry_run: bool = False,
+    ) -> int:
+        """Enqueue Mews hotels for SQS-based enrichment."""
+        from infra.sqs import send_messages_batch, get_queue_attributes
+
+        queue_url = os.getenv("SQS_MEWS_ENRICHMENT_QUEUE_URL", "")
+        if not queue_url and not dry_run:
+            logger.error("SQS_MEWS_ENRICHMENT_QUEUE_URL not set")
+            return 0
+
+        # Check queue backlog
+        if queue_url and not dry_run:
+            attrs = get_queue_attributes(queue_url)
+            waiting = int(attrs.get("ApproximateNumberOfMessages", 0))
+            if waiting > 100:
+                logger.info(f"Skipping enqueue - queue has {waiting} messages")
+                return 0
+
+        # Fetch candidates
+        if missing_location:
+            candidates = await repo.get_mews_hotels_missing_location(limit=limit, country=country)
+        else:
+            candidates = await repo.get_mews_hotels_needing_enrichment(limit=limit)
+
+        if not candidates:
+            logger.info("No Mews hotels to enqueue")
+            return 0
+
+        logger.info(f"Found {len(candidates)} Mews hotels to enqueue")
+
+        if dry_run:
+            for h in candidates[:10]:
+                logger.info(f"  Would enqueue: {h.id} - {h.booking_url[:50]}...")
+            return len(candidates)
+
+        messages = [{"hotel_id": h.id, "booking_url": h.booking_url} for h in candidates]
+        sent = send_messages_batch(queue_url, messages)
+        logger.info(f"Enqueued {sent}/{len(candidates)} hotels")
+        return sent
+
+    # =========================================================================
+    # STATE NORMALIZATION
+    # =========================================================================
 
     def normalize_state(self, state: Optional[str], country: Optional[str] = None) -> Optional[str]:
         """Normalize state abbreviation to full name.

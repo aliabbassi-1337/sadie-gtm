@@ -6,6 +6,7 @@
 -- name: get_hotels_pending_enrichment
 -- Get hotels that need room count enrichment (read-only, for status display)
 -- Criteria: successfully detected (hbe.status=1), has website, not in hotel_room_count
+-- Optional state/country filters for targeted enrichment
 -- Note: No status filter - can enrich hotels at any stage
 SELECT
     h.id,
@@ -19,12 +20,15 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.website IS NOT NULL
   AND h.website != ''
   AND hrc.id IS NULL
+  AND (:state::text IS NULL OR h.state = :state)
+  AND (:country::text IS NULL OR h.country = :country)
 LIMIT :limit;
 
 -- name: claim_hotels_for_enrichment
 -- Atomically claim hotels for enrichment (multi-worker safe)
 -- Inserts status=-1 (processing) records, returns claimed hotel IDs
 -- Uses ON CONFLICT DO NOTHING so only one worker claims each hotel
+-- Optional state/country filters for targeted enrichment
 -- Note: No status filter - can enrich hotels at any stage
 -- Note: No tier filter - enriches hotels with any booking engine
 WITH pending AS (
@@ -35,6 +39,8 @@ WITH pending AS (
     WHERE h.website IS NOT NULL
       AND h.website != ''
       AND hrc.id IS NULL
+      AND (:state::text IS NULL OR h.state = :state)
+      AND (:country::text IS NULL OR h.country = :country)
     LIMIT :limit
 ),
 claimed AS (
@@ -56,13 +62,16 @@ WHERE status = -1
 
 -- name: get_pending_enrichment_count^
 -- Count hotels waiting for enrichment (successfully detected, has website, not in hotel_room_count)
+-- Optional state/country filters for targeted enrichment
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 WHERE h.website IS NOT NULL
   AND h.website != ''
-  AND hrc.id IS NULL;
+  AND hrc.id IS NULL
+  AND (:state::text IS NULL OR h.state = :state)
+  AND (:country::text IS NULL OR h.country = :country);
 
 -- name: insert_room_count<!
 -- Insert/update room count for a hotel

@@ -42,7 +42,7 @@ jobs:
       - name: Force new deployment of ECS services
         run: |
           # Update all services to pull the new image
-          for service in sadie-gtm-rms-enrichment sadie-gtm-cloudbeds-consumer; do
+          for service in sadie-gtm-rms-enrichment sadie-gtm-cloudbeds-consumer sadie-gtm-siteminder-consumer sadie-gtm-mews-consumer; do
             aws ecs update-service --cluster $ECS_CLUSTER --service $service --force-new-deployment || true
           done
           echo "Deployment triggered - new tasks will use updated image"
