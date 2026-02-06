@@ -54,6 +54,52 @@ def _get_brightdata_proxy(prefer_cheap: bool = True) -> Optional[str]:
         return f"http://{username}:{password}@brd.superproxy.io:33335"
     return None
 
+# Common country code to full name mapping
+_COUNTRY_CODES = {
+    "US": "United States", "CA": "Canada", "GB": "United Kingdom", "UK": "United Kingdom",
+    "AU": "Australia", "NZ": "New Zealand", "IE": "Ireland",
+    "DE": "Germany", "FR": "France", "ES": "Spain", "IT": "Italy", "PT": "Portugal",
+    "NL": "Netherlands", "BE": "Belgium", "AT": "Austria", "CH": "Switzerland",
+    "SE": "Sweden", "NO": "Norway", "DK": "Denmark", "FI": "Finland",
+    "PL": "Poland", "CZ": "Czech Republic", "HU": "Hungary", "RO": "Romania",
+    "GR": "Greece", "HR": "Croatia", "BG": "Bulgaria", "SK": "Slovakia",
+    "SI": "Slovenia", "EE": "Estonia", "LV": "Latvia", "LT": "Lithuania",
+    "MX": "Mexico", "BR": "Brazil", "AR": "Argentina", "CL": "Chile", "CO": "Colombia",
+    "PE": "Peru", "EC": "Ecuador", "CR": "Costa Rica", "PA": "Panama",
+    "JP": "Japan", "KR": "South Korea", "CN": "China", "TW": "Taiwan",
+    "TH": "Thailand", "VN": "Vietnam", "MY": "Malaysia", "SG": "Singapore",
+    "ID": "Indonesia", "PH": "Philippines", "IN": "India", "LK": "Sri Lanka",
+    "ZA": "South Africa", "KE": "Kenya", "MA": "Morocco", "EG": "Egypt",
+    "AE": "United Arab Emirates", "SA": "Saudi Arabia", "IL": "Israel", "TR": "Turkey",
+    "RU": "Russia", "UA": "Ukraine", "IS": "Iceland", "MT": "Malta", "CY": "Cyprus",
+    "LU": "Luxembourg", "MC": "Monaco", "LI": "Liechtenstein",
+    "CW": "Curacao", "GE": "Georgia", "BS": "Bahamas", "BQ": "Bonaire",
+    "VU": "Vanuatu", "JE": "Jersey", "RE": "Reunion", "SJ": "Svalbard",
+    "GI": "Gibraltar", "FO": "Faroe Islands", "GP": "Guadeloupe", "MQ": "Martinique",
+    "AW": "Aruba", "BM": "Bermuda", "KY": "Cayman Islands", "VI": "Virgin Islands",
+    "PR": "Puerto Rico", "GU": "Guam", "TT": "Trinidad and Tobago", "JM": "Jamaica",
+    "BB": "Barbados", "DO": "Dominican Republic", "HN": "Honduras", "GT": "Guatemala",
+    "SV": "El Salvador", "NI": "Nicaragua", "BZ": "Belize", "UY": "Uruguay",
+    "PY": "Paraguay", "BO": "Bolivia", "VE": "Venezuela", "GY": "Guyana",
+    "TZ": "Tanzania", "NG": "Nigeria", "GH": "Ghana", "UG": "Uganda",
+    "ET": "Ethiopia", "SN": "Senegal", "MU": "Mauritius", "MZ": "Mozambique",
+    "NA": "Namibia", "BW": "Botswana", "RW": "Rwanda", "TN": "Tunisia",
+    "MM": "Myanmar", "KH": "Cambodia", "LA": "Laos", "NP": "Nepal",
+    "BD": "Bangladesh", "PK": "Pakistan", "QA": "Qatar", "KW": "Kuwait",
+    "BH": "Bahrain", "OM": "Oman", "JO": "Jordan", "LB": "Lebanon",
+    "FJ": "Fiji", "PF": "French Polynesia", "NC": "New Caledonia", "WS": "Samoa",
+    "RS": "Serbia", "ME": "Montenegro", "BA": "Bosnia and Herzegovina",
+    "MK": "North Macedonia", "AL": "Albania", "MD": "Moldova", "XK": "Kosovo",
+}
+
+
+def _normalize_country_code(code: str) -> str:
+    """Convert 2-letter country code to full name. Returns code if not found."""
+    if not code:
+        return code
+    return _COUNTRY_CODES.get(code.upper().strip(), code)
+
+
 # Rate limiting - use semaphore for concurrency control instead of sequential
 _api_semaphore = None
 MAX_CONCURRENT_REQUESTS = 5  # Allow 5 parallel requests
@@ -357,7 +403,8 @@ class MewsApiClient:
                     result.address = f"{result.address}, {line2}"
                 result.city = address.get("city") or address.get("City")
                 result.postal_code = address.get("postalCode") or address.get("PostalCode")
-                result.country = address.get("countryCode") or address.get("CountryCode")
+                country_code = address.get("countryCode") or address.get("CountryCode")
+                result.country = _normalize_country_code(country_code) if country_code else None
                 result.lat = address.get("latitude") or address.get("Latitude")
                 result.lon = address.get("longitude") or address.get("Longitude")
             
