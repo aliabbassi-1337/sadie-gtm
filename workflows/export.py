@@ -50,11 +50,19 @@ BOOKING_ENGINES = ["cloudbeds", "rms", "siteminder", "mews"]
 # Map display name to DB value
 COUNTRIES = {
     "USA": "United States",
+    "Canada": "Canada",
     "Australia": "Australia",
+    "UK": "United Kingdom",
 }
 
 # Limit concurrent exports to avoid overwhelming S3/DB
 MAX_CONCURRENT_EXPORTS = 10
+
+# Countries exported as a single list ONLY (not split by state/region)
+COUNTRY_LIST_ONLY = {"UK"}
+
+# ALL countries also get a country-level {Country}_leads.xlsx alongside per-state exports
+# This captures hotels missing a state that would otherwise be excluded
 
 
 async def export_by_engine(service: Service, engine: str, dry_run: bool = False) -> tuple[str, int]:
@@ -79,9 +87,10 @@ async def export_by_engine(service: Service, engine: str, dry_run: bool = False)
 
 async def export_by_state(service: Service, state: str, country: str = "USA", dry_run: bool = False) -> tuple[str, int]:
     """Export leads for a specific state."""
+    db_country = COUNTRIES.get(country, country)
     if dry_run:
         from services.reporting import repo
-        leads = await repo.get_leads_for_state(state, source_pattern=None)
+        leads = await repo.get_leads_for_state(state, country=db_country, source_pattern=None)
         logger.info(f"[DRY RUN] {country}/{state}: {len(leads)} leads")
         return "", len(leads)
     
@@ -116,22 +125,46 @@ async def export_all_engines(service: Service, dry_run: bool = False) -> dict:
 
 
 async def export_country(service: Service, country: str, dry_run: bool = False) -> dict:
-    """Export all states for a country concurrently."""
+    """Export leads for a country.
+    
+    Every country gets a country-level {Country}_leads.xlsx (all leads in one file).
+    Countries NOT in COUNTRY_LIST_ONLY also get per-state exports alongside it.
+    Countries in COUNTRY_LIST_ONLY only get the single country-level file.
+    """
     from services.reporting import repo
     
     # Map display name to DB value
     db_country = COUNTRIES.get(country, country)
     
-    # Get states for this country
+    results = {"states": 0, "total_leads": 0, "exports": []}
+    
+    # 1. Always generate country-level export ({Country}_leads.xlsx)
+    if dry_run:
+        leads = await repo.get_leads_for_country(db_country)
+        country_count = len(leads)
+        logger.info(f"[DRY RUN] {country}: {country_count} leads (country-level)")
+    else:
+        s3_uri, country_count = await service.export_country_list(country, db_country)
+        if country_count > 0:
+            logger.success(f"  {country}/{country}_leads.xlsx: {country_count} leads")
+    
+    results["total_leads"] = country_count
+    
+    # 2. For list-only countries (e.g., UK), we're done
+    if country in COUNTRY_LIST_ONLY:
+        results["states"] = 1
+        return results
+    
+    # 3. For other countries, also generate per-state exports
     states = await repo.get_distinct_states_for_country(db_country)
     
     if not states:
-        logger.warning(f"No states found for {country}")
-        return {"states": 0, "total_leads": 0, "exports": []}
+        logger.info(f"No per-state breakdown for {country} (all in country-level file)")
+        results["states"] = 1
+        return results
     
     logger.info(f"Found {len(states)} states for {country}")
     
-    results = {"states": 0, "total_leads": 0, "exports": []}
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXPORTS)
     
     async def export_one(state: str) -> tuple[str, str, int]:
@@ -152,9 +185,11 @@ async def export_country(service: Service, country: str, dry_run: bool = False) 
         if count > 0:
             results["exports"].append((state, s3_uri, count))
             results["states"] += 1
-            results["total_leads"] += count
             if not dry_run:
                 logger.success(f"  {country}/{state}: {count} leads")
+    
+    # states count includes the country-level file
+    results["states"] += 1
     
     return results
 

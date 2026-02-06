@@ -12,15 +12,22 @@ async def get_leads_for_city(city: str, state: str) -> List[HotelLead]:
         return [HotelLead.model_validate(dict(row)) for row in results]
 
 
-async def get_leads_for_state(state: str, source_pattern: str = None) -> List[HotelLead]:
+async def get_leads_for_country(country: str = "United States") -> List[HotelLead]:
+    """Get all hotel leads for a country."""
+    async with get_conn() as conn:
+        results = await queries.get_leads_for_country(conn, country=country)
+        return [HotelLead.model_validate(dict(row)) for row in results]
+
+
+async def get_leads_for_state(state: str, country: str = "United States", source_pattern: str = None) -> List[HotelLead]:
     """Get hotel leads for an entire state, optionally filtered by source."""
     async with get_conn() as conn:
         if source_pattern:
             results = await queries.get_leads_for_state_by_source(
-                conn, state=state, source_pattern=source_pattern
+                conn, state=state, country=country, source_pattern=source_pattern
             )
         else:
-            results = await queries.get_leads_for_state(conn, state=state)
+            results = await queries.get_leads_for_state(conn, state=state, country=country)
         return [HotelLead.model_validate(dict(row)) for row in results]
 
 
@@ -57,15 +64,15 @@ async def get_city_stats(city: str, state: str) -> CityStats:
         return CityStats()
 
 
-async def get_state_stats(state: str, source_pattern: str = None) -> CityStats:
+async def get_state_stats(state: str, country: str = "United States", source_pattern: str = None) -> CityStats:
     """Get analytics stats for a state, optionally filtered by source."""
     async with get_conn() as conn:
         if source_pattern:
             result = await queries.get_state_stats_by_source(
-                conn, state=state, source_pattern=source_pattern
+                conn, state=state, country=country, source_pattern=source_pattern
             )
         else:
-            result = await queries.get_state_stats(conn, state=state)
+            result = await queries.get_state_stats(conn, state=state, country=country)
         if result:
             return CityStats.model_validate(dict(result))
         return CityStats()
@@ -78,15 +85,15 @@ async def get_top_engines_for_city(city: str, state: str) -> List[EngineCount]:
         return [EngineCount.model_validate(dict(row)) for row in results]
 
 
-async def get_top_engines_for_state(state: str, source_pattern: str = None) -> List[EngineCount]:
+async def get_top_engines_for_state(state: str, country: str = "United States", source_pattern: str = None) -> List[EngineCount]:
     """Get top booking engines for a state, optionally filtered by source."""
     async with get_conn() as conn:
         if source_pattern:
             results = await queries.get_top_engines_for_state_by_source(
-                conn, state=state, source_pattern=source_pattern
+                conn, state=state, country=country, source_pattern=source_pattern
             )
         else:
-            results = await queries.get_top_engines_for_state(conn, state=state)
+            results = await queries.get_top_engines_for_state(conn, state=state, country=country)
         return [EngineCount.model_validate(dict(row)) for row in results]
 
 
@@ -97,18 +104,18 @@ async def get_cities_in_state(state: str) -> List[str]:
         return [row["city"] for row in results]
 
 
-async def get_detection_funnel(state: str) -> dict:
+async def get_detection_funnel(state: str, country: str = "United States") -> dict:
     """Get detection funnel stats for a state."""
     async with get_conn() as conn:
-        result = await queries.get_detection_funnel(conn, state=state)
+        result = await queries.get_detection_funnel(conn, state=state, country=country)
         return dict(result) if result else {}
 
 
-async def get_detection_funnel_by_source(state: str, source_pattern: str) -> dict:
+async def get_detection_funnel_by_source(state: str, country: str = "United States", source_pattern: str = "%") -> dict:
     """Get detection funnel stats for a state filtered by source."""
     async with get_conn() as conn:
         result = await queries.get_detection_funnel_by_source(
-            conn, state=state, source_pattern=source_pattern
+            conn, state=state, country=country, source_pattern=source_pattern
         )
         return dict(result) if result else {}
 
@@ -200,6 +207,7 @@ async def get_distinct_states_for_country(country: str) -> List[str]:
     """Get all distinct states for a specific country that have launched leads.
     
     Only returns full state names (not abbreviations like CA, FL, TX, NSW, QLD).
+    Filters out junk values like '*', '.', '-', cities used as states, etc.
     """
     async with get_conn() as conn:
         results = await conn.fetch("""
@@ -212,7 +220,7 @@ async def get_distinct_states_for_country(country: str) -> List[str]:
               AND h.state IS NOT NULL
               AND h.state != ''
               AND LENGTH(h.state) > 3  -- Exclude abbreviations (US 2-char, AU 3-char)
-              AND h.state NOT LIKE '%-%'  -- Exclude junk like '-'
+              AND h.state !~ '^[^a-zA-Z]'  -- Must start with a letter (excludes *, ., -)
               AND h.state NOT IN ('ACT', 'NSW', 'QLD', 'VIC', 'TAS', 'WA', 'SA', 'NT')  -- Exclude AU abbrevs
             ORDER BY h.state
         """, country)

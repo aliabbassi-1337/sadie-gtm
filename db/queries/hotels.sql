@@ -275,7 +275,38 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
+  AND h.status = 1;
+
+-- name: get_leads_for_country
+-- Get all hotel leads for a country with booking engine, room count, and nearest customer
+-- Only returns launched hotels (status=1)
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.category,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE h.country = :country
   AND h.status = 1;
 
 -- name: get_leads_for_state_by_source
@@ -307,7 +338,7 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.status = 1
   AND h.source LIKE :source_pattern;
 
@@ -405,7 +436,7 @@ FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.country = 'United States';
+  AND h.country = :country;
 
 -- name: get_state_stats_by_source^
 -- Get stats for a state filtered by source pattern (for analytics tab)
@@ -421,7 +452,7 @@ FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.source LIKE :source_pattern;
 
 -- name: get_top_engines_for_city
@@ -446,7 +477,7 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.status = 1
 GROUP BY be.name;
 
@@ -459,7 +490,7 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.status = 1
   AND h.source LIKE :source_pattern
 GROUP BY be.name;
@@ -473,7 +504,7 @@ WITH base AS (
         COUNT(CASE WHEN website IS NOT NULL AND website != '' THEN 1 END) as with_website,
         COUNT(CASE WHEN status = 1 THEN 1 END) as launched
     FROM sadie_gtm.hotels
-    WHERE state = :state AND country = 'United States'
+    WHERE state = :state AND country = :country
 ),
 detection AS (
     SELECT
@@ -484,13 +515,13 @@ detection AS (
     FROM sadie_gtm.hotels h
     JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
     LEFT JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-    WHERE h.state = :state AND h.country = 'United States'
+    WHERE h.state = :state AND h.country = :country
 ),
 pending AS (
     -- Hotels truly pending: status=0, has website, no HBE record yet
     SELECT COUNT(*) as pending_detection
     FROM sadie_gtm.hotels h
-    WHERE h.state = :state AND h.country = 'United States'
+    WHERE h.state = :state AND h.country = :country
     AND h.status = 0
     AND h.website IS NOT NULL AND h.website != ''
     AND NOT EXISTS (SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe WHERE hbe.hotel_id = h.id)
@@ -507,7 +538,7 @@ failures AS (
         COUNT(*) FILTER (WHERE detection_method LIKE 'error:exception%') as browser_err
     FROM sadie_gtm.hotel_booking_engines hbe
     JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
-    WHERE h.state = :state AND h.country = 'United States'
+    WHERE h.state = :state AND h.country = :country
 )
 SELECT
     b.total_hotels,
@@ -536,7 +567,7 @@ WITH base AS (
         COUNT(CASE WHEN website IS NOT NULL AND website != '' THEN 1 END) as with_website,
         COUNT(CASE WHEN status = 1 THEN 1 END) as launched
     FROM sadie_gtm.hotels
-    WHERE state = :state AND country = 'United States' AND source LIKE :source_pattern
+    WHERE state = :state AND country = :country AND source LIKE :source_pattern
 ),
 detection AS (
     SELECT
@@ -547,13 +578,13 @@ detection AS (
     FROM sadie_gtm.hotels h
     JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
     LEFT JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-    WHERE h.state = :state AND h.country = 'United States' AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = :country AND h.source LIKE :source_pattern
 ),
 pending AS (
     -- Hotels truly pending: status=0, has website, no HBE record yet
     SELECT COUNT(*) as pending_detection
     FROM sadie_gtm.hotels h
-    WHERE h.state = :state AND h.country = 'United States' AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = :country AND h.source LIKE :source_pattern
     AND h.status = 0
     AND h.website IS NOT NULL AND h.website != ''
     AND NOT EXISTS (SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe WHERE hbe.hotel_id = h.id)
@@ -570,7 +601,7 @@ failures AS (
         COUNT(*) FILTER (WHERE detection_method LIKE 'error:exception%') as browser_err
     FROM sadie_gtm.hotel_booking_engines hbe
     JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
-    WHERE h.state = :state AND h.country = 'United States' AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = :country AND h.source LIKE :source_pattern
 )
 SELECT
     b.total_hotels,
@@ -619,7 +650,7 @@ WHERE state = :state
 --   - customer proximity
 
 -- name: get_launchable_hotels
--- Get hotels ready to be launched (valid name + location, email not required)
+-- Get hotels ready to be launched (valid name + country + BE, state optional)
 SELECT
     h.id,
     h.name AS hotel_name,
@@ -641,8 +672,7 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status =
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.status = 0
-  -- Location requirements
-  AND h.state IS NOT NULL AND h.state != ''
+  -- Location requirements (country required, state optional)
   AND h.country IS NOT NULL AND h.country != ''
   -- Valid name requirements (filter out junk/test/system names)
   AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
@@ -663,13 +693,12 @@ WHERE h.status = 0
 LIMIT :limit;
 
 -- name: get_launchable_count^
--- Count hotels ready to be launched (valid name + location, email not required)
+-- Count hotels ready to be launched (valid name + country + BE, state optional)
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
 INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
 WHERE h.status = 0
-  -- Location requirements
-  AND h.state IS NOT NULL AND h.state != ''
+  -- Location requirements (country required, state optional)
   AND h.country IS NOT NULL AND h.country != ''
   -- Valid name requirements (filter out junk/test/system names)
   AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
@@ -699,8 +728,7 @@ WITH claimed AS (
     INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     WHERE h.status = 0
       AND h.id = ANY(:hotel_ids)
-      -- Location requirements
-      AND h.state IS NOT NULL AND h.state != ''
+      -- Location requirements (country required, state optional)
       AND h.country IS NOT NULL AND h.country != ''
       -- Valid name requirements (filter out junk/test/system names)
       AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
@@ -728,15 +756,14 @@ RETURNING id;
 -- name: launch_ready_hotels
 -- Atomically claim and launch up to :limit ready hotels (multi-worker safe)
 -- Uses FOR UPDATE SKIP LOCKED so multiple EC2 instances can run concurrently
--- Launches hotels with valid names (email no longer required)
+-- Launches hotels with valid names (country required, state optional)
 -- Returns launched hotel IDs for logging/tracking
 WITH claimed AS (
     SELECT h.id
     FROM sadie_gtm.hotels h
     INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
     WHERE h.status = 0
-      -- Location requirements
-      AND h.state IS NOT NULL AND h.state != ''
+      -- Location requirements (country required, state optional)
       AND h.country IS NOT NULL AND h.country != ''
       -- Valid name requirements (filter out junk/test/system names)
       AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '

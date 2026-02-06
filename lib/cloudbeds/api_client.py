@@ -89,39 +89,22 @@ class CloudbedsPropertyData(BaseModel):
         return self.latitude is not None and self.longitude is not None
 
 
-def _get_brightdata_proxy(prefer_cheap: bool = True) -> Optional[str]:
-    """Build Brightdata proxy URL if credentials are available.
+def _get_brightdata_proxy() -> Optional[str]:
+    """Build Brightdata datacenter proxy URL if credentials are available.
     
-    Args:
-        prefer_cheap: If True, prefer datacenter (cheapest) > residential > unlocker.
-                      Datacenter: ~$0.11/GB, Residential: ~$5.5/GB, Unlocker: ~$3/request
+    Only uses the datacenter zone (cheapest). No fallback to residential or unlocker.
     """
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
     if not customer_id:
         return None
     
-    if prefer_cheap:
-        # Try datacenter first (cheapest ~$0.11/GB)
-        dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
-        dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
-        if dc_zone and dc_password:
-            username = f"brd-customer-{customer_id}-zone-{dc_zone}"
-            return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
-        
-        # Fall back to residential (~$5.5/GB)
-        res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
-        res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
-        if res_zone and res_password:
-            username = f"brd-customer-{customer_id}-zone-{res_zone}"
-            return f"http://{username}:{res_password}@brd.superproxy.io:33335"
+    dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+    dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+    if dc_zone and dc_password:
+        username = f"brd-customer-{customer_id}-zone-{dc_zone}"
+        return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
     
-    # Fall back to unlocker zone (most expensive)
-    zone = os.getenv("BRIGHTDATA_ZONE", "")
-    password = os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")
-    
-    if zone and password:
-        username = f"brd-customer-{customer_id}-zone-{zone}"
-        return f"http://{username}:{password}@brd.superproxy.io:33335"
+    return None
     return None
 
 

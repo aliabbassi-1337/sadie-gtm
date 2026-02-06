@@ -9,7 +9,7 @@ These conditions are used by:
 LAUNCH CRITERIA (all required):
 - status = 0 (pending)
 - valid name (not junk/test/system names)
-- state + country (location required)
+- country (location required, state optional)
 - booking engine detected (hbe.status = 1)
 
 NOT REQUIRED (optional enrichment):
@@ -128,8 +128,7 @@ def get_location_validation_sql(table_alias: str = "h") -> str:
     Returns:
         SQL string with location validation conditions
     """
-    return f"""{table_alias}.state IS NOT NULL AND {table_alias}.state != ''
-  AND {table_alias}.country IS NOT NULL AND {table_alias}.country != ''"""
+    return f"""{table_alias}.country IS NOT NULL AND {table_alias}.country != ''"""
 
 
 def get_launchable_where_clause(table_alias: str = "h") -> str:
@@ -213,14 +212,12 @@ def is_valid_location(state: Optional[str], country: Optional[str]) -> bool:
     """Check if a hotel has valid location for launching.
     
     Args:
-        state: The state/region
-        country: The country
+        state: The state/region (optional - not required for launch)
+        country: The country (required)
         
     Returns:
         True if location is valid, False otherwise
     """
-    if not state or state.strip() == "":
-        return False
     if not country or country.strip() == "":
         return False
     return True
@@ -324,9 +321,6 @@ def get_rejection_reason(
     for pattern in JUNK_NAME_REGEX:
         if re.match(pattern, name):
             return f"name matches junk regex: '{pattern}'"
-    
-    if not state or state.strip() == "":
-        return "state is empty"
     
     if not country or country.strip() == "":
         return "country is empty"

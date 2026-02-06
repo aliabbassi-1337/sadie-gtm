@@ -677,6 +677,38 @@ class Service(IService):
         self._shutdown_requested = True
         logger.info("Shutdown requested")
 
+    @staticmethod
+    def _save_enqueue_log(engine: str, candidates, missing_location: bool, country: str = None):
+        """Save enqueued hotel IDs to a JSON log file for debugging.
+        
+        Files are saved to logs/enqueue/ with a timestamp, e.g.:
+            logs/enqueue/siteminder_missing_location_20260206_230215.json
+        """
+        import json
+        from datetime import datetime
+        from pathlib import Path
+
+        log_dir = Path("logs/enqueue")
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        mode = "missing_location" if missing_location else "name_enrichment"
+        suffix = f"_{country.replace(' ', '_').lower()}" if country else ""
+        filename = f"{engine}_{mode}{suffix}_{ts}.json"
+
+        payload = {
+            "engine": engine,
+            "mode": mode,
+            "country": country,
+            "enqueued_at": datetime.now().isoformat(),
+            "count": len(candidates),
+            "hotel_ids": [h.id for h in candidates],
+        }
+
+        path = log_dir / filename
+        path.write_text(json.dumps(payload, indent=2))
+        logger.info(f"Saved enqueue log: {path} ({len(candidates)} IDs)")
+
     # Garbage values that should not overwrite existing data
     GARBAGE_VALUES = {
         # Empty/whitespace
@@ -2485,6 +2517,8 @@ class Service(IService):
         dry_run: bool = False,
     ) -> int:
         """Enqueue SiteMinder hotels for SQS-based enrichment."""
+        import json
+        from datetime import datetime
         from infra.sqs import send_messages_batch, get_queue_attributes
 
         queue_url = os.getenv("SQS_SITEMINDER_ENRICHMENT_QUEUE_URL", "")
@@ -2520,6 +2554,10 @@ class Service(IService):
         messages = [{"hotel_id": h.id, "booking_url": h.booking_url} for h in candidates]
         sent = send_messages_batch(queue_url, messages)
         logger.info(f"Enqueued {sent}/{len(candidates)} hotels")
+
+        # Save enqueued IDs for debugging
+        self._save_enqueue_log("siteminder", candidates, missing_location, country)
+
         return sent
 
     # =========================================================================
@@ -2574,6 +2612,8 @@ class Service(IService):
         dry_run: bool = False,
     ) -> int:
         """Enqueue Mews hotels for SQS-based enrichment."""
+        import json
+        from datetime import datetime
         from infra.sqs import send_messages_batch, get_queue_attributes
 
         queue_url = os.getenv("SQS_MEWS_ENRICHMENT_QUEUE_URL", "")
@@ -2609,6 +2649,10 @@ class Service(IService):
         messages = [{"hotel_id": h.id, "booking_url": h.booking_url} for h in candidates]
         sent = send_messages_batch(queue_url, messages)
         logger.info(f"Enqueued {sent}/{len(candidates)} hotels")
+
+        # Save enqueued IDs for debugging
+        self._save_enqueue_log("mews", candidates, missing_location, country)
+
         return sent
 
     # =========================================================================
@@ -2632,9 +2676,14 @@ class Service(IService):
     async def normalize_states_bulk(self, dry_run: bool = False) -> dict:
         """Normalize state abbreviations to full names in database.
         
-        Processes each supported country separately with its own state map:
+        Processes each supported country separately:
         - United States: CA -> California, etc.
         - Australia: NSW -> New South Wales, etc.
+        - Canada: BC -> British Columbia, typos, wrong-country fixes
+        - United Kingdom: junk cleanup, case normalization, Gaelic names
+        
+        For Canada/UK, some values map to None (should be cleared), e.g.
+        Australian states that leaked into Canada records.
         
         Args:
             dry_run: If True, only report what would be fixed without making changes
@@ -2644,26 +2693,26 @@ class Service(IService):
         """
         from db.client import get_conn
         
-        # Define supported countries and their state maps
-        COUNTRY_STATE_MAPS = {
+        all_fixes = []
+        total_fixed = 0
+        total_cleared = 0
+        
+        # ---- US + AU: abbreviation-based normalization ----
+        ABBREV_MAPS = {
             "United States": state_utils.US_STATES,
             "Australia": state_utils.AU_STATES,
         }
         
-        all_fixes = []
-        total_fixed = 0
-        
-        for country_name, state_map in COUNTRY_STATE_MAPS.items():
+        for country_name, state_map in ABBREV_MAPS.items():
             valid_full_names = set(state_map.values())
             
-            # Get unique states for this country
             async with get_conn() as conn:
                 rows = await conn.fetch('''
                     SELECT state, COUNT(*) as cnt
                     FROM sadie_gtm.hotels 
                     WHERE status != -1 
                       AND country = $1
-                      AND state IS NOT NULL
+                      AND state IS NOT NULL AND state != ''
                     GROUP BY state
                     ORDER BY cnt DESC
                 ''', country_name)
@@ -2673,21 +2722,17 @@ class Service(IService):
                 
             logger.info(f"{country_name}: {len(rows)} unique state values")
             
-            # Find states that need normalization
             for row in rows:
                 state = row['state']
                 count = row['cnt']
                 
-                # Skip if already a valid full name
                 if state in valid_full_names:
                     continue
                 
-                # Check if it's an abbreviation we can normalize
                 state_upper = state.strip().upper()
                 if state_upper in state_map:
                     new_state = state_map[state_upper]
                     all_fixes.append((state, new_state, country_name, count))
-                    
                     logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
                     
                     if not dry_run:
@@ -2700,6 +2745,111 @@ class Service(IService):
                             fixed = int(result.split()[-1]) if result else 0
                             total_fixed += fixed
         
+        # ---- Canada: abbreviations + variations/typos ----
+        async with get_conn() as conn:
+            rows = await conn.fetch('''
+                SELECT state, COUNT(*) as cnt
+                FROM sadie_gtm.hotels 
+                WHERE status != -1 AND country = 'Canada'
+                  AND state IS NOT NULL AND state != ''
+                GROUP BY state ORDER BY cnt DESC
+            ''')
+        
+        if rows:
+            ca_valid = set(state_utils.CA_PROVINCES.values())
+            logger.info(f"Canada: {len(rows)} unique province values")
+            
+            for row in rows:
+                state = row['state']
+                count = row['cnt']
+                
+                if state in ca_valid:
+                    continue
+                
+                # Check variations/typos first
+                if state in state_utils.CA_PROVINCE_VARIATIONS:
+                    new_state = state_utils.CA_PROVINCE_VARIATIONS[state]
+                    if new_state is None:
+                        all_fixes.append((state, "(clear)", "Canada", count))
+                        logger.info(f"  \"{state}\" -> CLEAR ({count} hotels)")
+                        if not dry_run:
+                            async with get_conn() as conn:
+                                result = await conn.execute('''
+                                    UPDATE sadie_gtm.hotels 
+                                    SET state = '', updated_at = CURRENT_TIMESTAMP
+                                    WHERE status != -1 AND country = 'Canada' AND state = $1
+                                ''', state)
+                                total_cleared += int(result.split()[-1]) if result else 0
+                    else:
+                        all_fixes.append((state, new_state, "Canada", count))
+                        logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
+                        if not dry_run:
+                            async with get_conn() as conn:
+                                result = await conn.execute('''
+                                    UPDATE sadie_gtm.hotels 
+                                    SET state = $2, updated_at = CURRENT_TIMESTAMP
+                                    WHERE status != -1 AND country = 'Canada' AND state = $1
+                                ''', state, new_state)
+                                total_fixed += int(result.split()[-1]) if result else 0
+                    continue
+                
+                # Check abbreviations
+                state_upper = state.strip().upper()
+                if state_upper in state_utils.CA_PROVINCES:
+                    new_state = state_utils.CA_PROVINCES[state_upper]
+                    all_fixes.append((state, new_state, "Canada", count))
+                    logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
+                    if not dry_run:
+                        async with get_conn() as conn:
+                            result = await conn.execute('''
+                                UPDATE sadie_gtm.hotels 
+                                SET state = $2, updated_at = CURRENT_TIMESTAMP
+                                WHERE status != -1 AND country = 'Canada' AND state = $1
+                            ''', state, new_state)
+                            total_fixed += int(result.split()[-1]) if result else 0
+        
+        # ---- UK: variation/junk cleanup ----
+        async with get_conn() as conn:
+            rows = await conn.fetch('''
+                SELECT state, COUNT(*) as cnt
+                FROM sadie_gtm.hotels 
+                WHERE status != -1 AND country = 'United Kingdom'
+                  AND state IS NOT NULL AND state != ''
+                GROUP BY state ORDER BY cnt DESC
+            ''')
+        
+        if rows:
+            logger.info(f"United Kingdom: {len(rows)} unique region values")
+            
+            for row in rows:
+                state = row['state']
+                count = row['cnt']
+                
+                if state in state_utils.UK_REGION_VARIATIONS:
+                    new_state = state_utils.UK_REGION_VARIATIONS[state]
+                    if new_state is None:
+                        all_fixes.append((state, "(clear)", "United Kingdom", count))
+                        logger.info(f"  \"{state}\" -> CLEAR ({count} hotels)")
+                        if not dry_run:
+                            async with get_conn() as conn:
+                                result = await conn.execute('''
+                                    UPDATE sadie_gtm.hotels 
+                                    SET state = '', updated_at = CURRENT_TIMESTAMP
+                                    WHERE status != -1 AND country = 'United Kingdom' AND state = $1
+                                ''', state)
+                                total_cleared += int(result.split()[-1]) if result else 0
+                    else:
+                        all_fixes.append((state, new_state, "United Kingdom", count))
+                        logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
+                        if not dry_run:
+                            async with get_conn() as conn:
+                                result = await conn.execute('''
+                                    UPDATE sadie_gtm.hotels 
+                                    SET state = $2, updated_at = CURRENT_TIMESTAMP
+                                    WHERE status != -1 AND country = 'United Kingdom' AND state = $1
+                                ''', state, new_state)
+                                total_fixed += int(result.split()[-1]) if result else 0
+        
         if not all_fixes:
             logger.info("No state normalization needed")
             return {"fixes": [], "total_fixed": 0}
@@ -2709,8 +2859,8 @@ class Service(IService):
             logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
             return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
         else:
-            logger.success(f"Normalized {total_fixed} hotels.")
-            return {"fixes": all_fixes, "total_fixed": total_fixed}
+            logger.success(f"Normalized {total_fixed} hotels, cleared {total_cleared} junk values.")
+            return {"fixes": all_fixes, "total_fixed": total_fixed, "total_cleared": total_cleared}
 
     def extract_state_from_text(self, text: str) -> Optional[str]:
         """Extract US state from a text string (address, city, etc).

@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from loguru import logger
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -241,14 +242,20 @@ class Service(IService):
 
         logger.info(f"Generating state report for {state}")
 
+        # Map display country to DB value
+        db_country = {
+            "USA": "United States",
+            "UK": "United Kingdom",
+        }.get(country, country)
+
         # Get data from database
-        leads = await repo.get_leads_for_state(state, source_pattern=source_pattern)
-        stats = await repo.get_state_stats(state, source_pattern=source_pattern)
-        top_engines = await repo.get_top_engines_for_state(state, source_pattern=source_pattern)
+        leads = await repo.get_leads_for_state(state, country=db_country, source_pattern=source_pattern)
+        stats = await repo.get_state_stats(state, country=db_country, source_pattern=source_pattern)
+        top_engines = await repo.get_top_engines_for_state(state, country=db_country, source_pattern=source_pattern)
         if source_pattern:
-            funnel = await repo.get_detection_funnel_by_source(state, source_pattern)
+            funnel = await repo.get_detection_funnel_by_source(state, country=db_country, source_pattern=source_pattern)
         else:
-            funnel = await repo.get_detection_funnel(state)
+            funnel = await repo.get_detection_funnel(state, country=db_country)
 
         logger.info(f"Found {len(leads)} leads for {state}")
 
@@ -347,6 +354,52 @@ class Service(IService):
                 s3_uri = upload_file(tmp_path, s3_key)
 
             logger.info(f"Uploaded crawl data report to {s3_uri}")
+            return s3_uri, len(leads)
+        finally:
+            os.unlink(tmp_path)
+
+    async def export_country_list(self, country: str, db_country: str) -> tuple[str, int]:
+        """Generate a single Excel report for ALL leads in a country.
+
+        Creates files like: UK/UK_leads.xlsx
+        Used for countries where per-region splitting isn't useful (e.g., UK).
+        """
+        import subprocess
+
+        logger.info(f"Generating country-level report for {country}")
+
+        # Get all leads for the country
+        leads = await repo.get_leads_for_country(db_country)
+        logger.info(f"Found {len(leads)} leads for {country}")
+
+        if not leads:
+            logger.warning(f"No leads found for {country}")
+            return "", 0
+
+        # Create workbook (reuse crawl format - simple leads list)
+        workbook = self._create_crawl_workbook(leads, f"{country} Leads")
+
+        # Save to temp file and upload
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            workbook.save(tmp.name)
+            tmp_path = tmp.name
+
+        try:
+            filename = f"{country}_leads.xlsx"
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/{country}/{filename}"
+
+            result = subprocess.run(
+                ["s5cmd", "cp", tmp_path, s3_uri],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
+                s3_key = f"HotelLeadGen/{country}/{filename}"
+                s3_uri = upload_file(tmp_path, s3_key)
+
+            logger.info(f"Uploaded country report to {s3_uri}")
             return s3_uri, len(leads)
         finally:
             os.unlink(tmp_path)
@@ -514,7 +567,10 @@ class Service(IService):
         # Write data rows
         for row, lead in enumerate(leads, 2):
             for col, extractor in enumerate(extractors, 1):
-                cell = sheet.cell(row=row, column=col, value=extractor(lead))
+                value = extractor(lead)
+                if isinstance(value, str):
+                    value = ILLEGAL_CHARACTERS_RE.sub("", value)
+                cell = sheet.cell(row=row, column=col, value=value)
                 cell.border = thin_border
 
         # Auto-adjust column widths

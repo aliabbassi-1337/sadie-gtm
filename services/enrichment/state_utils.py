@@ -72,6 +72,266 @@ AU_STATES = {
     'NT': 'Northern Territory', 'ACT': 'Australian Capital Territory',
 }
 
+# Canadian province abbreviation -> full name
+CA_PROVINCES = {
+    'AB': 'Alberta',
+    'BC': 'British Columbia',
+    'MB': 'Manitoba',
+    'NB': 'New Brunswick',
+    'NL': 'Newfoundland and Labrador',
+    'NS': 'Nova Scotia',
+    'NT': 'Northwest Territories',
+    'NU': 'Nunavut',
+    'ON': 'Ontario',
+    'PE': 'Prince Edward Island',
+    'QC': 'Quebec',
+    'SK': 'Saskatchewan',
+    'YT': 'Yukon',
+}
+
+# Canadian province variations/typos -> normalized name
+CA_PROVINCE_VARIATIONS = {
+    # Abbreviation case variants
+    'on': 'Ontario',
+    'bc': 'British Columbia',
+    'ab': 'Alberta',
+    # Typos
+    'British Colombia': 'British Columbia',
+    'British Columbia,': 'British Columbia',
+    # Accent variations
+    'Québec': 'Quebec',
+    # Short forms
+    'Newfoundland': 'Newfoundland and Labrador',
+    'P.E.I.': 'Prince Edward Island',
+    'PEI': 'Prince Edward Island',
+    # Cities incorrectly used as province
+    'Montreal': 'Quebec',
+    'Toronto': 'Ontario',
+    'Banff': 'Alberta',
+    'Bonnyville': 'Alberta',
+    # Junk
+    '*': None,
+    '-': None,
+    'CA': None,  # Ambiguous - could be California
+    # Wrong country (US states leaking in)
+    'California': None,
+    'Florida': None,
+    'Texas': None,
+    'New York': None,
+    'Washington': None,
+    'Oregon': None,
+    'Arizona': None,
+    'Nevada': None,
+    'Colorado': None,
+    'Hawaii': None,
+    'Georgia': None,
+    'Virginia': None,
+    'Montana': None,
+    'Idaho': None,
+    'Maine': None,
+    'Vermont': None,
+    # Wrong country (Australian states leaking in)
+    'Western Australia': None,
+    'South Australia': None,
+    'New South Wales': None,
+    'Queensland': None,
+    'Victoria': None,
+    'Tasmania': None,
+    'Australian Capital Territory': None,
+    'Northern Territory': None,
+}
+
+# UK region normalization: variation -> canonical region name
+# Goal: consolidate raw values into ~40 usable regions for sales
+# Scotland/Wales/NI -> nation-level, England -> major counties only
+UK_REGION_VARIATIONS = {
+    # ===== Junk values -> clear them =====
+    '*': None,
+    '.': None,
+    '-': None,
+    'na': None,
+    'UK': None,
+    'United Kingdom': None,
+    '+44 (0) 207 587 3019': None,
+    'SA43 1PP': None,
+
+    # ===== Prefix junk =====
+    ',Somerset': 'Somerset',
+    '*Sutherland': 'Highland',
+
+    # ===== Nation-level: case normalization =====
+    'ENGLAND': 'England',
+    'SCOTLAND': 'Scotland',
+
+    # ===== Gaelic / bilingual names =====
+    'Alba / Scotland': 'Scotland',
+    'Cymru / Wales': 'Wales',
+    'Northern Ireland / Tuaisceart Éireann': 'Northern Ireland',
+
+    # ===== ENGLAND: cities/towns -> counties =====
+    'Arundel': 'West Sussex',
+    'Bath': 'Somerset',
+    'Bath and North East Somerset': 'Somerset',
+    'Bicester': 'Oxfordshire',
+    'Bournemouth': 'Dorset',
+    'Bournemouth, Dorset': 'Dorset',
+    'Brampton': 'Cumbria',
+    'Bristol': 'Somerset',
+    'Cambridge': 'Cambridgeshire',
+    'Carlisle': 'Cumbria',
+    'Central Milton Keynes, Buckinghamshire': 'Buckinghamshire',
+    'Cheltenham': 'Gloucestershire',
+    'Chichester': 'West Sussex',
+    'Chorley': 'Lancashire',
+    'Congleton': 'Cheshire',
+    'Derby': 'Derbyshire',
+    'Devizes': 'Wiltshire',
+    'Dudley': 'West Midlands',
+    'Durham City': 'Durham',
+    'Gloucester': 'Gloucestershire',
+    'Greater London': 'London',
+    'Harrogate': 'North Yorkshire',
+    'Henley on Thames': 'Oxfordshire',
+    'Ilchester': 'Somerset',
+    'Ilford': 'Essex',
+    'Ilfracombe': 'Devon',
+    'Lancaster': 'Lancashire',
+    'Liverpool': 'Merseyside',
+    'Manchester': 'Greater Manchester',
+    'Margate': 'Kent',
+    'Middlesex': 'London',
+    'Morcambe': 'Lancashire',
+    'Newlands': 'Cumbria',
+    'Northampton': 'Northamptonshire',
+    'Northumberland Newcastle Upon Tyne': 'Northumberland',
+    'North East Lincolnshire': 'Lincolnshire',
+    'Oxford': 'Oxfordshire',
+    'Portsmouth': 'Hampshire',
+    'Reading': 'Berkshire',
+    'Sheffield': 'South Yorkshire',
+    'Spalding': 'Lincolnshire',
+    'The Lake District': 'Cumbria',
+    'Truro': 'Cornwall',
+    'Warminster': 'Wiltshire',
+    'Winchester': 'Hampshire',
+    'York': 'North Yorkshire',
+    'Avon': 'Somerset',
+    'Humberside': 'East Yorkshire',
+    'Teeside': 'North Yorkshire',
+    'Yorkshire': 'North Yorkshire',
+
+    # ===== ENGLAND: case/typo fixes =====
+    'DEVON': 'Devon',
+    'DERBYSHIRE': 'Derbyshire',
+    'EAST SUSSEX': 'East Sussex',
+    'STROUD': 'Gloucestershire',
+    'HASTINGS': 'East Sussex',
+    'WINDERMERE': 'Cumbria',
+    'buckimghamshire': 'Buckinghamshire',
+    'gloucestershire': 'Gloucestershire',
+    'Derbys': 'Derbyshire',
+    'Cambs': 'Cambridgeshire',
+    'Hants': 'Hampshire',
+    'Lancahire': 'Lancashire',
+    'Warwichshire': 'Warwickshire',
+    'Hudderfield': 'West Yorkshire',
+    'Yorkshire - North': 'North Yorkshire',
+    'Isle Of Wight': 'Isle of Wight',
+    'Londres': 'London',
+    'Kings Cross': 'London',
+
+    # ===== SCOTLAND: cities/towns -> regions =====
+    'Aberdeen': 'Aberdeenshire',
+    'Ardlui': 'Stirlingshire',
+    'Caithness': 'Highland',
+    'Edinburgh': 'Lothian',
+    'Glasgow': 'Greater Glasgow',
+    'Highlands': 'Highland',
+    'Inverness': 'Highland',
+    'Kincardineshire': 'Aberdeenshire',
+    'Kirkcudbrightshire': 'Dumfries & Galloway',
+    'Ross and Cromarty': 'Highland',
+    'Stranraer': 'Dumfries & Galloway',
+    'Sutherland': 'Highland',
+    'Central': 'Stirlingshire',
+    'Argyll': 'Argyll and Bute',
+    'Perth and Kinross': 'Perthshire',
+    'Midlothian': 'Lothian',
+    'East Lothian': 'Lothian',
+    'dumfries and galloway': 'Dumfries & Galloway',
+    'Dumfries and Galloway': 'Dumfries & Galloway',
+    'Shetland Islands': 'Highland',
+
+    # ===== WALES: cities/towns -> counties =====
+    'Barry': 'Vale of Glamorgan',
+    'Cardiff': 'South Glamorgan',
+    'Ceridigion': 'Ceredigion',
+    'Crickhowell': 'Powys',
+    'Llandrindod Wells': 'Powys',
+    'Llandudno': 'Conwy',
+    'Merthyr Tydfil': 'Wales',
+    'Mold': 'Flintshire',
+    'Narberth': 'Pembrokeshire',
+    'North Wales': 'Wales',
+    'Swansea': 'West Glamorgan',
+    'Tenby': 'Pembrokeshire',
+    'Dyfed': 'Pembrokeshire',
+
+    # ===== NORTHERN IRELAND: consolidate to NI =====
+    'Antrim': 'Northern Ireland',
+    'County Antrim': 'Northern Ireland',
+    'Co. Derry': 'Northern Ireland',
+    'Co. Down': 'Northern Ireland',
+    'Co. Fermanagh': 'Northern Ireland',
+    'Fermanagh': 'Northern Ireland',
+
+    # ===== ENGLAND: small counties -> England =====
+    'Bedfordshire': 'England',
+    'Cambridgeshire': 'England',
+    'Durham': 'England',
+    'East Yorkshire': 'England',
+    'Hertfordshire': 'England',
+    'West Midlands': 'England',
+
+    # ===== Consolidate overlapping areas =====
+    'East Ayrshire': 'Scotland',
+    'West Kilbride': 'Scotland',
+    'Whitchurch': 'Shropshire',
+
+    # ===== CHANNEL ISLANDS =====
+    'St Peter Port': 'Channel Islands',
+    'Guernsey': 'Channel Islands',
+    'Jersey': 'Channel Islands',
+
+    # ===== Wrong country (Australian states) =====
+    'Western Australia': None,
+    'South Australia': None,
+    'New South Wales': None,
+    'Queensland': None,
+    'QLD': None,
+    'Victoria': None,
+    'Tasmania': None,
+    'Northern Territory': None,
+    'Australian Capital Territory': None,
+
+    # ===== Wrong country (US states) =====
+    'California': None,
+    'Florida': None,
+    'Texas': None,
+    'New York': None,
+    'Washington': None,
+    'Oregon': None,
+    'Arizona': None,
+    'Nevada': None,
+    'Colorado': None,
+    'Hawaii': None,
+    'Georgia': None,
+
+    # ===== Foreign =====
+    'Barcelona': None,
+    'Ireland': None,
+}
+
 # Common variations, typos, and case issues -> normalized full name
 # This handles edge cases that abbreviation lookup misses
 STATE_VARIATIONS = {
@@ -173,7 +433,7 @@ STATE_VARIATIONS = {
 def normalize_state(state: Optional[str], country: Optional[str] = None) -> Optional[str]:
     """Normalize state to full name.
     
-    Only normalizes for known countries (US, Australia).
+    Normalizes for known countries (US, Australia, Canada, UK).
     Does NOT normalize for other countries to avoid false positives
     (e.g., AR is Argentina's country code, not Arkansas).
     
@@ -182,23 +442,15 @@ def normalize_state(state: Optional[str], country: Optional[str] = None) -> Opti
         country: Country - required for proper normalization
     
     Returns:
-        Full state name if found and country matches, otherwise original value
+        Full state name if found and country matches, otherwise original value.
+        Returns None if the value should be cleared (junk/wrong country).
     """
     if not state:
         return state
     
     state_stripped = state.strip()
     
-    # Already a valid US full name? Return as-is
-    if state_stripped in VALID_STATE_NAMES:
-        return state_stripped
-    
-    # Already a valid AU full name? Return as-is  
-    au_full_names = set(AU_STATES.values())
-    if state_stripped in au_full_names:
-        return state_stripped
-    
-    # Must have country context to normalize abbreviations
+    # Must have country context to normalize properly
     if not country:
         return state
     
@@ -207,24 +459,50 @@ def normalize_state(state: Optional[str], country: Optional[str] = None) -> Opti
     # US context
     is_us = country_lower in ('united states', 'usa', 'us', 'united states of america')
     if is_us:
-        # Check variations first (handles case issues, typos)
+        # Already a valid US full name
+        if state_stripped in VALID_STATE_NAMES:
+            return state_stripped
+        # Check variations (handles case issues, typos)
         if state_stripped in STATE_VARIATIONS:
             return STATE_VARIATIONS[state_stripped]
-        
         # Check US state abbreviations
         state_upper = state_stripped.upper()
         if state_upper in US_STATES:
             return US_STATES[state_upper]
-        
         return state
     
     # Australia context
     is_au = country_lower in ('australia', 'au')
     if is_au:
+        au_full_names = set(AU_STATES.values())
+        if state_stripped in au_full_names:
+            return state_stripped
         state_upper = state_stripped.upper()
         if state_upper in AU_STATES:
             return AU_STATES[state_upper]
-        
+        return state
+    
+    # Canada context
+    is_ca = country_lower in ('canada', 'ca')
+    if is_ca:
+        # Check variations/typos first (handles California -> None, etc.)
+        if state_stripped in CA_PROVINCE_VARIATIONS:
+            return CA_PROVINCE_VARIATIONS[state_stripped]
+        # Already a valid CA full name
+        ca_full_names = set(CA_PROVINCES.values())
+        if state_stripped in ca_full_names:
+            return state_stripped
+        # Check province abbreviations
+        state_upper = state_stripped.upper()
+        if state_upper in CA_PROVINCES:
+            return CA_PROVINCES[state_upper]
+        return state
+    
+    # UK context
+    is_uk = country_lower in ('united kingdom', 'uk', 'gb', 'great britain')
+    if is_uk:
+        if state_stripped in UK_REGION_VARIATIONS:
+            return UK_REGION_VARIATIONS[state_stripped]
         return state
     
     # Other countries - don't normalize (avoid false positives)

@@ -88,52 +88,45 @@ class ExtractedIPMS247Data(BaseModel):
         return True
 
 
-def _get_brightdata_proxy(use_residential: bool = False, session_id: str = None) -> Optional[str]:
-    """Get Brightdata proxy URL for httpx.
+def _get_brightdata_proxy(session_id: str = None) -> Optional[str]:
+    """Get Brightdata datacenter proxy URL for httpx.
+    
+    Only uses datacenter zone (cheapest). No fallback to residential or unlocker.
     
     Args:
-        use_residential: If True, use residential proxy (more reliable, higher cost)
-        session_id: Unique ID for residential proxy to get new IP
+        session_id: Unique ID for session-based IP rotation
     """
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
-    
-    if use_residential:
-        res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
-        res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
-        if customer_id and res_zone and res_password:
-            username = f"brd-customer-{customer_id}-zone-{res_zone}"
-            if session_id:
-                username += f"-session-{session_id}"
-            return f"http://{username}:{res_password}@brd.superproxy.io:22225"
-    else:
-        dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
-        dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
-        if customer_id and dc_zone and dc_password:
-            username = f"brd-customer-{customer_id}-zone-{dc_zone}"
-            return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
+    dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+    dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+    if customer_id and dc_zone and dc_password:
+        username = f"brd-customer-{customer_id}-zone-{dc_zone}"
+        if session_id:
+            username += f"-session-{session_id}"
+        return f"http://{username}:{dc_password}@brd.superproxy.io:33335"
     return None
 
 
 def _get_brightdata_proxy_for_playwright(session_id: Optional[str] = None) -> Optional[dict]:
-    """Get Brightdata residential proxy config for Playwright.
+    """Get Brightdata datacenter proxy config for Playwright.
     
     Args:
         session_id: Unique session ID to get a dedicated IP. Each session_id gets a different IP.
     
     Returns dict with server, username, password keys.
-    Uses residential proxy - required for IPMS247 (datacenter blocked by Brightdata policy).
+    Uses datacenter zone only (cheapest).
     """
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
-    res_zone = os.getenv("BRIGHTDATA_RES_ZONE", "")
-    res_password = os.getenv("BRIGHTDATA_RES_PASSWORD", "")
-    if customer_id and res_zone and res_password:
-        username = f"brd-customer-{customer_id}-zone-{res_zone}"
+    dc_zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+    dc_password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+    if customer_id and dc_zone and dc_password:
+        username = f"brd-customer-{customer_id}-zone-{dc_zone}"
         if session_id:
             username += f"-session-{session_id}"
         return {
-            "server": "http://brd.superproxy.io:22225",
+            "server": f"http://brd.superproxy.io:33335",
             "username": username,
-            "password": res_password,
+            "password": dc_password,
         }
     return None
 
@@ -359,12 +352,12 @@ class IPMS247Scraper:
         if not booking_url.startswith("https://"):
             booking_url = booking_url.replace("http://", "https://")
         
-        # Setup client - use residential proxy on retries (new IP each time)
+        # Setup client - use datacenter proxy on retries (new IP each time)
         client_kwargs = {"timeout": self.timeout, "follow_redirects": True}
         if _retry_count > 0:
             # Generate unique session ID for new IP
             session_id = f"{slug[:8]}_{uuid.uuid4().hex[:8]}"
-            proxy_url = _get_brightdata_proxy(use_residential=True, session_id=session_id)
+            proxy_url = _get_brightdata_proxy(session_id=session_id)
             if proxy_url:
                 client_kwargs["proxy"] = proxy_url
                 client_kwargs["verify"] = False
