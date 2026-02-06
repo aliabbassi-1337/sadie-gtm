@@ -2422,6 +2422,30 @@ class Service(IService):
     # SITEMINDER ENRICHMENT
     # =========================================================================
 
+    async def batch_update_siteminder_enrichment(self, updates: List[Dict]) -> int:
+        """Batch update hotels with SiteMinder enrichment data."""
+        return await repo.batch_update_siteminder_enrichment(updates)
+
+    async def batch_set_siteminder_enrichment_failed(self, hotel_ids: List[int]) -> int:
+        """Mark SiteMinder hotels as enrichment failed."""
+        return await repo.batch_set_siteminder_enrichment_failed(hotel_ids)
+
+    async def get_siteminder_hotels_needing_enrichment(self, limit: int = 100):
+        """Get SiteMinder hotels needing enrichment."""
+        return await repo.get_siteminder_hotels_needing_enrichment(limit=limit)
+
+    # =========================================================================
+    # MEWS ENRICHMENT
+    # =========================================================================
+
+    async def batch_update_mews_enrichment(self, updates: List[Dict]) -> int:
+        """Batch update hotels with Mews enrichment data."""
+        return await repo.batch_update_mews_enrichment(updates)
+
+    async def get_mews_hotels_needing_enrichment(self, limit: int = 100):
+        """Get Mews hotels needing enrichment."""
+        return await repo.get_mews_hotels_needing_enrichment(limit=limit)
+
     async def process_siteminder_hotel(
         self, hotel_id: int, booking_url: str, client=None,
     ) -> "SiteMinderEnrichmentResult":

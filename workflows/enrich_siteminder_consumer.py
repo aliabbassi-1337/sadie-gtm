@@ -26,7 +26,6 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment import repo
 from services.enrichment.service import Service, SiteMinderEnrichmentResult
 from infra.sqs import receive_messages, delete_messages_batch, get_queue_attributes
 from lib.siteminder.api_client import SiteMinderClient
@@ -102,10 +101,10 @@ async def run_sqs_consumer(concurrency: int = 20, use_brightdata: bool = False):
                         failed_ids.append(result.hotel_id)
 
                 if len(batch_results) >= 50:
-                    await repo.batch_update_siteminder_enrichment(batch_results)
+                    await service.batch_update_siteminder_enrichment(batch_results)
                     batch_results = []
                 if len(failed_ids) >= 50:
-                    await repo.batch_set_siteminder_enrichment_failed(failed_ids)
+                    await service.batch_set_siteminder_enrichment_failed(failed_ids)
                     failed_ids = []
 
                 attrs = get_queue_attributes(QUEUE_URL)
@@ -113,9 +112,9 @@ async def run_sqs_consumer(concurrency: int = 20, use_brightdata: bool = False):
                 logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, ~{remaining} remaining")
 
         if batch_results:
-            await repo.batch_update_siteminder_enrichment(batch_results)
+            await service.batch_update_siteminder_enrichment(batch_results)
         if failed_ids:
-            await repo.batch_set_siteminder_enrichment_failed(failed_ids)
+            await service.batch_set_siteminder_enrichment_failed(failed_ids)
 
         logger.info(f"Consumer stopped. Total: {total_processed} processed, {total_enriched} enriched")
     finally:
@@ -127,7 +126,7 @@ async def run_direct(limit: int = 1000, concurrency: int = 20, use_brightdata: b
     await init_db()
     try:
         service = Service()
-        hotels = await repo.get_siteminder_hotels_needing_enrichment(limit=limit)
+        hotels = await service.get_siteminder_hotels_needing_enrichment(limit=limit)
         if not hotels:
             logger.info("No SiteMinder hotels pending enrichment")
             return
@@ -151,10 +150,10 @@ async def run_direct(limit: int = 1000, concurrency: int = 20, use_brightdata: b
                 ok = [r.to_update_dict() for r in results if r.success and r.name]
                 fail = [r.hotel_id for r in results if not r.success]
                 if ok:
-                    await repo.batch_update_siteminder_enrichment(ok)
+                    await service.batch_update_siteminder_enrichment(ok)
                     enriched += len(ok)
                 if fail:
-                    await repo.batch_set_siteminder_enrichment_failed(fail)
+                    await service.batch_set_siteminder_enrichment_failed(fail)
                     failed += len(fail)
 
                 logger.info(f"Progress: {min(i + 50, len(hotels))}/{len(hotels)} (enriched: {enriched}, failed: {failed})")

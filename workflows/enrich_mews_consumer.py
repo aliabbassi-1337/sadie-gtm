@@ -21,7 +21,6 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment import repo
 from services.enrichment.service import Service
 from infra.sqs import receive_messages, delete_messages_batch, get_queue_attributes
 from lib.mews.api_client import MewsApiClient
@@ -51,7 +50,7 @@ async def run_consumer(concurrency: int = 10):
     client = MewsApiClient(timeout=30.0, use_brightdata=True)
 
     try:
-        service = Service()
+        svc = Service()
         logger.info(f"Starting Mews enrichment consumer (concurrency={concurrency})")
         await client.initialize()
 
@@ -80,7 +79,7 @@ async def run_consumer(concurrency: int = 10):
                 continue
 
             results = await asyncio.gather(*[
-                service.process_mews_hotel(h_id, url, client=client)
+                svc.process_mews_hotel(h_id, url, client=client)
                 for h_id, url in valid_messages
             ])
 
@@ -94,7 +93,7 @@ async def run_consumer(concurrency: int = 10):
                     logger.info(f"  Hotel {result.hotel_id}: {result.name[:30]} | {result.city}, {result.country}")
 
             if len(batch_results) >= 50:
-                updated = await repo.batch_update_mews_enrichment(batch_results)
+                updated = await svc.batch_update_mews_enrichment(batch_results)
                 logger.info(f"Batch update: {updated} hotels")
                 batch_results = []
 
@@ -103,7 +102,7 @@ async def run_consumer(concurrency: int = 10):
             logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, ~{remaining} remaining")
 
         if batch_results:
-            await repo.batch_update_mews_enrichment(batch_results)
+            await svc.batch_update_mews_enrichment(batch_results)
 
         logger.info(f"Consumer stopped. Total: {total_processed} processed, {total_enriched} enriched")
     finally:
