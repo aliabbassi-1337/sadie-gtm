@@ -2456,6 +2456,7 @@ class Service(IService):
         self, hotel_id: int, booking_url: str, client=None,
     ) -> "SiteMinderEnrichmentResult":
         """Process a single hotel using the SiteMinder property API."""
+        import httpx
         from lib.siteminder.api_client import SiteMinderClient, extract_channel_code
 
         try:
@@ -2482,6 +2483,8 @@ class Service(IService):
                 lat=data.lat,
                 lon=data.lon,
             )
+        except httpx.TimeoutException:
+            return SiteMinderEnrichmentResult(hotel_id=hotel_id, success=False, error="timeout")
         except Exception as e:
             return SiteMinderEnrichmentResult(hotel_id=hotel_id, success=False, error=str(e)[:100])
 
@@ -2538,6 +2541,7 @@ class Service(IService):
         self, hotel_id: int, booking_url: str, client=None,
     ) -> "MewsEnrichmentResult":
         """Process a single hotel using the Mews API client."""
+        import httpx
         from lib.mews.api_client import MewsApiClient
 
         try:
@@ -2572,6 +2576,9 @@ class Service(IService):
                 lat=data.lat,
                 lon=data.lon,
             )
+        except httpx.TimeoutException:
+            # Timeout is NOT "no data" -- return special error so consumer can retry
+            return MewsEnrichmentResult(hotel_id=hotel_id, success=False, error="timeout")
         except Exception as e:
             return MewsEnrichmentResult(hotel_id=hotel_id, success=False, error=str(e)[:100])
 

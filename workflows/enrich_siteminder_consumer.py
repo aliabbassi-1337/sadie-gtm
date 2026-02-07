@@ -58,6 +58,7 @@ async def run_sqs_consumer(concurrency: int = 20, use_brightdata: bool = False):
 
         total_processed = 0
         total_enriched = 0
+        total_timeouts = 0
         batch_results = []
         failed_ids = []
 
@@ -73,15 +74,19 @@ async def run_sqs_consumer(concurrency: int = 20, use_brightdata: bool = False):
                     continue
 
                 valid_messages = []
-                receipt_handles = []
+                msg_map = {}  # hotel_id -> receipt_handle
+                invalid_handles = []
                 for msg in messages:
-                    receipt_handles.append(msg["receipt_handle"])
                     body = msg["body"]
                     if body.get("hotel_id") and body.get("booking_url"):
                         valid_messages.append((body["hotel_id"], body["booking_url"]))
+                        msg_map[body["hotel_id"]] = msg["receipt_handle"]
+                    else:
+                        invalid_handles.append(msg["receipt_handle"])
 
+                if invalid_handles:
+                    delete_messages_batch(QUEUE_URL, invalid_handles)
                 if not valid_messages:
-                    delete_messages_batch(QUEUE_URL, receipt_handles)
                     continue
 
                 async def process(hotel_id, url):
@@ -89,16 +94,27 @@ async def run_sqs_consumer(concurrency: int = 20, use_brightdata: bool = False):
                         return await service.process_siteminder_hotel(hotel_id, url, client=client)
 
                 results = await asyncio.gather(*[process(h, u) for h, u in valid_messages])
-                delete_messages_batch(QUEUE_URL, receipt_handles)
 
+                # Only delete messages that succeeded or permanently failed.
+                # Timeout messages stay in the queue for SQS to redeliver.
+                handles_to_delete = []
                 for result in results:
                     total_processed += 1
-                    if result.success and result.name:
+                    is_timeout = (not result.success and result.error == "timeout")
+                    if is_timeout:
+                        total_timeouts += 1
+                        logger.warning(f"  Hotel {result.hotel_id}: TIMEOUT (will retry via SQS)")
+                    elif result.success and result.name:
                         batch_results.append(result.to_update_dict())
                         total_enriched += 1
+                        handles_to_delete.append(msg_map[result.hotel_id])
                         logger.info(f"  Hotel {result.hotel_id}: {result.name[:40]}")
                     else:
                         failed_ids.append(result.hotel_id)
+                        handles_to_delete.append(msg_map[result.hotel_id])
+
+                if handles_to_delete:
+                    delete_messages_batch(QUEUE_URL, handles_to_delete)
 
                 if len(batch_results) >= 50:
                     await service.batch_update_siteminder_enrichment(batch_results)
@@ -109,14 +125,14 @@ async def run_sqs_consumer(concurrency: int = 20, use_brightdata: bool = False):
 
                 attrs = get_queue_attributes(QUEUE_URL)
                 remaining = int(attrs.get("ApproximateNumberOfMessages", 0))
-                logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, ~{remaining} remaining")
+                logger.info(f"Progress: {total_processed} processed, {total_enriched} enriched, {total_timeouts} timeouts, ~{remaining} remaining")
 
         if batch_results:
             await service.batch_update_siteminder_enrichment(batch_results)
         if failed_ids:
             await service.batch_set_siteminder_enrichment_failed(failed_ids)
 
-        logger.info(f"Consumer stopped. Total: {total_processed} processed, {total_enriched} enriched")
+        logger.info(f"Consumer stopped. Total: {total_processed} processed, {total_enriched} enriched, {total_timeouts} timeouts")
     finally:
         await close_db()
 

@@ -345,6 +345,10 @@ class MewsApiClient:
         
         Returns:
             MewsHotelData if successful, None if failed
+            
+        Raises:
+            httpx.TimeoutException: If all retries timed out (caller should NOT
+                treat this as "no data" -- the hotel may be valid but slow).
         """
         await self.initialize()
         
@@ -364,6 +368,8 @@ class MewsApiClient:
             
             return None
             
+        except httpx.TimeoutException:
+            raise  # Let caller handle -- this is NOT "no data"
         except Exception as e:
             logger.debug(f"Mews extraction error for {slug}: {e}")
             return None
@@ -430,6 +436,15 @@ class MewsApiClient:
                     logger.debug(f"Mews API error for {slug}: HTTP {resp.status_code}")
                     return None, False
                     
+            except httpx.TimeoutException:
+                # Timeout is transient -- retry with backoff, not a permanent failure
+                if retry_count < 3:
+                    wait = min(BASE_RETRY_DELAY * (2 ** retry_count), MAX_RETRY_DELAY)
+                    logger.warning(f"Mews API timeout for {slug}, retrying in {wait:.1f}s (attempt {retry_count + 1}/3)...")
+                    await asyncio.sleep(wait)
+                    return await self._fetch_via_api(slug, retry_count + 1)
+                logger.warning(f"Mews API timeout for {slug} after 3 retries")
+                raise  # Propagate so caller knows this was a timeout, not "no data"
             except Exception as e:
                 logger.debug(f"Mews API request failed for {slug}: {e}")
                 return None, False

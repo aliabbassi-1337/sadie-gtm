@@ -194,7 +194,7 @@ class SiteMinderClient:
             "Referer": f"https://direct-book.com/properties/{channel_code}",
         }
     
-    async def get_property_data(self, channel_code: str) -> Optional[SiteMinderHotelData]:
+    async def get_property_data(self, channel_code: str, _retry: int = 0) -> Optional[SiteMinderHotelData]:
         """Get FULL property data from SiteMinder (address, contact, location).
         
         Uses the 'property' GraphQL operation which returns:
@@ -208,6 +208,10 @@ class SiteMinderClient:
         
         Returns:
             SiteMinderHotelData if successful, None if failed
+            
+        Raises:
+            httpx.TimeoutException: If all retries timed out (caller should NOT
+                treat this as "no data" -- the hotel may be valid but slow).
         """
         if not self._client:
             raise RuntimeError("Client not initialized. Use 'async with' context manager.")
@@ -217,6 +221,7 @@ class SiteMinderClient:
         
         # Build GraphQL query URL with persisted query
         import json
+        import asyncio
         variables = quote(json.dumps({"channelCode": channel_code, "locale": "en"}))
         extensions = quote(json.dumps({
             "persistedQuery": {"version": 1, "sha256Hash": PROPERTY_QUERY_HASH}
@@ -247,8 +252,13 @@ class SiteMinderClient:
             return self._parse_property_response(prop)
             
         except httpx.TimeoutException:
-            logger.debug(f"SiteMinder property API timeout for {channel_code}")
-            return None
+            if _retry < 3:
+                wait = 2.0 * (2 ** _retry)
+                logger.warning(f"SiteMinder timeout for {channel_code}, retrying in {wait:.0f}s ({_retry + 1}/3)...")
+                await asyncio.sleep(wait)
+                return await self.get_property_data(channel_code, _retry=_retry + 1)
+            logger.warning(f"SiteMinder timeout for {channel_code} after 3 retries")
+            raise  # Propagate so caller knows this was a timeout, not "no data"
         except Exception as e:
             logger.debug(f"SiteMinder property API error for {channel_code}: {e}")
             return None
