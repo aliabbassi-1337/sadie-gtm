@@ -1,15 +1,19 @@
 """Unified hotel deduplication across all booking engines.
 
-Two-stage deduplication:
-  STAGE 1 - External ID (100% accurate, zero false positives):
+Three-stage deduplication:
+  STAGE 1a - External ID (100% accurate, zero false positives):
     Groups hotels by (external_id, external_id_type).
     Same external_id+type = definitely same hotel.
-    Keeps the best-scored record, merges data from duplicates.
 
-  STAGE 2 - Name + City (catches remaining dupes):
-    Groups surviving hotels by normalized(name, city).
-    Handles cases where same hotel was ingested from different sources.
-    Keeps best record, marks remaining duplicates.
+  STAGE 1b - RMS Client ID (RMS-specific, 100% accurate):
+    Extracts numeric RMS client ID from booking URLs.
+    Same client ID = same property, even if external_id differs.
+    Catches RMS dupes from multiple URL formats / room types.
+
+  STAGE 2 - Name + City + Engine (catches remaining same-engine dupes):
+    Groups surviving hotels by normalized(name, city, engine).
+    Only deduplicates within the same booking engine.
+    Cross-engine records are preserved (different engines = valuable data).
 
 Duplicates are marked with status = -3 (distinct from -1 rejected).
 
@@ -34,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncio
 import argparse
+import re
 from collections import defaultdict
 from typing import Dict, List, Any, Optional, Tuple
 from loguru import logger
@@ -74,6 +79,58 @@ def is_garbage_city(city: Optional[str]) -> bool:
     return normalize(city) in GARBAGE_CITIES
 
 
+# --- RMS Cloud client-ID extraction ---
+# RMS external_ids / booking URLs contain a numeric client ID that uniquely
+# identifies the property.  Multiple rows can exist for the same property
+# with different URL formats (different room-type paths, HTTP vs HTTPS, etc).
+# Patterns matched (from old dedupe_rms.py):
+#   - bookings.rmscloud.com/search/index/<ID>/...
+#   - bookings12.rmscloud.com/rates/index/<ID>/...
+#   - rmscloud.com/<ID>
+#   - ibe*.rmscloud.com/<ID>
+#   - <ID> (plain numeric external_id)
+
+RMS_ENGINE_NAMES = {"rms cloud", "rms"}
+
+
+def extract_rms_client_id(external_id: Optional[str]) -> Optional[str]:
+    """Extract the numeric RMS client ID from a booking URL or plain ID.
+
+    Tries multiple URL patterns used by RMS Cloud, returns the first match.
+    """
+    if not external_id:
+        return None
+
+    url = external_id.strip()
+
+    # Pattern 1: /search/index/<ID>
+    m = re.search(r'/search/index/(\d+)(?:/|$)', url, re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    # Pattern 2: /rates/index/<ID>
+    m = re.search(r'/rates/index/(\d+)(?:/|$)', url, re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    # Pattern 3: rmscloud.com/<ID>
+    m = re.search(r'rmscloud\.com/(\d+)(?:/|$)', url, re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    # Pattern 4: ibe*.rmscloud.com/<ID>
+    m = re.search(r'ibe\d*\.rmscloud\.com/(\d+)', url, re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    # Pattern 5: plain numeric ID (4+ digits)
+    m = re.match(r'^(\d{4,})$', url)
+    if m:
+        return m.group(1)
+
+    return None
+
+
 def score_record(r: Dict[str, Any]) -> int:
     """Score a hotel record -- higher = better data quality."""
     s = 0
@@ -98,10 +155,46 @@ def score_record(r: Dict[str, Any]) -> int:
     return s
 
 
+def _pick_best_value(keeper_val: Optional[str], other_val: Optional[str]) -> Optional[str]:
+    """Pick the more normalized/complete value between two non-empty strings.
+
+    Prefers:
+      - Longer values (e.g. "New South Wales" over "NSW")
+      - Mixed/title case over ALL CAPS (e.g. "Surfers Paradise" over "SURFERS PARADISE")
+    """
+    if not keeper_val:
+        return other_val
+    if not other_val:
+        return keeper_val
+
+    k, o = keeper_val.strip(), other_val.strip()
+    if not k:
+        return o
+    if not o:
+        return k
+
+    # Prefer longer (more complete / not abbreviated)
+    if len(o) > len(k):
+        return o
+
+    # Same length: prefer non-ALL-CAPS
+    if k == k.upper() and o != o.upper():
+        return o
+
+    return keeper_val
+
+
+# Fields where we should upgrade to the longer/better value even if keeper has data
+_UPGRADE_FIELDS = {"name", "city", "state", "country", "address"}
+
+
 def merge_group(recs: List[Dict]) -> Tuple[Dict, List[int]]:
     """
     Merge a group of duplicates. Returns (keeper, dupe_ids).
-    Only keeper fields that are empty get filled from duplicates.
+
+    - Empty keeper fields get filled from duplicates.
+    - For location/name fields, shorter or ALL-CAPS values get upgraded
+      to longer or properly-cased values (e.g. "NSW" -> "New South Wales").
     """
     if len(recs) == 1:
         return recs[0], []
@@ -126,9 +219,17 @@ def merge_group(recs: List[Dict]) -> Tuple[Dict, List[int]]:
             other_val = other.get(field)
             keeper_empty = (garbage_check(keeper_val) if garbage_check else not keeper_val)
             other_filled = (not garbage_check(other_val) if garbage_check else bool(other_val))
+
             if keeper_empty and other_filled:
+                # Fill empty field
                 keeper[field] = other_val
                 merged_any = True
+            elif field in _UPGRADE_FIELDS and other_filled and not keeper_empty:
+                # Both have values -- pick the better one
+                better = _pick_best_value(keeper_val, other_val)
+                if better != keeper_val:
+                    keeper[field] = better
+                    merged_any = True
 
         dupe_ids.append(other["hotel_id"])
 
@@ -216,6 +317,7 @@ async def execute_batch(conn, keepers: List[Dict], all_dupes: List[int]):
                 city TEXT,
                 state TEXT,
                 country TEXT,
+                address TEXT,
                 phone_website TEXT,
                 website TEXT
             ) ON COMMIT DROP
@@ -224,8 +326,8 @@ async def execute_batch(conn, keepers: List[Dict], all_dupes: List[int]):
         # Bulk insert into temp table
         await conn.executemany(
             """INSERT INTO _dedup_keepers
-               (hotel_id, name, email, city, state, country, phone_website, website)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+               (hotel_id, name, email, city, state, country, address, phone_website, website)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
             [
                 (
                     k["hotel_id"],
@@ -234,6 +336,7 @@ async def execute_batch(conn, keepers: List[Dict], all_dupes: List[int]):
                     k.get("city") or "",
                     k.get("state") or "",
                     k.get("country") or "",
+                    k.get("address") or "",
                     k.get("phone_website") or "",
                     k.get("website") or "",
                 )
@@ -241,17 +344,20 @@ async def execute_batch(conn, keepers: List[Dict], all_dupes: List[int]):
             ],
         )
 
-        # Single UPDATE join
+        # Single UPDATE join -- use merged values directly (they already
+        # contain the best pick from _pick_best_value), fall back to
+        # existing DB value only if merged value is empty.
         result = await conn.execute("""
             UPDATE sadie_gtm.hotels h
             SET
-                name = COALESCE(NULLIF(t.name, ''), h.name),
-                email = COALESCE(NULLIF(t.email, ''), h.email),
-                city = COALESCE(NULLIF(t.city, ''), h.city),
-                state = COALESCE(NULLIF(t.state, ''), h.state),
-                country = COALESCE(NULLIF(t.country, ''), h.country),
-                phone_website = COALESCE(NULLIF(t.phone_website, ''), h.phone_website),
-                website = COALESCE(NULLIF(t.website, ''), h.website),
+                name = CASE WHEN t.name != '' THEN t.name ELSE h.name END,
+                email = CASE WHEN t.email != '' THEN t.email ELSE h.email END,
+                city = CASE WHEN t.city != '' THEN t.city ELSE h.city END,
+                state = CASE WHEN t.state != '' THEN t.state ELSE h.state END,
+                country = CASE WHEN t.country != '' THEN t.country ELSE h.country END,
+                address = CASE WHEN t.address != '' THEN t.address ELSE h.address END,
+                phone_website = CASE WHEN t.phone_website != '' THEN t.phone_website ELSE h.phone_website END,
+                website = CASE WHEN t.website != '' THEN t.website ELSE h.website END,
                 updated_at = NOW()
             FROM _dedup_keepers t
             WHERE h.id = t.hotel_id
@@ -263,7 +369,7 @@ async def run_dedup(
     dry_run: bool = True,
     country: Optional[str] = None,
 ):
-    """Run unified two-stage deduplication."""
+    """Run unified three-stage deduplication (ext_id, RMS client ID, name+city)."""
     await init_db()
 
     try:
@@ -279,11 +385,11 @@ async def run_dedup(
                 return
 
             # ==============================================================
-            # STAGE 1: Deduplicate by External ID + Type
+            # STAGE 1a: Deduplicate by External ID + Type
             # ==============================================================
             logger.info("")
             logger.info("=" * 70)
-            logger.info("STAGE 1: DEDUPLICATE BY EXTERNAL ID")
+            logger.info("STAGE 1a: DEDUPLICATE BY EXTERNAL ID")
             logger.info("(Same external_id + type = definitely same hotel)")
             logger.info("=" * 70)
 
@@ -302,34 +408,112 @@ async def run_dedup(
             logger.info(f"Records without external_id: {len(no_ext_id)}")
             logger.info(f"Unique (external_id, type) pairs: {len(by_ext_id)}")
 
-            dup_groups_s1 = sum(1 for recs in by_ext_id.values() if len(recs) > 1)
-            logger.info(f"Groups with duplicates: {dup_groups_s1}")
+            dup_groups_s1a = sum(1 for recs in by_ext_id.values() if len(recs) > 1)
+            logger.info(f"Groups with duplicates: {dup_groups_s1a}")
 
-            stage1_keepers = []
-            stage1_dupes = []
+            stage1a_keepers = []
+            stage1a_dupes = []
 
             for key, recs in by_ext_id.items():
                 keeper, dupe_ids = merge_group(recs)
-                stage1_keepers.append(keeper)
-                stage1_dupes.extend(dupe_ids)
+                stage1a_keepers.append(keeper)
+                stage1a_dupes.extend(dupe_ids)
 
-            logger.info(f"Stage 1 keepers: {len(stage1_keepers)}, dupes: {len(stage1_dupes)}")
+            logger.info(f"Stage 1a keepers: {len(stage1a_keepers)}, dupes: {len(stage1a_dupes)}")
 
             # ==============================================================
-            # STAGE 2: Deduplicate by Name + City
+            # STAGE 1b: Deduplicate RMS Cloud by Client ID
             # ==============================================================
             logger.info("")
             logger.info("=" * 70)
-            logger.info("STAGE 2: DEDUPLICATE BY NAME + CITY")
-            logger.info("(Catches duplicates across different sources)")
+            logger.info("STAGE 1b: DEDUPLICATE RMS BY CLIENT ID")
+            logger.info("(Same numeric client ID from booking URL = same property)")
             logger.info("=" * 70)
 
-            stage2_input = stage1_keepers + no_ext_id
+            # Separate RMS records from non-RMS among Stage 1a survivors
+            rms_records: List[Dict] = []
+            non_rms_records: List[Dict] = []
+
+            for r in stage1a_keepers + no_ext_id:
+                engine = normalize(r.get("engine_name") or "")
+                if engine in RMS_ENGINE_NAMES:
+                    rms_records.append(r)
+                else:
+                    non_rms_records.append(r)
+
+            logger.info(f"RMS records to check: {len(rms_records)}")
+
+            by_client_id: Dict[str, List[Dict]] = defaultdict(list)
+            rms_no_client_id: List[Dict] = []
+
+            for r in rms_records:
+                cid = extract_rms_client_id(r.get("external_id"))
+                if cid:
+                    by_client_id[cid].append(r)
+                else:
+                    rms_no_client_id.append(r)
+
+            logger.info(f"RMS records with extractable client ID: {sum(len(v) for v in by_client_id.values())}")
+            logger.info(f"RMS records without client ID: {len(rms_no_client_id)}")
+            logger.info(f"Unique RMS client IDs: {len(by_client_id)}")
+
+            dup_groups_s1b = sum(1 for recs in by_client_id.values() if len(recs) > 1)
+            logger.info(f"RMS client ID groups with duplicates: {dup_groups_s1b}")
+
+            stage1b_keepers = []
+            stage1b_dupes = []
+
+            for cid, recs in by_client_id.items():
+                keeper, dupe_ids = merge_group(recs)
+                stage1b_keepers.append(keeper)
+                stage1b_dupes.extend(dupe_ids)
+
+            if stage1b_dupes:
+                # Print a few samples
+                logger.info("")
+                logger.info("Sample Stage 1b merges (RMS client ID):")
+                shown = 0
+                for cid, recs in by_client_id.items():
+                    if len(recs) > 1 and shown < 5:
+                        recs_s = sorted(recs, key=score_record, reverse=True)
+                        logger.info(
+                            f"  client_id={cid} ({len(recs)} records)"
+                        )
+                        logger.info(
+                            f"    KEEP [{recs_s[0]['hotel_id']}]: {(recs_s[0]['name'] or '')[:40]} | "
+                            f"{recs_s[0].get('city') or '-'} | score={score_record(recs_s[0])}"
+                        )
+                        for d in recs_s[1:3]:
+                            logger.info(
+                                f"    DUPE [{d['hotel_id']}]: {(d['name'] or '')[:40]} | "
+                                f"{d.get('city') or '-'} | score={score_record(d)}"
+                            )
+                        if len(recs) > 3:
+                            logger.info(f"    ... and {len(recs) - 3} more")
+                        shown += 1
+
+            logger.info(f"Stage 1b keepers: {len(stage1b_keepers)}, dupes: {len(stage1b_dupes)}")
+
+            # Combine for Stage 2 input: non-RMS + RMS keepers + RMS without client ID
+            stage1_survivors = non_rms_records + stage1b_keepers + rms_no_client_id
+            stage1_all_dupes = stage1a_dupes + stage1b_dupes
+
+            # ==============================================================
+            # STAGE 2: Deduplicate by Name + City + Engine
+            # ==============================================================
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("STAGE 2: DEDUPLICATE BY NAME + CITY + ENGINE")
+            logger.info("(Same-engine dupes only; cross-engine records preserved)")
+            logger.info("=" * 70)
+
+            stage2_input = stage1_survivors
             logger.info(f"Stage 2 input: {len(stage2_input)} records")
 
-            by_name_city: Dict[Tuple[str, str], List[Dict]] = defaultdict(list)
+            by_name_city: Dict[Tuple[str, str, str], List[Dict]] = defaultdict(list)
             for r in stage2_input:
-                key = (normalize(r.get("name", "")), normalize(r.get("city", "")))
+                engine = normalize(r.get("engine_name") or "unknown")
+                key = (normalize(r.get("name", "")), normalize(r.get("city", "")), engine)
                 by_name_city[key].append(r)
 
             raw_dup_groups = sum(1 for recs in by_name_city.values() if len(recs) > 1)
@@ -338,10 +522,26 @@ async def run_dedup(
             final_keepers = []
             stage2_dupes = []
             skipped_chain = 0
+            skipped_country = 0
+            skipped_no_signal = 0
 
             for key, recs in by_name_city.items():
                 if len(recs) > 1:
-                    # Safety: skip groups where multiple records have DIFFERENT
+                    name_key, city_key, eng_key = key
+
+                    # Safety 1: skip groups spanning multiple countries
+                    countries = set()
+                    for r in recs:
+                        c = normalize(r.get("country") or "")
+                        if c:
+                            countries.add(c)
+                    if len(countries) > 1:
+                        skipped_country += 1
+                        for r in recs:
+                            final_keepers.append(r)
+                        continue
+
+                    # Safety 2: skip groups where multiple records have DIFFERENT
                     # non-empty addresses -- likely chain hotels at different locations
                     addrs = set()
                     for r in recs:
@@ -349,8 +549,15 @@ async def run_dedup(
                         if a:
                             addrs.add(a)
                     if len(addrs) > 1:
-                        # Different addresses = different physical locations, not dupes
                         skipped_chain += 1
+                        for r in recs:
+                            final_keepers.append(r)
+                        continue
+
+                    # Safety 3: if city is empty AND no addresses to verify,
+                    # we only have name+engine to go on -- too risky
+                    if not city_key and len(addrs) == 0:
+                        skipped_no_signal += 1
                         for r in recs:
                             final_keepers.append(r)
                         continue
@@ -359,31 +566,35 @@ async def run_dedup(
                 final_keepers.append(keeper)
                 stage2_dupes.extend(dupe_ids)
 
-            logger.info(f"Skipped {skipped_chain} chain-hotel groups (different addresses)")
-            logger.info(f"Actual duplicate groups: {raw_dup_groups - skipped_chain}")
+            total_skipped = skipped_country + skipped_chain + skipped_no_signal
+            logger.info(f"Skipped {skipped_country} groups (multi-country)")
+            logger.info(f"Skipped {skipped_chain} groups (different addresses / chain hotels)")
+            logger.info(f"Skipped {skipped_no_signal} groups (empty city + no address = no signal)")
+            logger.info(f"Actual duplicate groups: {raw_dup_groups - total_skipped}")
 
             logger.info(f"Stage 2 keepers: {len(final_keepers)}, dupes: {len(stage2_dupes)}")
 
             # ==============================================================
             # SUMMARY
             # ==============================================================
-            all_dupes = stage1_dupes + stage2_dupes
+            all_dupes = stage1_all_dupes + stage2_dupes
             logger.info("")
             logger.info("=" * 70)
             logger.info("SUMMARY")
             logger.info("=" * 70)
-            logger.info(f"Original records:                 {len(records):>8,}")
-            logger.info(f"Stage 1 duplicates (external_id): {len(stage1_dupes):>8,}")
-            logger.info(f"Stage 2 duplicates (name+city):   {len(stage2_dupes):>8,}")
-            logger.info(f"Total duplicates:                 {len(all_dupes):>8,}")
-            logger.info(f"Final unique hotels:              {len(final_keepers):>8,}")
+            logger.info(f"Original records:                    {len(records):>8,}")
+            logger.info(f"Stage 1a duplicates (external_id):   {len(stage1a_dupes):>8,}")
+            logger.info(f"Stage 1b duplicates (RMS client ID): {len(stage1b_dupes):>8,}")
+            logger.info(f"Stage 2  duplicates (name+city):     {len(stage2_dupes):>8,}")
+            logger.info(f"Total duplicates:                    {len(all_dupes):>8,}")
+            logger.info(f"Final unique hotels:                 {len(final_keepers):>8,}")
             if records:
                 logger.info(
                     f"Reduction: {len(all_dupes):,} ({100 * len(all_dupes) / len(records):.1f}%)"
                 )
 
             if dry_run:
-                _print_samples(by_ext_id, by_name_city, stage1_dupes, stage2_dupes)
+                _print_samples(by_ext_id, by_name_city, stage1a_dupes, stage2_dupes)
                 logger.info("")
                 logger.info("Run with --execute to apply changes")
             else:
@@ -432,24 +643,25 @@ def _print_samples(by_ext_id, by_name_city, stage1_dupes, stage2_dupes):
 
     if stage2_dupes:
         logger.info("")
-        logger.info("Sample Stage 2 merges (name+city):")
+        logger.info("Sample Stage 2 merges (name+city+engine):")
         shown = 0
-        for (n, c), recs in by_name_city.items():
+        for (n, c, eng), recs in by_name_city.items():
             if len(recs) > 1 and shown < 5:
                 recs_s = sorted(recs, key=score_record, reverse=True)
-                engines = set(r.get("engine_name", "?") for r in recs)
                 logger.info(
-                    f"  \"{n[:35]}\" + \"{c}\" ({len(recs)} records, engines={engines})"
+                    f"  \"{n[:35]}\" + \"{c}\" + [{eng}] ({len(recs)} records)"
                 )
                 logger.info(
-                    f"    KEEP [{recs_s[0]['hotel_id']}]: {recs_s[0].get('engine_name')} | "
+                    f"    KEEP [{recs_s[0]['hotel_id']}]: "
                     f"score={score_record(recs_s[0])}"
                 )
                 for d in recs_s[1:2]:
                     logger.info(
-                        f"    DUPE [{d['hotel_id']}]: {d.get('engine_name')} | "
+                        f"    DUPE [{d['hotel_id']}]: "
                         f"score={score_record(d)}"
                     )
+                if len(recs) > 2:
+                    logger.info(f"    ... and {len(recs) - 2} more")
                 shown += 1
 
 
@@ -498,7 +710,7 @@ async def show_stats():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Unified hotel deduplication (Stage 1: external_id, Stage 2: name+city)",
+        description="Unified hotel deduplication (1a: external_id, 1b: RMS client ID, 2: name+city+engine)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--dry-run", action="store_true", help="Show what would be done (default)")
