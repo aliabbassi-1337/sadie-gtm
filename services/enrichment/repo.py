@@ -909,6 +909,12 @@ async def batch_update_mews_enrichment(
         )
         count = int(result.split()[-1]) if result else len(updates)
     
+    # Also update enrichment status on hotel_booking_engines
+    async with get_conn() as conn:
+        await conn.execute(
+            batch_sql.BATCH_SET_MEWS_ENRICHMENT_STATUS, hotel_ids, 1
+        )
+    
     return count
 
 

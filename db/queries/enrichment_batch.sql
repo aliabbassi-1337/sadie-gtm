@@ -48,6 +48,16 @@ WHERE hbe.hotel_id = ANY($1)
   AND hbe.booking_engine_id = be.id
   AND be.name = 'SiteMinder';
 
+-- BATCH_SET_MEWS_ENRICHMENT_STATUS
+-- Params: ($1::int[] hotel_ids, $2 enrichment_status)
+-- Update enrichment status for Mews hotels on hotel_booking_engines
+UPDATE sadie_gtm.hotel_booking_engines hbe
+SET enrichment_status = $2, last_enrichment_attempt = CURRENT_TIMESTAMP
+FROM sadie_gtm.booking_engines be
+WHERE hbe.hotel_id = ANY($1)
+  AND hbe.booking_engine_id = be.id
+  AND be.name ILIKE '%Mews%';
+
 -- BATCH_UPDATE_MEWS_ENRICHMENT
 -- Params: ($1::int[] hotel_ids, $2::text[] names, $3::text[] addresses, $4::text[] cities,
 --          $5::text[] states, $6::text[] countries, $7::text[] emails, $8::text[] phones,
