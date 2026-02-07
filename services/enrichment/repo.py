@@ -865,7 +865,7 @@ async def batch_update_mews_enrichment(
 ) -> int:
     """Batch update hotels with Mews enrichment results.
     
-    Supports: name, address, city, country, email, phone, lat, lon
+    Supports: name, address, city, state, country, email, phone, lat, lon
     Uses phone_website column and PostGIS location geography.
     
     Default behavior: API data always wins when non-empty (overwrites DB values).
@@ -883,6 +883,7 @@ async def batch_update_mews_enrichment(
     names = []
     addresses = []
     cities = []
+    states = []
     countries = []
     emails = []
     phones = []
@@ -894,6 +895,7 @@ async def batch_update_mews_enrichment(
         names.append(u.get("name"))
         addresses.append(u.get("address"))
         cities.append(u.get("city"))
+        states.append(u.get("state"))
         countries.append(u.get("country"))
         emails.append(u.get("email"))
         phones.append(u.get("phone"))
@@ -903,7 +905,7 @@ async def batch_update_mews_enrichment(
     async with get_conn() as conn:
         result = await conn.execute(
             batch_sql.BATCH_UPDATE_MEWS_ENRICHMENT,
-            hotel_ids, names, addresses, cities, countries, emails, phones, lats, lons
+            hotel_ids, names, addresses, cities, states, countries, emails, phones, lats, lons
         )
         count = int(result.split()[-1]) if result else len(updates)
     

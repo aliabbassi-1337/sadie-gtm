@@ -43,13 +43,15 @@ WHERE hbe.hotel_id = ANY($1)
 
 -- BATCH_UPDATE_MEWS_ENRICHMENT
 -- Params: ($1::int[] hotel_ids, $2::text[] names, $3::text[] addresses, $4::text[] cities,
---          $5::text[] countries, $6::text[] emails, $7::text[] phones, $8::float[] lats, $9::float[] lons)
+--          $5::text[] states, $6::text[] countries, $7::text[] emails, $8::text[] phones,
+--          $9::float[] lats, $10::float[] lons)
 -- API data wins when non-empty, falls back to existing DB value.
 UPDATE sadie_gtm.hotels h
 SET
     name = COALESCE(NULLIF(v.name, ''), h.name),
     address = COALESCE(NULLIF(v.address, ''), h.address),
     city = COALESCE(NULLIF(v.city, ''), h.city),
+    state = COALESCE(NULLIF(v.state, ''), h.state),
     country = COALESCE(NULLIF(v.country, ''), h.country),
     email = COALESCE(NULLIF(v.email, ''), h.email),
     phone_website = COALESCE(NULLIF(v.phone, ''), h.phone_website),
@@ -66,9 +68,10 @@ FROM (
         $5::text[],
         $6::text[],
         $7::text[],
-        $8::float[],
-        $9::float[]
-    ) AS t(hotel_id, name, address, city, country, email, phone, lat, lon)
+        $8::text[],
+        $9::float[],
+        $10::float[]
+    ) AS t(hotel_id, name, address, city, state, country, email, phone, lat, lon)
 ) v
 WHERE h.id = v.hotel_id;
 

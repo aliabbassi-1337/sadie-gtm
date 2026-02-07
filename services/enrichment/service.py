@@ -98,6 +98,7 @@ class MewsEnrichmentResult(BaseModel):
     name: Optional[str] = None
     address: Optional[str] = None
     city: Optional[str] = None
+    state: Optional[str] = None
     country: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
@@ -111,6 +112,7 @@ class MewsEnrichmentResult(BaseModel):
             "name": self.name,
             "address": self.address,
             "city": self.city,
+            "state": self.state,
             "country": self.country,
             "email": self.email,
             "phone": self.phone,
@@ -2557,6 +2559,7 @@ class Service(IService):
                 name=data.name,
                 address=data.address,
                 city=data.city,
+                state=data.state,
                 country=data.country,
                 email=data.email,
                 phone=data.phone,
