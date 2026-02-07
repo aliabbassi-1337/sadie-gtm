@@ -156,8 +156,9 @@ def _normalize_subdivision_code(country_code: str, subdivision_code: str) -> str
 
 # Rate limiting - use semaphore for concurrency control instead of sequential
 _api_semaphore = None
-MAX_CONCURRENT_REQUESTS = 5  # Allow 5 parallel requests
-BASE_RETRY_DELAY = 2.0  # Base delay for exponential backoff on 429
+MAX_CONCURRENT_REQUESTS = 3  # Conservative to avoid rate limits
+BASE_RETRY_DELAY = 1.5  # Base delay for exponential backoff on 429
+MAX_RETRY_DELAY = 10.0  # Cap backoff at 10s to prevent stalling
 
 
 class MewsHotelData(BaseModel):
@@ -403,10 +404,10 @@ class MewsApiClient:
                 if resp.status_code == 200:
                     return resp.json(), False
                 elif resp.status_code == 429:
-                    # Rate limited - exponential backoff and retry
+                    # Rate limited - exponential backoff with cap, then retry
                     if retry_count < 5:
-                        wait = BASE_RETRY_DELAY * (2 ** retry_count)  # 2s, 4s, 8s, 16s, 32s
-                        logger.debug(f"Rate limited, waiting {wait:.1f}s...")
+                        wait = min(BASE_RETRY_DELAY * (2 ** retry_count), MAX_RETRY_DELAY)
+                        logger.debug(f"Rate limited, waiting {wait:.1f}s (attempt {retry_count + 1}/5)...")
                         await asyncio.sleep(wait)
                         return await self._fetch_via_api(slug, retry_count + 1)
                     logger.warning(f"Mews rate limit exceeded for {slug} after 5 retries")
