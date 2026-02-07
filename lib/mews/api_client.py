@@ -198,34 +198,33 @@ SESSION_TTL = 30 * 60
 
 
 class MewsApiClient:
-    """Client for Mews booking engine API using hybrid Playwright + httpx approach.
+    """Client for Mews booking engine API.
+    
+    Uses httpx for all API calls. Session tokens are obtained on-demand
+    via a throwaway Playwright browser (launched, token grabbed, closed
+    immediately). The token is cached for SESSION_TTL seconds.
     
     Usage:
-        client = MewsApiClient()
+        client = MewsApiClient(use_brightdata=True)
         await client.initialize()
         data = await client.extract(slug)
         await client.close()
-        
-        # With Brightdata proxy:
-        client = MewsApiClient(use_brightdata=True)
     """
     
     BOOKING_URL_TEMPLATE = "https://app.mews.com/distributor/{slug}"
     API_URL = "https://api.mews.com/api/bookingEngine/v1/configurations/get"
+    # Known working hotel UUID used to bootstrap session tokens
+    _SEED_HOTEL = "cb6072cc-1e03-45cc-a6e8-ab0d00ea7979"
     
     def __init__(self, timeout: float = 20.0, use_brightdata: bool = False):
         self.timeout = timeout
         self.use_brightdata = use_brightdata
         self._http_client: Optional[httpx.AsyncClient] = None
         self._proxy_url: Optional[str] = None
-        # For session refresh via Playwright
-        self._browser = None
-        self._playwright = None
     
     async def initialize(self):
         """Initialize HTTP client."""
         if self._http_client is None:
-            # Configure proxy if Brightdata is enabled
             if self.use_brightdata:
                 self._proxy_url = _get_brightdata_proxy()
                 if self._proxy_url:
@@ -244,92 +243,98 @@ class MewsApiClient:
             _session_cache["lock"] = asyncio.Lock()
     
     async def close(self):
-        """Close clients."""
+        """Close HTTP client."""
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
     
     async def _get_session(self) -> tuple[Optional[str], Optional[str]]:
-        """Get or refresh session token."""
+        """Get or refresh session token. Thread-safe with lock."""
         now = time.time()
         
-        # Check if cached session is still valid
+        # Fast path: cached session still valid
         if (_session_cache["session"] 
             and now - _session_cache["obtained_at"] < SESSION_TTL):
             return _session_cache["session"], _session_cache["client"]
         
-        # Need to refresh - use lock to prevent concurrent refreshes
+        # Acquire lock so only one coroutine refreshes at a time
         async with _session_cache["lock"]:
-            # Double-check after acquiring lock
+            # Double-check after lock
+            now = time.time()
             if (_session_cache["session"] 
                 and now - _session_cache["obtained_at"] < SESSION_TTL):
                 return _session_cache["session"], _session_cache["client"]
             
-            logger.info("Refreshing Mews session token via Playwright...")
-            session, client = await self._fetch_session_via_playwright()
+            logger.info("Obtaining Mews session token (one-shot browser)...")
+            session, client = await self._obtain_session_token()
             
             if session and client:
                 _session_cache["session"] = session
                 _session_cache["client"] = client
-                _session_cache["obtained_at"] = now
-                logger.info(f"Got new Mews session (client: {client})")
+                _session_cache["obtained_at"] = time.time()
+                logger.info(f"Got Mews session (client: {client})")
+            else:
+                logger.error("Failed to obtain Mews session token")
             
-            return session, client
+            return _session_cache["session"], _session_cache["client"]
     
-    async def _fetch_session_via_playwright(self) -> tuple[Optional[str], Optional[str]]:
-        """Use Playwright to get a valid session token."""
+    @staticmethod
+    async def _obtain_session_token() -> tuple[Optional[str], Optional[str]]:
+        """Launch a throwaway browser, intercept the session token, close browser.
+        
+        The Mews distributor widget makes a POST to configurations/get on load.
+        We intercept that request to capture the session + client tokens, then
+        immediately tear down the browser. Total lifetime: ~3-5 seconds.
+        """
         from playwright.async_api import async_playwright
         import json
         
         captured = {}
+        pw = None
+        browser = None
         
         try:
-            if not self._playwright:
-                self._playwright = await async_playwright().start()
-            if not self._browser:
-                self._browser = await self._playwright.chromium.launch(headless=True)
-            
-            context = await self._browser.new_context()
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context()
             page = await context.new_page()
             
-            async def handle_route(route):
-                request = route.request
-                if "configurations/get" in request.url and request.post_data:
-                    captured["body"] = request.post_data
+            async def intercept(route):
+                req = route.request
+                if "configurations/get" in req.url and req.post_data:
+                    captured["body"] = req.post_data
                 await route.continue_()
             
-            await page.route("**/*", handle_route)
+            await page.route("**/*", intercept)
             
-            # Use a known working hotel to get session
             await page.goto(
-                "https://app.mews.com/distributor/cb6072cc-1e03-45cc-a6e8-ab0d00ea7979",
+                f"https://app.mews.com/distributor/{MewsApiClient._SEED_HOTEL}",
                 wait_until="commit",
-                timeout=45000,
+                timeout=30000,
             )
             
-            # Wait for API call
-            for _ in range(40):
+            # Wait up to 10s for the API call to fire
+            for _ in range(20):
                 if captured.get("body"):
                     break
                 await asyncio.sleep(0.5)
-            
-            await page.close()
-            await context.close()
             
             if captured.get("body"):
                 data = json.loads(captured["body"])
                 return data.get("session"), data.get("client")
             
+            logger.warning("Browser loaded but no configurations/get call intercepted")
+            return None, None
+            
         except Exception as e:
-            logger.warning(f"Failed to get Mews session: {e}")
-        
-        return None, None
+            logger.warning(f"Failed to obtain Mews session: {e}")
+            return None, None
+        finally:
+            # Always tear down browser immediately
+            if browser:
+                await browser.close()
+            if pw:
+                await pw.stop()
     
     async def extract(self, slug: str) -> Optional[MewsHotelData]:
         """
