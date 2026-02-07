@@ -4,7 +4,8 @@
 
 -- BATCH_UPDATE_SITEMINDER_ENRICHMENT
 -- Params: ($1::int[] hotel_ids, $2::text[] names, $3::text[] addresses, $4::text[] cities,
---          $5::text[] states, $6::text[] countries, $7::text[] emails, $8::text[] phones, $9::text[] websites)
+--          $5::text[] states, $6::text[] countries, $7::text[] emails, $8::text[] phones,
+--          $9::text[] websites, $10::float[] lats, $11::float[] lons)
 -- API data wins when non-empty, falls back to existing DB value.
 UPDATE sadie_gtm.hotels h
 SET
@@ -16,18 +17,24 @@ SET
     email = COALESCE(NULLIF(v.email, ''), h.email),
     phone_website = COALESCE(NULLIF(v.phone, ''), h.phone_website),
     website = COALESCE(NULLIF(v.website, ''), h.website),
+    location = CASE WHEN v.lat IS NOT NULL AND v.lon IS NOT NULL
+                THEN ST_SetSRID(ST_MakePoint(v.lon, v.lat), 4326)::geography
+                ELSE h.location END,
     updated_at = CURRENT_TIMESTAMP
 FROM (
-    SELECT
-        unnest($1::int[]) as id,
-        unnest($2::text[]) as name,
-        unnest($3::text[]) as address,
-        unnest($4::text[]) as city,
-        unnest($5::text[]) as state,
-        unnest($6::text[]) as country,
-        unnest($7::text[]) as email,
-        unnest($8::text[]) as phone,
-        unnest($9::text[]) as website
+    SELECT * FROM unnest(
+        $1::integer[],
+        $2::text[],
+        $3::text[],
+        $4::text[],
+        $5::text[],
+        $6::text[],
+        $7::text[],
+        $8::text[],
+        $9::text[],
+        $10::float[],
+        $11::float[]
+    ) AS t(id, name, address, city, state, country, email, phone, website, lat, lon)
 ) v
 WHERE h.id = v.id;
 

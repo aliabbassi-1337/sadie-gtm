@@ -289,8 +289,7 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name ILIKE '%mews%';
 
 -- name: get_mews_hotels_missing_location
--- Get Mews hotels with booking URLs but missing state (for location enrichment)
--- These have been detected but need location data from the Mews API
+-- Get Mews hotels with booking URLs but missing lat/lon
 SELECT h.id, h.name, h.city, h.state, h.country, h.address,
        hbe.booking_url, hbe.engine_property_id as slug
 FROM sadie_gtm.hotels h
@@ -301,7 +300,7 @@ WHERE be.name ILIKE '%mews%'
   AND hbe.booking_url != ''
   AND hbe.status = 1
   AND h.status >= 0
-  AND (h.state IS NULL OR h.state = '')
+  AND h.location IS NULL
   AND (:country::text IS NULL OR h.country = :country)
 ORDER BY h.id
 LIMIT :limit;
@@ -317,7 +316,7 @@ WHERE be.name ILIKE '%mews%'
   AND hbe.booking_url != ''
   AND hbe.status = 1
   AND h.status >= 0
-  AND (h.state IS NULL OR h.state = '')
+  AND h.location IS NULL
   AND (:country::text IS NULL OR h.country = :country);
 
 -- ============================================================================
@@ -325,8 +324,7 @@ WHERE be.name ILIKE '%mews%'
 -- ============================================================================
 
 -- name: get_siteminder_hotels_needing_enrichment
--- Get SiteMinder hotels that need name enrichment
--- Targets hotels with junk names (Unknown, empty, etc.)
+-- Get SiteMinder hotels that need enrichment (pending or no name)
 SELECT h.id, h.name, h.city, h.state, h.country, h.address,
        hbe.booking_url
 FROM sadie_gtm.hotels h
@@ -335,16 +333,14 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name = 'SiteMinder'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND hbe.booking_url LIKE '%direct-book.com%'
   AND hbe.status = 1
   AND h.status >= 0
   AND (hbe.enrichment_status IS NULL OR hbe.enrichment_status = 0)
-  AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%')
 ORDER BY h.id
 LIMIT :limit;
 
 -- name: get_siteminder_hotels_needing_enrichment_count^
--- Count SiteMinder hotels needing name enrichment
+-- Count SiteMinder hotels needing enrichment
 SELECT COUNT(*)
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
@@ -352,15 +348,12 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name = 'SiteMinder'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND hbe.booking_url LIKE '%direct-book.com%'
   AND hbe.status = 1
   AND h.status >= 0
-  AND (hbe.enrichment_status IS NULL OR hbe.enrichment_status = 0)
-  AND (h.name IS NULL OR h.name = '' OR h.name LIKE 'Unknown%');
+  AND (hbe.enrichment_status IS NULL OR hbe.enrichment_status = 0);
 
 -- name: get_siteminder_hotels_missing_location
--- Get SiteMinder hotels with booking URLs but missing state (for location enrichment)
--- These have been detected but need location data from the SiteMinder API
+-- Get SiteMinder hotels with booking URLs but missing lat/lon
 SELECT h.id, h.name, h.city, h.state, h.country, h.address,
        hbe.booking_url
 FROM sadie_gtm.hotels h
@@ -369,10 +362,9 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name = 'SiteMinder'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND hbe.booking_url LIKE '%direct-book.com%'
   AND hbe.status = 1
   AND h.status >= 0
-  AND (h.state IS NULL OR h.state = '')
+  AND h.location IS NULL
   AND (:country::text IS NULL OR h.country = :country)
 ORDER BY h.id
 LIMIT :limit;
@@ -386,10 +378,9 @@ JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE be.name = 'SiteMinder'
   AND hbe.booking_url IS NOT NULL
   AND hbe.booking_url != ''
-  AND hbe.booking_url LIKE '%direct-book.com%'
   AND hbe.status = 1
   AND h.status >= 0
-  AND (h.state IS NULL OR h.state = '')
+  AND h.location IS NULL
   AND (:country::text IS NULL OR h.country = :country);
 
 -- name: get_siteminder_hotels_total_count^

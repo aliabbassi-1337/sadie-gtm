@@ -1139,6 +1139,8 @@ async def batch_update_siteminder_enrichment(
     emails = []
     phones = []
     websites = []
+    lats = []
+    lons = []
     
     for u in updates:
         hotel_ids.append(u.get("hotel_id"))
@@ -1150,11 +1152,13 @@ async def batch_update_siteminder_enrichment(
         emails.append(u.get("email"))
         phones.append(u.get("phone"))
         websites.append(u.get("website"))
+        lats.append(u.get("lat"))
+        lons.append(u.get("lon"))
     
     async with get_conn() as conn:
         result = await conn.execute(
             batch_sql.BATCH_UPDATE_SITEMINDER_ENRICHMENT,
-            hotel_ids, names, addresses, cities, states, countries, emails, phones, websites
+            hotel_ids, names, addresses, cities, states, countries, emails, phones, websites, lats, lons
         )
         count = int(result.split()[-1]) if result else len(updates)
     

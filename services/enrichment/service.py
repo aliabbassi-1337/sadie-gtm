@@ -75,6 +75,8 @@ class SiteMinderEnrichmentResult(BaseModel):
     country: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
     error: Optional[str] = None
 
     def to_update_dict(self) -> Dict[str, Any]:
@@ -88,6 +90,8 @@ class SiteMinderEnrichmentResult(BaseModel):
             "country": self.country,
             "email": self.email,
             "phone": self.phone,
+            "lat": self.lat,
+            "lon": self.lon,
         }
 
 
@@ -2475,6 +2479,8 @@ class Service(IService):
                 country=data.country,
                 email=data.email,
                 phone=data.phone,
+                lat=data.lat,
+                lon=data.lon,
             )
         except Exception as e:
             return SiteMinderEnrichmentResult(hotel_id=hotel_id, success=False, error=str(e)[:100])
