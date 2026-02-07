@@ -83,6 +83,60 @@ def _normalize_country_code(code: str) -> str:
     return _COUNTRY_CODES.get(code.upper().strip(), code)
 
 
+# ISO 3166-2 subdivision code -> human-readable state/province name
+_US_STATES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+    "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+}
+_AU_STATES = {
+    "ACT": "Australian Capital Territory", "NSW": "New South Wales",
+    "NT": "Northern Territory", "QLD": "Queensland", "SA": "South Australia",
+    "TAS": "Tasmania", "VIC": "Victoria", "WA": "Western Australia",
+}
+_CA_PROVINCES = {
+    "AB": "Alberta", "BC": "British Columbia", "MB": "Manitoba", "NB": "New Brunswick",
+    "NL": "Newfoundland and Labrador", "NS": "Nova Scotia", "NT": "Northwest Territories",
+    "NU": "Nunavut", "ON": "Ontario", "PE": "Prince Edward Island", "QC": "Quebec",
+    "SK": "Saskatchewan", "YT": "Yukon",
+}
+_UK_NATIONS = {
+    "ENG": "England", "NIR": "Northern Ireland", "SCT": "Scotland", "WLS": "Wales",
+}
+_SUBDIVISION_MAPS = {"US": _US_STATES, "AU": _AU_STATES, "CA": _CA_PROVINCES, "GB": _UK_NATIONS}
+
+
+def _normalize_subdivision_code(country_code: str, subdivision_code: str) -> str:
+    """Convert ISO 3166-2 subdivision code to human-readable state/province name.
+    
+    Args:
+        country_code: 2-letter ISO country code (e.g. "US", "AU")
+        subdivision_code: Full ISO 3166-2 code (e.g. "US-CA") or just the subdivision part ("CA")
+    
+    Returns:
+        Human-readable name (e.g. "California") or the raw subdivision part if no mapping exists.
+    """
+    if not subdivision_code:
+        return ""
+    # Strip the country prefix if present (e.g. "US-CA" -> "CA")
+    sub = subdivision_code.strip()
+    if "-" in sub:
+        sub = sub.split("-", 1)[1]
+    cc = (country_code or "").upper().strip()
+    mapping = _SUBDIVISION_MAPS.get(cc, {})
+    return mapping.get(sub.upper(), sub)
+
+
 # Rate limiting - use semaphore for concurrency control instead of sequential
 _api_semaphore = None
 MAX_CONCURRENT_REQUESTS = 5  # Allow 5 parallel requests
@@ -96,6 +150,7 @@ class MewsHotelData(BaseModel):
     name: Optional[str] = None
     address: Optional[str] = None
     city: Optional[str] = None
+    state: Optional[str] = None
     postal_code: Optional[str] = None
     country: Optional[str] = None
     lat: Optional[float] = None
@@ -388,6 +443,10 @@ class MewsApiClient:
                 result.postal_code = address.get("postalCode") or address.get("PostalCode")
                 country_code = address.get("countryCode") or address.get("CountryCode")
                 result.country = _normalize_country_code(country_code) if country_code else None
+                # Extract state/province from ISO 3166-2 subdivision code
+                subdivision = address.get("countrySubdivisionCode") or address.get("CountrySubdivisionCode")
+                if subdivision and country_code:
+                    result.state = _normalize_subdivision_code(country_code, subdivision)
                 result.lat = address.get("latitude") or address.get("Latitude")
                 result.lon = address.get("longitude") or address.get("Longitude")
             
