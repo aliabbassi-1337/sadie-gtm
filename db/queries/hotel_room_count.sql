@@ -89,7 +89,7 @@ ON CONFLICT (hotel_id) DO UPDATE SET
     confidence = EXCLUDED.confidence,
     status = EXCLUDED.status,
     enriched_at = CURRENT_TIMESTAMP
-WHERE sadie_gtm.hotel_room_count.source NOT IN ('texas_hot')
+WHERE COALESCE(sadie_gtm.hotel_room_count.source, '') NOT IN ('texas_hot')
   AND NOT (sadie_gtm.hotel_room_count.status = 1 AND EXCLUDED.status != 1)
 RETURNING id;
 
