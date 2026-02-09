@@ -318,9 +318,9 @@ async def enrich_cloudbeds(limit: int, concurrency: int = 20) -> None:
                 # Update room count if missing
                 if not h['has_room_count'] and result['room_count']:
                     await conn.execute('''
-                        INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source)
-                        VALUES ($1, $2, 'cloudbeds_api')
-                        ON CONFLICT (hotel_id) DO UPDATE SET room_count = $2, source = 'cloudbeds_api'
+                        INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, confidence, status)
+                        VALUES ($1, $2, 'cloudbeds_api', 0.9, 1)
+                        ON CONFLICT (hotel_id) DO UPDATE SET room_count = $2, source = 'cloudbeds_api', confidence = 0.9, status = 1
                     ''', h['id'], result['room_count'])
                     stats['room_count'] += 1
                     updates.append(f'{result["room_count"]}rm')
