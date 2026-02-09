@@ -171,43 +171,60 @@ async def export_country(service: Service, country: str, dry_run: bool = False) 
     return results
 
 
-async def export_all(dry_run: bool = False) -> dict:
-    """Export everything: all engines + all countries concurrently."""
+async def export_all(dry_run: bool = False, country_only: bool = True) -> dict:
+    """Export everything: all engines + all countries concurrently.
+
+    Args:
+        dry_run: If True, don't upload to S3
+        country_only: If True (default), only generate country-level sheets, not per-state
+    """
     service = Service()
-    
+
     all_results = {
         "engines": {"count": 0, "leads": 0},
         "countries": {},
         "total_leads": 0,
     }
-    
+
     logger.info("Exporting all engines and countries concurrently...")
-    
+
     # Create tasks for engines and all countries
     async def do_engines():
         return await export_all_engines(service, dry_run)
-    
+
     async def do_country(country: str):
-        return country, await export_country(service, country, dry_run)
-    
+        if country_only:
+            # Only generate the combined country-level file
+            db_country = COUNTRIES.get(country, country)
+            try:
+                s3_uri, count = await service.export_country_leads(country, db_country)
+                if count > 0:
+                    logger.success(f"  {country}: {count} leads -> {s3_uri}")
+                return country, {"states": 0, "total_leads": count, "exports": []}
+            except Exception as e:
+                logger.error(f"  {country} export failed: {e}")
+                return country, {"states": 0, "total_leads": 0, "exports": []}
+        else:
+            return country, await export_country(service, country, dry_run)
+
     # Run everything concurrently
     tasks = [do_engines()] + [do_country(c) for c in COUNTRIES.keys()]
     results = await asyncio.gather(*tasks)
-    
+
     # First result is engines
     engine_results = results[0]
     all_results["engines"]["count"] = engine_results["engines"]
     all_results["engines"]["leads"] = engine_results["total_leads"]
     all_results["total_leads"] += engine_results["total_leads"]
-    
+
     # Rest are countries
     for country, country_results in results[1:]:
         all_results["countries"][country] = {
-            "states": country_results["states"],
+            "states": country_results.get("states", 0),
             "leads": country_results["total_leads"],
         }
         all_results["total_leads"] += country_results["total_leads"]
-    
+
     return all_results
 
 

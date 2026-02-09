@@ -48,3 +48,36 @@ WHERE status != -1 AND country = :country AND state = :old_state;
 UPDATE sadie_gtm.hotels
 SET state = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE status != -1 AND country = :country AND state = :old_state;
+
+
+-- name: get_hotels_for_location_inference
+-- Get hotels that may need country/state inference (misclassified or missing)
+-- Fetches hotels with at least one signal (website, phone, or address)
+SELECT id, name, website, phone_google, phone_website, address, city, state, country
+FROM sadie_gtm.hotels
+WHERE status != -1
+  AND (
+    -- Hotels with a specific country that we want to validate
+    country = :country
+    -- Or hotels with NULL country
+    OR (:include_null AND country IS NULL)
+  )
+  AND (website IS NOT NULL OR phone_google IS NOT NULL OR phone_website IS NOT NULL OR address IS NOT NULL)
+ORDER BY id;
+
+
+-- name: fix_hotel_country_and_state!
+-- Update a hotel's country and state based on inference
+UPDATE sadie_gtm.hotels
+SET country = :country,
+    state = :state,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id AND status != -1;
+
+
+-- name: fix_hotel_country_only!
+-- Update only the country (leave state unchanged)
+UPDATE sadie_gtm.hotels
+SET country = :country,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :hotel_id AND status != -1;
