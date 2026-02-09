@@ -2,8 +2,8 @@
 Room Count Enricher (LLM-powered)
 =================================
 Uses Azure OpenAI to extract room counts from hotel websites.
-For hotels without websites, discovers websites via LLM,
-or falls back to name-only LLM estimation.
+For hotels without websites, asks GPT to find the website and estimate
+room count in a single call.
 
 This is an internal helper module - only service.py can call repo functions.
 """
@@ -27,7 +27,7 @@ load_dotenv()
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
 
 # Pages to check for room count info - be thorough!
 ABOUT_PAGE_PATTERNS = [
@@ -64,7 +64,8 @@ def log(msg: str) -> None:
 async def _llm_request(
     client: httpx.AsyncClient,
     prompt: str,
-    max_tokens: int = 20,
+    max_tokens: int = 100,
+    temperature: float = 0.3,
 ) -> Optional[str]:
     """Make an Azure OpenAI API request with retry logic for rate limits.
 
@@ -73,7 +74,8 @@ async def _llm_request(
     url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
     payload = {
         "messages": [{"role": "user", "content": prompt}],
-        "max_completion_tokens": max_tokens,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
     }
 
     try:
@@ -399,7 +401,7 @@ WEBSITE CONTENT:
 
 Return ONLY a number (e.g., "12"). You MUST estimate even if unsure:"""
 
-    answer = await _llm_request(client, prompt, max_tokens=2000)
+    answer = await _llm_request(client, prompt, max_tokens=20)
     if answer is None:
         return None
 
@@ -428,113 +430,73 @@ Return ONLY a number (e.g., "12"). You MUST estimate even if unsure:"""
 
 
 # ============================================================================
-# WEBSITE DISCOVERY (LLM)
+# LLM WEBSITE + ROOM COUNT (single call)
 # ============================================================================
 
 
-async def search_hotel_website(
+async def _llm_find_website_and_rooms(
     client: httpx.AsyncClient,
     hotel_name: str,
     city: Optional[str] = None,
     state: Optional[str] = None,
-) -> Optional[str]:
-    """Ask GPT for the hotel's official website URL.
+) -> Tuple[Optional[str], Optional[int]]:
+    """Ask GPT to find the hotel's website and estimate room count in one call.
 
-    Returns the discovered website URL, or None if not found.
+    Returns (website_url, room_count). Either or both may be None.
     """
     cleaned_name = clean_hotel_name(hotel_name)
     location_parts = [p for p in [city, state] if p]
     location_str = ", ".join(location_parts) if location_parts else "unknown location"
 
-    log(f"  Asking LLM for website: {cleaned_name} ({location_str})")
+    log(f"  Asking LLM for website + rooms: {cleaned_name} ({location_str})")
 
-    prompt = f"""What is the official website URL for this hotel?
-
-Hotel: {cleaned_name}
+    prompt = f"""Find the official website and estimate room count for this hotel:
+Name: {cleaned_name}
 Location: {location_str}
 
-Rules:
-- Return ONLY the hotel's own website domain (e.g., "https://www.hotelella.com")
-- Do NOT return OTA links (booking.com, expedia.com, tripadvisor.com, etc.)
-- Do NOT return social media links (facebook.com, instagram.com, yelp.com, etc.)
-- If you don't know or aren't confident, return "NONE"
+Reply ONLY in this exact format:
+website: <url or NONE>
+rooms: <number or UNKNOWN>"""
 
-Reply with ONLY the URL or "NONE":"""
-
-    answer = await _llm_request(client, prompt, max_tokens=2000)
+    answer = await _llm_request(client, prompt, max_tokens=100)
     if answer is None:
-        return None
+        return None, None
 
-    # Clean up response
-    answer = answer.strip().strip('"').strip("'")
+    website = None
+    rooms = None
 
-    if not answer or answer.upper() == "NONE" or "none" in answer.lower():
-        log(f"  LLM doesn't know website")
-        return None
+    for line in answer.strip().split("\n"):
+        line = line.strip()
+        if line.lower().startswith("website:"):
+            val = line.split(":", 1)[1].strip()
+            if val.upper() != "NONE" and "none" not in val.lower():
+                url_match = re.search(r'https?://[^\s<>"\']+', val)
+                if url_match:
+                    website = url_match.group().rstrip(".")
+                else:
+                    domain_match = re.search(r'(?:www\.)?[\w.-]+\.\w{2,}', val)
+                    if domain_match:
+                        website = f"https://{domain_match.group()}"
+        elif line.lower().startswith("rooms:"):
+            val = line.split(":", 1)[1].strip()
+            if val.upper() != "UNKNOWN" and "unknown" not in val.lower():
+                match = re.search(r'\d+', val)
+                if match:
+                    count = int(match.group())
+                    if 1 <= count <= 2000:
+                        rooms = count
 
-    # Extract URL from response (LLM might wrap it in text)
-    url_match = re.search(r'https?://[^\s<>"\']+', answer)
-    if url_match:
-        url = url_match.group().rstrip(".")
-        log(f"  LLM found website: {url}")
-        return url
+    if website:
+        log(f"  LLM found website: {website}")
+    if rooms:
+        log(f"  LLM estimated rooms: {rooms}")
 
-    # Maybe it returned just a domain without protocol
-    domain_match = re.search(r'(?:www\.)?[\w.-]+\.\w{2,}', answer)
-    if domain_match:
-        url = f"https://{domain_match.group()}"
-        log(f"  LLM found website: {url}")
-        return url
-
-    log(f"  Could not parse LLM website response: {answer[:80]}")
-    return None
+    return website, rooms
 
 
 # ============================================================================
 # MAIN ENRICHMENT ENTRY POINT
 # ============================================================================
-
-
-async def _llm_estimate_room_count(
-    client: httpx.AsyncClient,
-    hotel_name: str,
-    city: Optional[str] = None,
-    state: Optional[str] = None,
-) -> Optional[int]:
-    """Ask GPT to estimate room count using its knowledge of the hotel."""
-    location_parts = [p for p in [city, state] if p]
-    location_str = ", ".join(location_parts) if location_parts else "unknown location"
-
-    prompt = f"""How many bookable rooms/units does this property have?
-
-Hotel/Property: {hotel_name}
-Location: {location_str}
-
-Use your knowledge of this property. If you know it, give the real number.
-If you don't know it exactly, estimate based on the property type and name.
-
-Guidelines for estimation:
-- Single cabin/cottage/house/villa rental = 1
-- Small cabin/cottage rental company (plural name) = 8-15
-- B&B, bed and breakfast, small inn = 5-12
-- Boutique hotel = 15-50
-- Motel = 25-60
-- Mid-size hotel = 50-150
-- Large hotel or resort = 150-400
-
-Return ONLY a number (e.g., "42"). You MUST provide an answer:"""
-
-    answer = await _llm_request(client, prompt, max_tokens=2000)
-    if answer is None:
-        return None
-
-    match = re.search(r'\d+', answer)
-    if match:
-        count = int(match.group())
-        if 1 <= count <= 2000:
-            return count
-
-    return None
 
 
 async def enrich_hotel_room_count(
@@ -581,33 +543,15 @@ async def enrich_hotel_room_count(
         log(f"  Could not extract from known website")
         return None, "", None
 
-    # No website — ask LLM to find it
-    discovered_website = await search_hotel_website(client, hotel_name, city, state)
+    # No website — ask GPT for both website and room count in one call
+    discovered_website, rooms = await _llm_find_website_and_rooms(client, hotel_name, city, state)
 
-    if discovered_website:
-        log(f"  Discovered website: {discovered_website}")
+    if rooms:
+        log(f"  LLM result: ~{rooms} rooms" + (f" (website: {discovered_website})" if discovered_website else ""))
+        return rooms, "llm_search", discovered_website
 
-        # Scrape discovered website and extract room count
-        regex_count, text = await fetch_and_extract_room_count(client, discovered_website)
-
-        if regex_count:
-            log(f"  Found via regex on discovered site: {regex_count} rooms")
-            return regex_count, "llm_regex", discovered_website
-
-        if text:
-            count = await extract_room_count_llm(client, hotel_name, text)
-            if count:
-                log(f"  LLM estimate from discovered site: ~{count} rooms")
-                return count, "llm_search", discovered_website
-
-    # No website found or couldn't extract — ask LLM to estimate from its knowledge
-    count = await _llm_estimate_room_count(client, hotel_name, city, state)
-    if count:
-        log(f"  LLM knowledge estimate: ~{count} rooms")
-        return count, "llm_search", discovered_website
-    else:
-        log(f"  Could not estimate room count")
-        return None, "", discovered_website
+    log(f"  Could not estimate room count")
+    return None, "", discovered_website
 
 
 def get_llm_api_key() -> Optional[str]:
