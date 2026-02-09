@@ -439,31 +439,35 @@ async def _llm_find_website_and_rooms(
     hotel_name: str,
     city: Optional[str] = None,
     state: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[int]]:
-    """Ask GPT to find the hotel's website and estimate room count in one call.
+) -> Tuple[Optional[str], Optional[int], Optional[str], Optional[str]]:
+    """Ask GPT to find the hotel's website, room count, phone, and email in one call.
 
-    Returns (website_url, room_count). Either or both may be None.
+    Returns (website_url, room_count, phone, email). Any may be None.
     """
     cleaned_name = clean_hotel_name(hotel_name)
     location_parts = [p for p in [city, state] if p]
     location_str = ", ".join(location_parts) if location_parts else "unknown location"
 
-    log(f"  Asking LLM for website + rooms: {cleaned_name} ({location_str})")
+    log(f"  Asking LLM for website + rooms + contact: {cleaned_name} ({location_str})")
 
-    prompt = f"""Find the official website and estimate room count for this hotel:
+    prompt = f"""Find the official website, estimate room count, and find contact info for this hotel:
 Name: {cleaned_name}
 Location: {location_str}
 
 Reply ONLY in this exact format:
 website: <url or NONE>
-rooms: <number or UNKNOWN>"""
+rooms: <number or UNKNOWN>
+phone: <phone number or UNKNOWN>
+email: <email or UNKNOWN>"""
 
-    answer = await _llm_request(client, prompt, max_tokens=100)
+    answer = await _llm_request(client, prompt, max_tokens=150)
     if answer is None:
-        return None, None
+        return None, None, None, None
 
     website = None
     rooms = None
+    phone = None
+    email = None
 
     for line in answer.strip().split("\n"):
         line = line.strip()
@@ -485,13 +489,28 @@ rooms: <number or UNKNOWN>"""
                     count = int(match.group())
                     if 1 <= count <= 2000:
                         rooms = count
+        elif line.lower().startswith("phone:"):
+            val = line.split(":", 1)[1].strip()
+            if val.upper() != "UNKNOWN" and "unknown" not in val.lower():
+                # Extract phone number (digits, spaces, dashes, parens, plus)
+                phone_match = re.search(r'[\d\s\-\(\)\+\.]{7,}', val)
+                if phone_match:
+                    phone = phone_match.group().strip()
+        elif line.lower().startswith("email:"):
+            val = line.split(":", 1)[1].strip()
+            if val.upper() != "UNKNOWN" and "unknown" not in val.lower():
+                email_match = re.search(r'[\w.+-]+@[\w.-]+\.\w{2,}', val)
+                if email_match:
+                    email = email_match.group()
 
     if website:
         log(f"  LLM found website: {website}")
     if rooms:
         log(f"  LLM estimated rooms: {rooms}")
+    if phone or email:
+        log(f"  LLM found contact: phone={phone}, email={email}")
 
-    return website, rooms
+    return website, rooms, phone, email
 
 
 # ============================================================================
@@ -506,15 +525,16 @@ async def enrich_hotel_room_count(
     website: Optional[str] = None,
     city: Optional[str] = None,
     state: Optional[str] = None,
-) -> Tuple[Optional[int], str, Optional[str]]:
+) -> Tuple[Optional[int], str, Optional[str], Optional[str], Optional[str]]:
     """
-    Enrich a single hotel with room count.
+    Enrich a single hotel with room count and contact info.
 
-    Returns (room_count, source, discovered_website) where:
-    - source is 'regex', 'llm', 'llm_regex', or 'llm_search'
+    Returns (room_count, source, discovered_website, phone, email) where:
+    - source is 'regex', 'llm', or 'llm_search'
     - discovered_website is the URL found via LLM (None if hotel already had one)
+    - phone/email are contact info found via LLM (only for no-website hotels)
 
-    Returns (None, '', None) if no room count could be determined.
+    Returns (None, '', None, None, None) if no room count could be determined.
     """
     log(f"Processing: {hotel_name}")
 
@@ -522,7 +542,7 @@ async def enrich_hotel_room_count(
     cleaned = hotel_name.strip().replace("\ufeff", "") if hotel_name else ""
     if not cleaned or len(cleaned) < 3 or cleaned.lower() in ("new booking", "unknown", "test"):
         log(f"  Skipping: blank or junk hotel name")
-        return None, "", None
+        return None, "", None, None, None
 
     has_website = website and website.strip()
 
@@ -532,26 +552,28 @@ async def enrich_hotel_room_count(
 
         if regex_count:
             log(f"  Found via regex: {regex_count} rooms")
-            return regex_count, "regex", None
+            return regex_count, "regex", None, None, None
 
         if text:
             count = await extract_room_count_llm(client, hotel_name, text)
             if count:
                 log(f"  LLM estimate from website: ~{count} rooms")
-                return count, "llm", None
+                return count, "llm", None, None, None
 
         log(f"  Could not extract from known website")
-        return None, "", None
+        return None, "", None, None, None
 
-    # No website — ask GPT for both website and room count in one call
-    discovered_website, rooms = await _llm_find_website_and_rooms(client, hotel_name, city, state)
+    # No website — ask GPT for website, room count, and contact info in one call
+    discovered_website, rooms, phone, email = await _llm_find_website_and_rooms(
+        client, hotel_name, city, state
+    )
 
     if rooms:
         log(f"  LLM result: ~{rooms} rooms" + (f" (website: {discovered_website})" if discovered_website else ""))
-        return rooms, "llm_search", discovered_website
+        return rooms, "llm_search", discovered_website, phone, email
 
     log(f"  Could not estimate room count")
-    return None, "", discovered_website
+    return None, "", discovered_website, phone, email
 
 
 def get_llm_api_key() -> Optional[str]:
