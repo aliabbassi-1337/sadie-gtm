@@ -2657,7 +2657,7 @@ class Service(IService):
             dict with 'total_fixed' count
         """
         from db.client import queries, get_conn
-        from workflows.normalize_countries import COUNTRY_CODES, COUNTRY_VARIATIONS, GARBAGE_COUNTRIES
+        from services.enrichment.country_utils import COUNTRY_CODES, COUNTRY_VARIATIONS, GARBAGE_COUNTRIES
 
         total = 0
 

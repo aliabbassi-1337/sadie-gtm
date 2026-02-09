@@ -1,12 +1,8 @@
-"""Normalize country names to standard English format.
+"""Country normalization utilities for enrichment.
 
-Usage:
-    python -m workflows.normalize_countries [--dry-run]
+This is the SINGLE SOURCE OF TRUTH for country normalization.
+All enrichment code should use data from this module.
 """
-
-import asyncio
-import sys
-from db.client import init_db, close_db, get_conn
 
 # ISO 2-letter codes to full country names
 COUNTRY_CODES = {
@@ -241,7 +237,7 @@ COUNTRY_CODES = {
     "MQ": "Martinique",
 }
 
-# Native language names to English
+# Native language names and common variations -> standard English
 COUNTRY_VARIATIONS = {
     # European languages
     "Nederland": "Netherlands",
@@ -285,7 +281,6 @@ COUNTRY_VARIATIONS = {
     "Україна": "Ukraine",
     "Беларусь": "Belarus",
     "Россия": "Russia",
-    
     # Asian languages
     "日本": "Japan",
     "中国": "China",
@@ -302,7 +297,6 @@ COUNTRY_VARIATIONS = {
     "ශ්‍රී ලංකාව": "Sri Lanka",
     "भारत": "India",
     "پاکستان": "Pakistan",
-    
     # Arabic/Middle East
     "السعودية": "Saudi Arabia",
     "المملكة العربية السعودية": "Saudi Arabia",
@@ -319,30 +313,25 @@ COUNTRY_VARIATIONS = {
     "Maroc ⵍⵎⵖⵔⵉⴱ المغرب": "Morocco",
     "تونس": "Tunisia",
     "الجزائر": "Algeria",
-    
     # African
     "Soomaaliland أرض الصومال": "Somalia",
     "Madagasikara / Madagascar": "Madagascar",
     "Madagasikara": "Madagascar",
-    
     # Pacific/Oceania
     "New Zealand / Aotearoa": "New Zealand",
     "Aotearoa": "New Zealand",
     "Belau": "Palau",
-    
     # Americas
     "México": "Mexico",
     "Panamá": "Panama",
     "Perú": "Peru",
     "Brasil": "Brazil",
-    
     # English variations of United States
     "USA": "United States",
     "U.S.A.": "United States",
     "U.S.": "United States",
     "United States of America": "United States",
-
-    # Variations
+    # Other variations
     "The Bahamas": "Bahamas",
     "US Virgin Islands": "U.S. Virgin Islands",
     "Curaçao": "Curacao",
@@ -366,97 +355,3 @@ GARBAGE_COUNTRIES = [
     "null",
     "NULL",
 ]
-
-
-async def normalize_countries(dry_run: bool = False) -> int:
-    """Normalize country names and codes to standard English format."""
-    await init_db()
-    
-    async with get_conn() as conn:
-        total = 0
-        
-        # First, normalize 2-letter codes
-        print("Normalizing country codes...")
-        for code, name in COUNTRY_CODES.items():
-            if dry_run:
-                result = await conn.fetchval(
-                    "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1",
-                    code
-                )
-                if result > 0:
-                    print(f"  [DRY-RUN] {code} -> {name}: {result}")
-                    total += result
-            else:
-                result = await conn.execute("""
-                    UPDATE sadie_gtm.hotels 
-                    SET country = $1, updated_at = NOW()
-                    WHERE country = $2 AND status != -1
-                """, name, code)
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    print(f"  {code} -> {name}: {count}")
-                    total += count
-        
-        # Then, normalize native language names
-        print("\nNormalizing country name variations...")
-        for old, new in COUNTRY_VARIATIONS.items():
-            if dry_run:
-                result = await conn.fetchval(
-                    "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1",
-                    old
-                )
-                if result > 0:
-                    print(f"  [DRY-RUN] {old[:40]} -> {new}: {result}")
-                    total += result
-            else:
-                result = await conn.execute("""
-                    UPDATE sadie_gtm.hotels 
-                    SET country = $1, updated_at = NOW()
-                    WHERE country = $2 AND status != -1
-                """, new, old)
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    print(f"  {old[:40]} -> {new}: {count}")
-                    total += count
-        
-        # Finally, set garbage to NULL
-        print("\nRemoving garbage country values...")
-        for g in GARBAGE_COUNTRIES:
-            # Skip "NA" as it's already in COUNTRY_CODES -> Namibia
-            if g == "NA":
-                continue
-            if dry_run:
-                result = await conn.fetchval(
-                    "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1",
-                    g
-                )
-                if result > 0:
-                    print(f"  [DRY-RUN] '{g}' -> NULL: {result}")
-                    total += result
-            else:
-                result = await conn.execute("""
-                    UPDATE sadie_gtm.hotels 
-                    SET country = NULL, updated_at = NOW()
-                    WHERE country = $1 AND status != -1
-                """, g)
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    print(f"  '{g}' -> NULL: {count}")
-                    total += count
-        
-        print(f"\n{'[DRY-RUN] Would fix' if dry_run else 'Total fixed'}: {total}")
-        
-    await close_db()
-    return total
-
-
-async def main():
-    dry_run = "--dry-run" in sys.argv
-    if dry_run:
-        print("=== DRY RUN MODE ===\n")
-    
-    await normalize_countries(dry_run=dry_run)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
