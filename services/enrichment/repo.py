@@ -306,11 +306,26 @@ async def update_hotel_website(hotel_id: int, website: str) -> None:
 async def update_hotel_website_only(hotel_id: int, website: str) -> None:
     """Update hotel website without advancing pipeline stage.
 
-    Used by room count enricher when it discovers a website via Serper.
+    Used by room count enricher when it discovers a website via LLM.
     These hotels are already launched, so we don't need to advance_to_has_website.
     """
     async with get_conn() as conn:
         await queries.update_hotel_website(conn, hotel_id=hotel_id, website=website)
+
+
+async def update_hotel_contact_info(
+    hotel_id: int,
+    phone: Optional[str] = None,
+    email: Optional[str] = None,
+) -> None:
+    """Update hotel contact info (phone_website, email) without changing status.
+
+    Uses COALESCE so only fills in missing values — won't overwrite existing data.
+    """
+    async with get_conn() as conn:
+        await queries.update_hotel_contact_info(
+            conn, hotel_id=hotel_id, phone_website=phone, email=email
+        )
 
 
 async def update_hotel_location_point_if_null(hotel_id: int, lat: float, lng: float) -> None:
