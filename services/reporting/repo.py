@@ -199,13 +199,23 @@ async def get_pipeline_by_source_name(source: str) -> list:
 async def get_distinct_states(country: str = "United States") -> List[str]:
     """Get all distinct states that have launched hotels for a country.
 
-    Filters out junk state values (abbreviations, zip codes, garbage) using
-    state_utils.is_valid_state() at the Python layer.
+    Normalizes abbreviations to full names and deduplicates, so "CA" and
+    "California" merge into just "California". Filters out junk values.
     """
-    from services.enrichment.state_utils import is_valid_state
+    from services.enrichment.state_utils import is_valid_state, normalize_state
     async with get_conn() as conn:
         results = await queries.get_distinct_states(conn, country=country)
-        return [r["state"] for r in results if is_valid_state(r["state"], country)]
+        seen = set()
+        out = []
+        for r in results:
+            raw = r["state"]
+            if not is_valid_state(raw, country):
+                continue
+            normalized = normalize_state(raw, country) or raw
+            if normalized not in seen:
+                seen.add(normalized)
+                out.append(normalized)
+        return sorted(out)
 
 
 async def get_distinct_states_for_country(country: str) -> List[str]:
