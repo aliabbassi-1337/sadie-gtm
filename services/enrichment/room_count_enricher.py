@@ -513,6 +513,29 @@ email: <email or UNKNOWN>"""
     return website, rooms, phone, email
 
 
+def _estimate_from_name(hotel_name: str) -> int:
+    """Estimate room count from hotel name when all other methods fail."""
+    name_lower = hotel_name.lower()
+    if any(kw in name_lower for kw in ['cabin', 'cottage', 'house', 'chalet', 'villa', 'condo', 'apartment']):
+        return 1
+    elif any(kw in name_lower for kw in ['cabins', 'cottages', 'rentals', 'condos', 'apartments', 'villas']):
+        return 10
+    elif any(kw in name_lower for kw in ['b&b', 'bed and breakfast', 'guesthouse', 'guest house']):
+        return 8
+    elif any(kw in name_lower for kw in ['hostel']):
+        return 20
+    elif any(kw in name_lower for kw in ['motel']):
+        return 30
+    elif any(kw in name_lower for kw in ['inn']):
+        return 15
+    elif any(kw in name_lower for kw in ['resort', 'lodge']):
+        return 40
+    elif any(kw in name_lower for kw in ['hotel', 'suites']):
+        return 50
+    else:
+        return 10
+
+
 # ============================================================================
 # MAIN ENRICHMENT ENTRY POINT
 # ============================================================================
@@ -560,20 +583,22 @@ async def enrich_hotel_room_count(
                 log(f"  LLM estimate from website: ~{count} rooms")
                 return count, "llm", None, None, None
 
-        log(f"  Could not extract from known website")
-        return None, "", None, None, None
+        # Website scraping failed — fall through to LLM search
+        log(f"  Could not extract from website, falling back to LLM search")
 
-    # No website — ask GPT for website, room count, and contact info in one call
+    # Ask GPT for website, room count, and contact info in one call
     discovered_website, rooms, phone, email = await _llm_find_website_and_rooms(
         client, hotel_name, city, state
     )
 
     if rooms:
         log(f"  LLM result: ~{rooms} rooms" + (f" (website: {discovered_website})" if discovered_website else ""))
-        return rooms, "llm_search", discovered_website, phone, email
+        return rooms, "llm_search", discovered_website if not has_website else None, phone, email
 
-    log(f"  Could not estimate room count")
-    return None, "", discovered_website, phone, email
+    # LLM couldn't estimate — use name-based default so every hotel gets a count
+    rooms = _estimate_from_name(hotel_name)
+    log(f"  Name-based default estimate: ~{rooms} rooms")
+    return rooms, "llm_search", discovered_website if not has_website else None, phone, email
 
 
 def get_llm_api_key() -> Optional[str]:
