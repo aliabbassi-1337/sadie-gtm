@@ -217,7 +217,7 @@ class TestGenericCSVIngestor:
 
         assert len(records) == 1
         assert records[0].category == "hotel"
-        assert records[0].country == "USA"
+        assert records[0].country == "United States"
 
     @pytest.mark.no_db
     def test_parse_composite_external_id(self):

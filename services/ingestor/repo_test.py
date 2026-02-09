@@ -174,8 +174,8 @@ class TestBatchInsertHotels:
                 )
 
                 records = [
-                    ("Hotel A", "texas_hot", 0, "addr", "Austin", "TX", "USA", "555", "hotel", "123:001"),
-                    ("Hotel B", "texas_hot", 0, "addr", "Dallas", "TX", "USA", "555", "hotel", "123:002"),
+                    ("Hotel A", "texas_hot", 0, "addr", "Austin", "TX", "United States", "555", "hotel", "123:001"),
+                    ("Hotel B", "texas_hot", 0, "addr", "Dallas", "TX", "United States", "555", "hotel", "123:002"),
                 ]
 
                 result = await repo.batch_insert_hotels(records, external_id_type="texas_hot")
@@ -206,8 +206,8 @@ class TestBatchInsertHotels:
                 )
 
                 records = [
-                    ("Hotel A", "texas_hot", 0, "addr", "Austin", "TX", "USA", "555", "hotel", "123:001"),
-                    ("Hotel B", "texas_hot", 0, "addr", "Dallas", "TX", "USA", "555", "hotel", "123:002"),
+                    ("Hotel A", "texas_hot", 0, "addr", "Austin", "TX", "United States", "555", "hotel", "123:001"),
+                    ("Hotel B", "texas_hot", 0, "addr", "Dallas", "TX", "United States", "555", "hotel", "123:002"),
                 ]
 
                 result = await repo.batch_insert_hotels(records, external_id_type="texas_hot")
@@ -226,8 +226,8 @@ class TestBatchInsertHotels:
             mock_get_conn.return_value.__aenter__.return_value = mock_conn
 
             records = [
-                ("Hotel A", "manual", 0, "addr", "Miami", "FL", "USA", "555", "hotel"),
-                ("Hotel B", "manual", 0, "addr", "Orlando", "FL", "USA", "555", "hotel"),
+                ("Hotel A", "manual", 0, "addr", "Miami", "FL", "United States", "555", "hotel"),
+                ("Hotel B", "manual", 0, "addr", "Orlando", "FL", "United States", "555", "hotel"),
             ]
 
             result = await repo.batch_insert_hotels(records)
@@ -258,7 +258,7 @@ class TestBatchInsertHotels:
                 mock_queries.get_hotels_by_external_ids = AsyncMock(return_value=[])
 
                 records = [
-                    ("Hotel A", "la_county", 0, "addr", "LA", "CA", "USA", "555", "hotel", "12345", None, 34.0, -118.0),
+                    ("Hotel A", "la_county", 0, "addr", "LA", "CA", "United States", "555", "hotel", "12345", None, 34.0, -118.0),
                 ]
 
                 await repo.batch_insert_hotels(records, external_id_type="la_county_eh")

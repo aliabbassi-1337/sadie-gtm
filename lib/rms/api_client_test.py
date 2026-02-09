@@ -68,7 +68,7 @@ class TestRMSApiClientParseStructuredDescription:
         assert result["city"] == "Austin"
         assert result["state"] == "TX"
         assert result["postcode"] == "78701"
-        assert result["country"] == "USA"
+        assert result["country"] == "United States"
     
     def test_handles_html_tags(self, client):
         """Should strip HTML tags from text."""
@@ -221,7 +221,7 @@ class TestRMSApiClientExtractLocation:
         
         city, state, country = client._extract_location(text)
         
-        assert country == "USA"
+        assert country == "United States"
 
 
 class TestRMSApiClientNormalizeCountry:
@@ -242,9 +242,9 @@ class TestRMSApiClientNormalizeCountry:
         assert client._normalize_country("New Zealand") == "NZ"
     
     def test_normalizes_usa(self, client):
-        """Should normalize USA/United States to USA."""
-        assert client._normalize_country("USA") == "USA"
-        assert client._normalize_country("United States") == "USA"
+        """Should normalize USA/United States to United States."""
+        assert client._normalize_country("USA") == "United States"
+        assert client._normalize_country("United States") == "United States"
     
     def test_normalizes_canada(self, client):
         """Should normalize Canada to CA."""

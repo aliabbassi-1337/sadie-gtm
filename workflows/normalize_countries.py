@@ -336,6 +336,12 @@ COUNTRY_VARIATIONS = {
     "Perú": "Peru",
     "Brasil": "Brazil",
     
+    # English variations of United States
+    "USA": "United States",
+    "U.S.A.": "United States",
+    "U.S.": "United States",
+    "United States of America": "United States",
+
     # Variations
     "The Bahamas": "Bahamas",
     "US Virgin Islands": "U.S. Virgin Islands",

@@ -72,6 +72,20 @@ AU_STATES = {
     'NT': 'Northern Territory', 'ACT': 'Australian Capital Territory',
 }
 
+# Canadian province/territory mappings
+CA_PROVINCES = {
+    'AB': 'Alberta', 'BC': 'British Columbia', 'MB': 'Manitoba',
+    'NB': 'New Brunswick', 'NL': 'Newfoundland and Labrador',
+    'NS': 'Nova Scotia', 'NT': 'Northwest Territories', 'NU': 'Nunavut',
+    'ON': 'Ontario', 'PE': 'Prince Edward Island', 'QC': 'Quebec',
+    'SK': 'Saskatchewan', 'YT': 'Yukon',
+}
+
+# UK constituent countries (not subdivided further)
+UK_COUNTRIES = {
+    'England', 'Scotland', 'Wales', 'Northern Ireland',
+}
+
 # Common variations, typos, and case issues -> normalized full name
 # This handles edge cases that abbreviation lookup misses
 STATE_VARIATIONS = {
@@ -152,23 +166,6 @@ VALID_STATE_NAMES = set(US_STATES.values())
 STATE_NAMES = {name.lower(): name for name in US_STATES.values()}
 STATE_ABBREVS = {abbrev.lower(): full for abbrev, full in US_STATES.items()}
 
-# Valid full state names (for validation)
-VALID_STATE_NAMES = set(US_STATES.values())
-
-# Common variations/typos that map to valid states
-STATE_VARIATIONS = {
-    # Case variations
-    "CALIFORNIA": "California", "TEXAS": "Texas", "FLORIDA": "Florida",
-    "NEW YORK": "New York", "GEORGIA": "Georgia",
-    # Lowercase
-    "california": "California", "texas": "Texas", "florida": "Florida",
-    # Typos and variations
-    "Calif": "California", "Calif.": "California", "Ca": "California",
-    "Tx": "Texas", "Fl": "Florida", "Ny": "New York", "N.Y.": "New York",
-    "D.C.": "District of Columbia", "Washington DC": "District of Columbia",
-    "Washington D.C.": "District of Columbia",
-}
-
 
 def normalize_state(state: Optional[str], country: Optional[str] = None) -> Optional[str]:
     """Normalize state to full name.
@@ -224,9 +221,18 @@ def normalize_state(state: Optional[str], country: Optional[str] = None) -> Opti
         state_upper = state_stripped.upper()
         if state_upper in AU_STATES:
             return AU_STATES[state_upper]
-        
+
         return state
-    
+
+    # Canada context
+    is_ca = country_lower in ('canada', 'ca')
+    if is_ca:
+        state_upper = state_stripped.upper()
+        if state_upper in CA_PROVINCES:
+            return CA_PROVINCES[state_upper]
+
+        return state
+
     # Other countries - don't normalize (avoid false positives)
     return state
 
@@ -331,11 +337,17 @@ def is_valid_state(state: str, country: Optional[str] = None) -> bool:
     # Check against known garbage values
     if state_stripped.upper() in GARBAGE_STATES:
         return False
-    
+
     # Too short (single char) is garbage
     if len(state_stripped) < 2:
         return False
-    
+
+    # Numeric / zip-code values are garbage (e.g., "90210", "3000", "2321")
+    if state_stripped.isdigit():
+        return False
+    if state_stripped[0].isdigit():
+        return False
+
     # If we have country context, validate against known states
     if country:
         country_lower = country.lower().strip()
@@ -355,7 +367,17 @@ def is_valid_state(state: str, country: Optional[str] = None) -> bool:
             state_upper = state_stripped.upper()
             au_full_names = set(AU_STATES.values())
             return state_upper in AU_STATES or state_stripped in au_full_names
-    
+
+        # Canada context
+        if country_lower in ('canada', 'ca'):
+            state_upper = state_stripped.upper()
+            ca_full_names = set(CA_PROVINCES.values())
+            return state_upper in CA_PROVINCES or state_stripped in ca_full_names
+
+        # UK context
+        if country_lower in ('united kingdom', 'uk', 'gb', 'great britain'):
+            return state_stripped in UK_COUNTRIES
+
     # Without country context, just reject known garbage
     return True
 

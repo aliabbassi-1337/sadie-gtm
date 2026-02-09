@@ -54,3 +54,7 @@ infra/terraform.tfstate
 infra/terraform.tfstate.backup
 *.tfstate
 *.tfstate.backup
+
+context
+./context
+context/

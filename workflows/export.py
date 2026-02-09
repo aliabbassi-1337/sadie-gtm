@@ -47,10 +47,13 @@ from db.client import init_db, close_db
 from services.reporting.service import Service
 
 BOOKING_ENGINES = ["cloudbeds", "rms", "siteminder", "mews"]
-# Map display name to DB value
+# Map folder name to DB value
+# Folder names on S3 match the DB country value
 COUNTRIES = {
-    "USA": "United States",
+    "United States": "United States",
     "Australia": "Australia",
+    "Canada": "Canada",
+    "United Kingdom": "United Kingdom",
 }
 
 # Limit concurrent exports to avoid overwhelming S3/DB
@@ -77,11 +80,11 @@ async def export_by_engine(service: Service, engine: str, dry_run: bool = False)
     return await service.export_by_booking_engine(engine, source_pattern=source_pattern)
 
 
-async def export_by_state(service: Service, state: str, country: str = "USA", dry_run: bool = False) -> tuple[str, int]:
+async def export_by_state(service: Service, state: str, country: str = "United States", dry_run: bool = False) -> tuple[str, int]:
     """Export leads for a specific state."""
     if dry_run:
         from services.reporting import repo
-        leads = await repo.get_leads_for_state(state, source_pattern=None)
+        leads = await repo.get_leads_for_state(state, source_pattern=None, country=country)
         logger.info(f"[DRY RUN] {country}/{state}: {len(leads)} leads")
         return "", len(leads)
     
@@ -155,6 +158,15 @@ async def export_country(service: Service, country: str, dry_run: bool = False) 
             results["total_leads"] += count
             if not dry_run:
                 logger.success(f"  {country}/{state}: {count} leads")
+    
+    # Also generate the combined country-level file (e.g., USA/USA_leads.xlsx)
+    if not dry_run:
+        try:
+            s3_uri, count = await service.export_country_leads(country, db_country)
+            if count > 0:
+                logger.success(f"  {country}/{country}_leads.xlsx: {count} total leads (combined)")
+        except Exception as e:
+            logger.error(f"  {country} combined export failed: {e}")
     
     return results
 
@@ -264,7 +276,7 @@ async def main():
             logger.info(f"\nExported {results['states']} states, {results['total_leads']} total leads")
             
         elif args.state:
-            country = "USA"  # Default to USA
+            country = "United States"
             s3_uri, count = await export_by_state(service, args.state, country, args.dry_run)
             if not args.dry_run:
                 logger.success(f"Exported {count} leads for {args.state} to {s3_uri}")

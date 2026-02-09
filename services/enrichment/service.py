@@ -2664,6 +2664,7 @@ class Service(IService):
         COUNTRY_STATE_MAPS = {
             "United States": state_utils.US_STATES,
             "Australia": state_utils.AU_STATES,
+            "Canada": state_utils.CA_PROVINCES,
         }
         
         all_fixes = []
@@ -2716,16 +2717,49 @@ class Service(IService):
                             fixed = int(result.split()[-1]) if result else 0
                             total_fixed += fixed
         
+        # Second pass: NULL out junk state values that fail is_valid_state()
+        junk_nulled = 0
+        for country_name, state_map in COUNTRY_STATE_MAPS.items():
+            async with get_conn() as conn:
+                rows = await conn.fetch('''
+                    SELECT state, COUNT(*) as cnt
+                    FROM sadie_gtm.hotels
+                    WHERE status != -1
+                      AND country = $1
+                      AND state IS NOT NULL
+                    GROUP BY state
+                    ORDER BY cnt DESC
+                ''', country_name)
+
+            for row in rows:
+                state_val = row['state']
+                count = row['cnt']
+
+                if not state_utils.is_valid_state(state_val, country_name):
+                    logger.info(f"  Junk state \"{state_val}\" in {country_name} ({count} hotels) -> NULL")
+                    all_fixes.append((state_val, None, country_name, count))
+
+                    if not dry_run:
+                        async with get_conn() as conn:
+                            result = await conn.execute('''
+                                UPDATE sadie_gtm.hotels
+                                SET state = NULL, updated_at = CURRENT_TIMESTAMP
+                                WHERE status != -1 AND country = $2 AND state = $1
+                            ''', state_val, country_name)
+                            nulled = int(result.split()[-1]) if result else 0
+                            junk_nulled += nulled
+                            total_fixed += nulled
+
         if not all_fixes:
             logger.info("No state normalization needed")
             return {"fixes": [], "total_fixed": 0}
-        
+
         if dry_run:
             would_fix = sum(c for _, _, _, c in all_fixes)
             logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
             return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
         else:
-            logger.success(f"Normalized {total_fixed} hotels.")
+            logger.success(f"Normalized {total_fixed} hotels ({junk_nulled} junk states NULLed).")
             return {"fixes": all_fixes, "total_fixed": total_fixed}
 
     def extract_state_from_text(self, text: str) -> Optional[str]:

@@ -292,7 +292,7 @@ class RMSScraper(IRMSScraper):
         if us_match:
             city = us_match.group(1).strip().rstrip(',')
             state = us_match.group(2).upper()
-            country = 'USA'
+            country = 'United States'
             return city, state, country
         
         # NZ pattern: "City Postcode, New Zealand"

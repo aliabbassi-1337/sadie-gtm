@@ -17,10 +17,12 @@ USAGE:
 LAUNCH CRITERIA (defined in services/reporting/launch_conditions.py):
 - status = 0 (pending)
 - valid name (not null, not empty, not junk/test names)
-- state + country (location required, city optional)
+- country (required; state/city optional)
 - booking engine detected (hbe.status = 1)
+- enrichment completed (hbe.enrichment_status = 1)
 
 NOT REQUIRED (optional but displayed if available):
+- state
 - email
 - phone
 - room_count

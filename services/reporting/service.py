@@ -20,7 +20,7 @@ class IService(ABC):
     """Reporting Service - Generate and deliver reports to stakeholders."""
 
     @abstractmethod
-    async def export_city(self, city: str, state: str, country: str = "USA") -> tuple[str, int]:
+    async def export_city(self, city: str, state: str, country: str = "United States") -> tuple[str, int]:
         """Generate Excel report for a city and upload to S3.
 
         Returns:
@@ -29,7 +29,7 @@ class IService(ABC):
         pass
 
     @abstractmethod
-    async def export_state(self, state: str, country: str = "USA", source_pattern: str = None) -> tuple[str, int]:
+    async def export_state(self, state: str, country: str = "United States", source_pattern: str = None) -> tuple[str, int]:
         """Generate Excel report for an entire state and upload to S3.
 
         Returns:
@@ -70,13 +70,13 @@ class IService(ABC):
     @abstractmethod
     async def export_all_states(
         self,
-        country: str = "USA",
+        country: str = "United States",
         source_pattern: str = None,
     ) -> dict:
         """Export all states that have hotels.
 
         Args:
-            country: Country code
+            country: Country name (e.g. "United States", "Australia")
             source_pattern: Filter by source pattern
 
         Returns:
@@ -193,7 +193,7 @@ class Service(IService):
     def __init__(self) -> None:
         pass
 
-    async def export_city(self, city: str, state: str, country: str = "USA") -> tuple[str, int]:
+    async def export_city(self, city: str, state: str, country: str = "United States") -> tuple[str, int]:
         """Generate Excel report for a city and upload to S3.
 
         Returns:
@@ -229,7 +229,7 @@ class Service(IService):
         finally:
             os.unlink(tmp_path)
 
-    async def export_state(self, state: str, country: str = "USA", source_pattern: str = None) -> tuple[str, int]:
+    async def export_state(self, state: str, country: str = "United States", source_pattern: str = None) -> tuple[str, int]:
         """Generate Excel report for an entire state and upload to S3.
 
         Uses s5cmd for fast upload with fallback to boto3.
@@ -242,13 +242,13 @@ class Service(IService):
         logger.info(f"Generating state report for {state}")
 
         # Get data from database
-        leads = await repo.get_leads_for_state(state, source_pattern=source_pattern)
-        stats = await repo.get_state_stats(state, source_pattern=source_pattern)
-        top_engines = await repo.get_top_engines_for_state(state, source_pattern=source_pattern)
+        leads = await repo.get_leads_for_state(state, source_pattern=source_pattern, country=country)
+        stats = await repo.get_state_stats(state, source_pattern=source_pattern, country=country)
+        top_engines = await repo.get_top_engines_for_state(state, source_pattern=source_pattern, country=country)
         if source_pattern:
-            funnel = await repo.get_detection_funnel_by_source(state, source_pattern)
+            funnel = await repo.get_detection_funnel_by_source(state, source_pattern, country=country)
         else:
-            funnel = await repo.get_detection_funnel(state)
+            funnel = await repo.get_detection_funnel(state, country=country)
 
         logger.info(f"Found {len(leads)} leads for {state}")
 
@@ -289,6 +289,47 @@ class Service(IService):
                 s3_uri = upload_file(tmp_path, s3_key)
 
             logger.info(f"Uploaded state report to {s3_uri}")
+            return s3_uri, len(leads)
+        finally:
+            os.unlink(tmp_path)
+
+    async def export_country_leads(self, country: str, db_country: str) -> tuple[str, int]:
+        """Generate combined Excel report for ALL leads in a country.
+
+        Creates files like: USA/USA_leads.xlsx, Australia/Australia_leads.xlsx
+        """
+        import subprocess
+
+        logger.info(f"Generating country-level report for {country}")
+
+        leads = await repo.get_leads_for_country(db_country)
+        logger.info(f"Found {len(leads)} total leads for {country}")
+
+        if not leads:
+            return "", 0
+
+        workbook = self._create_crawl_workbook(leads, f"{country} All Leads")
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            workbook.save(tmp.name)
+            tmp_path = tmp.name
+
+        try:
+            filename = f"{country}_leads.xlsx"
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/{country}/{filename}"
+
+            result = subprocess.run(
+                ["s5cmd", "cp", tmp_path, s3_uri],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
+                s3_key = f"HotelLeadGen/{country}/{filename}"
+                s3_uri = upload_file(tmp_path, s3_key)
+
+            logger.info(f"Uploaded country report to {s3_uri}")
             return s3_uri, len(leads)
         finally:
             os.unlink(tmp_path)
@@ -406,19 +447,19 @@ class Service(IService):
 
     async def export_all_states(
         self,
-        country: str = "USA",
+        country: str = "United States",
         source_pattern: str = None,
     ) -> dict:
         """Export all states that have hotels.
 
         Args:
-            country: Country code
+            country: Country name (e.g. "United States", "Australia")
             source_pattern: Filter by source pattern
 
         Returns:
             Dict with 'states' count and 'total_leads' count
         """
-        states = await repo.get_distinct_states()
+        states = await repo.get_distinct_states(country=country)
 
         logger.info(f"Found {len(states)} states with hotels")
 
@@ -512,9 +553,16 @@ class Service(IService):
             cell.border = thin_border
 
         # Write data rows
+        import re
+        _illegal_xml_re = re.compile(
+            r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
+        )
         for row, lead in enumerate(leads, 2):
             for col, extractor in enumerate(extractors, 1):
-                cell = sheet.cell(row=row, column=col, value=extractor(lead))
+                value = extractor(lead)
+                if isinstance(value, str):
+                    value = _illegal_xml_re.sub("", value)
+                cell = sheet.cell(row=row, column=col, value=value)
                 cell.border = thin_border
 
         # Auto-adjust column widths
@@ -563,8 +611,39 @@ class Service(IService):
 
     def _populate_leads_sheet(self, sheet, leads: List[HotelLead]) -> None:
         """Populate the leads sheet with hotel data."""
-        # Define headers
-        headers = ["Hotel", "Category", "City", "Phone", "Email", "Website", "Booking Engine", "Room Count", "Proximity"]
+        import re
+        _illegal_xml_re = re.compile(
+            r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
+        )
+
+        # Define all columns with extractors — skip columns where ALL values are blank
+        all_columns = [
+            ("Hotel", lambda l: l.hotel_name),
+            ("Address", lambda l: l.address or ""),
+            ("City", lambda l: l.city or ""),
+            ("State", lambda l: l.state or ""),
+            ("Country", lambda l: l.country or ""),
+            ("Phone", lambda l: l.phone_website or l.phone_google or ""),
+            ("Email", lambda l: l.email or ""),
+            ("Website", lambda l: l.website or ""),
+            ("Rating", lambda l: l.rating or ""),
+            ("Reviews", lambda l: l.review_count or ""),
+            ("Room Count", lambda l: l.room_count or ""),
+            ("Booking URL", lambda l: l.booking_url or ""),
+            ("Booking Engine", lambda l: l.booking_engine_name or ""),
+            ("Category", lambda l: l.category or ""),
+            ("Proximity", lambda l: self._format_proximity(l)),
+        ]
+
+        # Filter out columns where ALL values are empty
+        columns = []
+        for header, extractor in all_columns:
+            has_data = any(extractor(lead) for lead in leads)
+            if has_data:
+                columns.append((header, extractor))
+
+        headers = [c[0] for c in columns]
+        extractors = [c[1] for c in columns]
 
         # Style definitions
         header_font = Font(bold=True, color="FFFFFF")
@@ -587,48 +666,17 @@ class Service(IService):
 
         # Write data rows
         for row, lead in enumerate(leads, 2):
-            col = 1
-            # Hotel name
-            sheet.cell(row=row, column=col, value=lead.hotel_name).border = thin_border
-            col += 1
-
-            # Category
-            sheet.cell(row=row, column=col, value=lead.category or "").border = thin_border
-            col += 1
-
-            # City
-            sheet.cell(row=row, column=col, value=lead.city or "").border = thin_border
-            col += 1
-
-            # Phone (prefer website phone, fall back to Google)
-            phone = lead.phone_website or lead.phone_google or ""
-            sheet.cell(row=row, column=col, value=phone).border = thin_border
-            col += 1
-
-            # Email
-            sheet.cell(row=row, column=col, value=lead.email or "").border = thin_border
-            col += 1
-
-            # Website
-            sheet.cell(row=row, column=col, value=lead.website or "").border = thin_border
-            col += 1
-
-            # Booking engine (just the name, no domain)
-            sheet.cell(row=row, column=col, value=lead.booking_engine_name or "").border = thin_border
-            col += 1
-
-            # Room count
-            room_count = lead.room_count if lead.room_count else ""
-            sheet.cell(row=row, column=col, value=room_count).border = thin_border
-            col += 1
-
-            # Proximity
-            sheet.cell(row=row, column=col, value=self._format_proximity(lead)).border = thin_border
+            for col, extractor in enumerate(extractors, 1):
+                value = extractor(lead)
+                if isinstance(value, str):
+                    value = _illegal_xml_re.sub("", value)
+                cell = sheet.cell(row=row, column=col, value=value)
+                cell.border = thin_border
 
         # Auto-adjust column widths
         for col in range(1, len(headers) + 1):
             max_length = len(headers[col - 1])
-            for row in range(2, len(leads) + 2):
+            for row in range(2, min(len(leads) + 2, 100)):  # Sample first 100 rows
                 cell_value = sheet.cell(row=row, column=col).value
                 if cell_value:
                     max_length = max(max_length, len(str(cell_value)))

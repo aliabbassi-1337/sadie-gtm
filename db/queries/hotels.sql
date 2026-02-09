@@ -246,6 +246,40 @@ WHERE h.city = :city
   AND h.state = :state
   AND h.status = 1;
 
+-- name: get_leads_for_country
+-- Get ALL hotel leads for a country with booking engine, room count, and nearest customer
+-- Only returns launched hotels (status=1)
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.category,
+    h.website,
+    h.phone_google,
+    h.phone_website,
+    h.email,
+    h.address,
+    h.city,
+    h.state,
+    h.country,
+    h.rating,
+    h.review_count,
+    be.name AS booking_engine_name,
+    be.tier AS booking_engine_tier,
+    hbe.booking_url,
+    hbe.engine_property_id,
+    hrc.room_count,
+    ec.name AS nearest_customer_name,
+    hcp.distance_km AS nearest_customer_distance_km
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
+LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
+LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
+WHERE h.country = :country
+  AND h.status = 1
+ORDER BY h.state, h.city, h.name;
+
 -- name: get_leads_for_state
 -- Get hotel leads for an entire state with booking engine, room count, and nearest customer
 -- Only returns launched hotels (status=1)
@@ -265,6 +299,8 @@ SELECT
     h.review_count,
     be.name AS booking_engine_name,
     be.tier AS booking_engine_tier,
+    hbe.booking_url,
+    hbe.engine_property_id,
     hrc.room_count,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
@@ -275,7 +311,7 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.status = 1;
 
 -- name: get_leads_for_state_by_source
@@ -297,6 +333,8 @@ SELECT
     h.review_count,
     be.name AS booking_engine_name,
     be.tier AS booking_engine_tier,
+    hbe.booking_url,
+    hbe.engine_property_id,
     hrc.room_count,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
@@ -307,7 +345,7 @@ LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.status = 1
   AND h.source LIKE :source_pattern;
 
@@ -405,7 +443,7 @@ FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.country = 'United States';
+  AND h.country = :country;
 
 -- name: get_state_stats_by_source^
 -- Get stats for a state filtered by source pattern (for analytics tab)
@@ -421,7 +459,7 @@ FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.source LIKE :source_pattern;
 
 -- name: get_top_engines_for_city
@@ -446,7 +484,7 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.status = 1
 GROUP BY be.name;
 
@@ -459,7 +497,7 @@ FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 WHERE h.state = :state
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.status = 1
   AND h.source LIKE :source_pattern
 GROUP BY be.name;
@@ -473,7 +511,7 @@ WITH base AS (
         COUNT(CASE WHEN website IS NOT NULL AND website != '' THEN 1 END) as with_website,
         COUNT(CASE WHEN status = 1 THEN 1 END) as launched
     FROM sadie_gtm.hotels
-    WHERE state = :state AND country = 'United States'
+    WHERE state = :state AND country = :country
 ),
 detection AS (
     SELECT
@@ -484,13 +522,13 @@ detection AS (
     FROM sadie_gtm.hotels h
     JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
     LEFT JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-    WHERE h.state = :state AND h.country = 'United States'
+    WHERE h.state = :state AND h.country = :country
 ),
 pending AS (
     -- Hotels truly pending: status=0, has website, no HBE record yet
     SELECT COUNT(*) as pending_detection
     FROM sadie_gtm.hotels h
-    WHERE h.state = :state AND h.country = 'United States'
+    WHERE h.state = :state AND h.country = :country
     AND h.status = 0
     AND h.website IS NOT NULL AND h.website != ''
     AND NOT EXISTS (SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe WHERE hbe.hotel_id = h.id)
@@ -507,7 +545,7 @@ failures AS (
         COUNT(*) FILTER (WHERE detection_method LIKE 'error:exception%') as browser_err
     FROM sadie_gtm.hotel_booking_engines hbe
     JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
-    WHERE h.state = :state AND h.country = 'United States'
+    WHERE h.state = :state AND h.country = :country
 )
 SELECT
     b.total_hotels,
@@ -536,7 +574,7 @@ WITH base AS (
         COUNT(CASE WHEN website IS NOT NULL AND website != '' THEN 1 END) as with_website,
         COUNT(CASE WHEN status = 1 THEN 1 END) as launched
     FROM sadie_gtm.hotels
-    WHERE state = :state AND country = 'United States' AND source LIKE :source_pattern
+    WHERE state = :state AND country = :country AND source LIKE :source_pattern
 ),
 detection AS (
     SELECT
@@ -547,13 +585,13 @@ detection AS (
     FROM sadie_gtm.hotels h
     JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
     LEFT JOIN sadie_gtm.booking_engines be ON be.id = hbe.booking_engine_id
-    WHERE h.state = :state AND h.country = 'United States' AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = :country AND h.source LIKE :source_pattern
 ),
 pending AS (
     -- Hotels truly pending: status=0, has website, no HBE record yet
     SELECT COUNT(*) as pending_detection
     FROM sadie_gtm.hotels h
-    WHERE h.state = :state AND h.country = 'United States' AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = :country AND h.source LIKE :source_pattern
     AND h.status = 0
     AND h.website IS NOT NULL AND h.website != ''
     AND NOT EXISTS (SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe WHERE hbe.hotel_id = h.id)
@@ -570,7 +608,7 @@ failures AS (
         COUNT(*) FILTER (WHERE detection_method LIKE 'error:exception%') as browser_err
     FROM sadie_gtm.hotel_booking_engines hbe
     JOIN sadie_gtm.hotels h ON h.id = hbe.hotel_id
-    WHERE h.state = :state AND h.country = 'United States' AND h.source LIKE :source_pattern
+    WHERE h.state = :state AND h.country = :country AND h.source LIKE :source_pattern
 )
 SELECT
     b.total_hotels,
@@ -596,7 +634,7 @@ FROM base b, detection d, pending p, failures f;
 SELECT DISTINCT city
 FROM sadie_gtm.hotels
 WHERE state = :state
-  AND country = 'United States'
+  AND country = :country
   AND city IS NOT NULL
   AND status = 1;
 
@@ -610,11 +648,13 @@ WHERE state = :state
 --
 -- Launch criteria (ALL required):
 --   - status = 0 (pending)
---   - name (not null, not empty, not 'Unknown')
---   - email OR phone (at least one)
---   - state, country (city optional)
+--   - valid name (not null, not empty, not junk/test)
+--   - country (required; state/city optional)
 --   - booking engine detected (hbe.status = 1)
+--   - enrichment completed (hbe.enrichment_status = 1)
 -- NOT required (optional, displayed if available):
+--   - state
+--   - email / phone
 --   - room_count
 --   - customer proximity
 
@@ -635,14 +675,13 @@ SELECT
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
-INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1 AND hbe.enrichment_status = 1
 INNER JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 LEFT JOIN sadie_gtm.hotel_customer_proximity hcp ON h.id = hcp.hotel_id
 LEFT JOIN sadie_gtm.existing_customers ec ON hcp.existing_customer_id = ec.id
 WHERE h.status = 0
-  -- Location requirements
-  AND h.state IS NOT NULL AND h.state != ''
+  -- Location requirements (country required, state optional)
   AND h.country IS NOT NULL AND h.country != ''
   -- Valid name requirements (filter out junk/test/system names)
   AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
@@ -666,10 +705,9 @@ LIMIT :limit;
 -- Count hotels ready to be launched (valid name + location, email not required)
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels h
-INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1 AND hbe.enrichment_status = 1
 WHERE h.status = 0
-  -- Location requirements
-  AND h.state IS NOT NULL AND h.state != ''
+  -- Location requirements (country required, state optional)
   AND h.country IS NOT NULL AND h.country != ''
   -- Valid name requirements (filter out junk/test/system names)
   AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
@@ -696,11 +734,10 @@ WHERE h.status = 0
 WITH claimed AS (
     SELECT h.id
     FROM sadie_gtm.hotels h
-    INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+    INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1 AND hbe.enrichment_status = 1
     WHERE h.status = 0
       AND h.id = ANY(:hotel_ids)
-      -- Location requirements
-      AND h.state IS NOT NULL AND h.state != ''
+      -- Location requirements (country required, state optional)
       AND h.country IS NOT NULL AND h.country != ''
       -- Valid name requirements (filter out junk/test/system names)
       AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
@@ -733,10 +770,9 @@ RETURNING id;
 WITH claimed AS (
     SELECT h.id
     FROM sadie_gtm.hotels h
-    INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1
+    INNER JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.status = 1 AND hbe.enrichment_status = 1
     WHERE h.status = 0
-      -- Location requirements
-      AND h.state IS NOT NULL AND h.state != ''
+      -- Location requirements (country required, state optional)
       AND h.country IS NOT NULL AND h.country != ''
       -- Valid name requirements (filter out junk/test/system names)
       AND h.name IS NOT NULL AND h.name != '' AND h.name != ' '
@@ -1169,21 +1205,13 @@ RETURNING id,
 
 
 -- name: get_distinct_states
--- Get all distinct US states that have hotels (50 states + DC + territories)
+-- Get all distinct states for a country that have launched hotels
+-- State validation (filtering junk) is done at the Python layer via state_utils.is_valid_state()
 SELECT DISTINCT state
 FROM sadie_gtm.hotels
 WHERE state IS NOT NULL AND state != ''
-  AND country = 'United States'
-  AND state IN (
-    'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut',
-    'Delaware', 'District of Columbia', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois',
-    'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts',
-    'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada',
-    'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota',
-    'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota',
-    'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia',
-    'Wisconsin', 'Wyoming', 'Puerto Rico'
-  )
+  AND country = :country
+  AND status = 1
 ORDER BY state;
 
 
@@ -1339,7 +1367,7 @@ LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.sta
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 JOIN sadie_gtm.booking_engines bes ON bes.id = hbe.booking_engine_id
 WHERE hbe.booking_engine_id IN (3, 4, 12, 14)  -- Cloudbeds, Mews, RMS Cloud, SiteMinder
-  AND h.country = 'United States'
+  AND h.country = :country
 GROUP BY bes.name
 ORDER BY total_hotels DESC;
 
@@ -1368,7 +1396,7 @@ LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id AND hbe.sta
 LEFT JOIN sadie_gtm.hotel_room_count hrc ON h.id = hrc.hotel_id AND hrc.status = 1
 JOIN sadie_gtm.booking_engines bes ON bes.id = hbe.booking_engine_id
 WHERE hbe.booking_engine_id IN (3, 4, 12, 14)  -- Cloudbeds, Mews, RMS Cloud, SiteMinder
-  AND h.country = 'United States'
+  AND h.country = :country
   AND h.source LIKE :source_pattern
 GROUP BY bes.name
 ORDER BY total_hotels DESC;
