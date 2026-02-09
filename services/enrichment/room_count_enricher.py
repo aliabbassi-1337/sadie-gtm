@@ -2,6 +2,8 @@
 Room Count Enricher (LLM-powered)
 =================================
 Uses Groq's fast LLM API to extract room counts from hotel websites.
+For hotels without websites, discovers websites via Serper + LLM,
+or falls back to name-only LLM estimation.
 
 This is an internal helper module - only service.py can call repo functions.
 """
@@ -16,11 +18,17 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from dotenv import load_dotenv
 
+# Reuse domain blocklist and name cleaning from website enricher
+from services.enrichment.website_enricher import SKIP_DOMAINS, BAD_URL_PATTERNS, clean_hotel_name
+
 # Load environment variables
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("ROOM_COUNT_ENRICHER_AGENT_GROQ_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+SERPER_SEARCH_URL = "https://google.serper.dev/search"
 
 # Fast model - good balance of speed and accuracy
 MODEL = "llama-3.1-8b-instant"
@@ -55,6 +63,85 @@ def log(msg: str) -> None:
     """Print timestamped log message."""
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}")
+
+
+def _extract_domain(url: str) -> Optional[str]:
+    """Extract domain from a URL, stripping www. prefix."""
+    try:
+        parsed = urlparse(url if "://" in url else f"https://{url}")
+        domain = parsed.netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain or None
+    except Exception:
+        return None
+
+
+async def _groq_request(
+    client: httpx.AsyncClient,
+    prompt: str,
+    max_tokens: int = 20,
+    temperature: float = 0.3,
+) -> Optional[str]:
+    """Make a Groq API request with retry logic for rate limits.
+
+    Returns the LLM response text, or None on failure.
+    """
+    try:
+        resp = await client.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+            timeout=30.0,
+        )
+
+        if resp.status_code == 429:
+            for retry in range(3):
+                wait_time = (retry + 1) * 5  # 5s, 10s, 15s
+                log(f"    Rate limited, waiting {wait_time}s (attempt {retry + 1}/3)")
+                await asyncio.sleep(wait_time)
+
+                retry_resp = await client.post(
+                    GROQ_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    timeout=30.0,
+                )
+                if retry_resp.status_code == 200:
+                    resp = retry_resp
+                    break
+                elif retry_resp.status_code != 429:
+                    return None
+            else:
+                log("    Rate limit exceeded after 3 retries")
+                return None
+
+        if resp.status_code != 200:
+            log(f"    Groq API error: {resp.status_code}")
+            return None
+
+        data = resp.json()
+        return data["choices"][0]["message"]["content"].strip()
+
+    except Exception as e:
+        log(f"  Groq request error: {e}")
+        return None
 
 
 async def fetch_page_raw(client: httpx.AsyncClient, url: str) -> str:
@@ -333,121 +420,307 @@ WEBSITE CONTENT:
 
 Return ONLY a number (e.g., "12"). You MUST estimate even if unsure:"""
 
+    answer = await _groq_request(client, prompt, max_tokens=20, temperature=0.3)
+    if answer is None:
+        return None
+
+    # Extract number from response
+    match = re.search(r'\d+', answer)
+    if match:
+        count = int(match.group())
+        # Sanity check - most properties have 1-2000 rooms
+        if 1 <= count <= 2000:
+            return count
+
+    # LLM didn't return a number - make a default estimate based on property name
+    name_lower = hotel_name.lower()
+    if any(kw in name_lower for kw in ['cabin', 'cottage', 'house', 'chalet', 'villa']):
+        return 1  # Single rental unit
+    elif any(kw in name_lower for kw in ['cabins', 'cottages', 'rentals']):
+        return 10  # Small rental company
+    elif any(kw in name_lower for kw in ['b&b', 'bed and breakfast', 'inn', 'guesthouse']):
+        return 8  # Small B&B
+    elif any(kw in name_lower for kw in ['motel']):
+        return 30  # Typical motel
+    elif any(kw in name_lower for kw in ['hotel', 'resort', 'lodge']):
+        return 50  # Default hotel
+    else:
+        return 10  # Generic default
+
+
+# ============================================================================
+# WEBSITE DISCOVERY (Serper + LLM)
+# ============================================================================
+
+
+async def search_hotel_website(
+    client: httpx.AsyncClient,
+    hotel_name: str,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+) -> Optional[str]:
+    """Search for a hotel's website using Serper and LLM selection.
+
+    Returns the discovered website URL, or None if not found.
+    """
+    if not SERPER_API_KEY:
+        log("  No SERPER_API_KEY configured, skipping website discovery")
+        return None
+
+    cleaned_name = clean_hotel_name(hotel_name)
+    location_parts = [p for p in [city, state] if p]
+    location_str = ", ".join(location_parts) if location_parts else ""
+
+    query = f"{cleaned_name} hotel official website"
+    if location_str:
+        query = f"{cleaned_name} {location_str} hotel official website"
+
+    log(f"  Searching Serper: {query}")
+
     try:
         resp = await client.post(
-            GROQ_API_URL,
+            SERPER_SEARCH_URL,
             headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "X-API-KEY": SERPER_API_KEY,
                 "Content-Type": "application/json",
             },
-            json={
-                "model": MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 20,
-                "temperature": 0.3,  # Slight creativity for estimation
-            },
-            timeout=30.0,
+            json={"q": query, "num": 10},
+            timeout=15.0,
         )
 
-        if resp.status_code == 429:
-            # Rate limited - wait and retry up to 3 times
-            for retry in range(3):
-                wait_time = (retry + 1) * 5  # 5s, 10s, 15s
-                log(f"    Rate limited, waiting {wait_time}s (attempt {retry + 1}/3)")
-                await asyncio.sleep(wait_time)
-
-                retry_resp = await client.post(
-                    GROQ_API_URL,
-                    headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": MODEL,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 20,
-                        "temperature": 0.3,
-                    },
-                    timeout=30.0,
-                )
-                if retry_resp.status_code == 200:
-                    resp = retry_resp
-                    break
-                elif retry_resp.status_code != 429:
-                    return None
-            else:
-                log("    Rate limit exceeded after 3 retries")
-                return None
-
         if resp.status_code != 200:
-            log(f"    Groq API error: {resp.status_code}")
+            log(f"  Serper API error: {resp.status_code}")
             return None
 
         data = resp.json()
-        answer = data["choices"][0]["message"]["content"].strip()
+        organic = data.get("organic", [])
+        if not organic:
+            log("  No Serper results")
+            return None
 
-        # Extract number from response
-        match = re.search(r'\d+', answer)
-        if match:
-            count = int(match.group())
-            # Sanity check - most properties have 1-2000 rooms
-            if 1 <= count <= 2000:
-                return count
+        # Filter out blocked domains and bad URL patterns
+        candidates = []
+        for result in organic:
+            url = result.get("link", "")
+            title = result.get("title", "")
+            snippet = result.get("snippet", "")
+            domain = _extract_domain(url)
 
-        # LLM didn't return a number - make a default estimate based on property name
-        name_lower = hotel_name.lower()
-        if any(kw in name_lower for kw in ['cabin', 'cottage', 'house', 'chalet', 'villa']):
-            return 1  # Single rental unit
-        elif any(kw in name_lower for kw in ['cabins', 'cottages', 'rentals']):
-            return 10  # Small rental company
-        elif any(kw in name_lower for kw in ['b&b', 'bed and breakfast', 'inn', 'guesthouse']):
-            return 8  # Small B&B
-        elif any(kw in name_lower for kw in ['motel']):
-            return 30  # Typical motel
-        elif any(kw in name_lower for kw in ['hotel', 'resort', 'lodge']):
-            return 50  # Default hotel
-        else:
-            return 10  # Generic default
+            if not domain:
+                continue
+            if domain in SKIP_DOMAINS:
+                continue
+            if any(pattern in url.lower() for pattern in BAD_URL_PATTERNS):
+                continue
+
+            candidates.append({
+                "url": url,
+                "title": title,
+                "snippet": snippet,
+                "domain": domain,
+            })
+
+        if not candidates:
+            log("  No viable candidates after filtering")
+            return None
+
+        # If only one candidate, use it directly
+        if len(candidates) == 1:
+            picked = candidates[0]["url"]
+            log(f"  Single candidate: {picked}")
+            return picked
+
+        # Use LLM to pick the best match
+        picked = await _llm_pick_website(client, hotel_name, city, state, candidates)
+        if picked:
+            log(f"  LLM picked website: {picked}")
+        return picked
 
     except Exception as e:
-        log(f"  LLM error: {e}")
+        log(f"  Serper search error: {e}")
         return None
+
+
+async def _llm_pick_website(
+    client: httpx.AsyncClient,
+    hotel_name: str,
+    city: Optional[str],
+    state: Optional[str],
+    candidates: List[dict],
+) -> Optional[str]:
+    """Use Groq LLM to pick the correct hotel website from search results."""
+    location_parts = [p for p in [city, state] if p]
+    location_str = ", ".join(location_parts) if location_parts else "unknown location"
+
+    results_text = ""
+    for i, c in enumerate(candidates[:5], 1):  # Max 5 candidates
+        results_text += f"{i}. {c['url']}\n   Title: {c['title']}\n   Snippet: {c['snippet'][:150]}\n\n"
+
+    prompt = f"""Which search result is the official website for this hotel?
+
+Hotel: {hotel_name}
+Location: {location_str}
+
+Search results:
+{results_text}
+
+Rules:
+- Pick the hotel's own website (not OTAs, directories, or review sites)
+- The domain should match or relate to the hotel name
+- If none are the hotel's official site, respond with "0"
+
+Reply with ONLY the number (1-{min(len(candidates), 5)}) or "0":"""
+
+    answer = await _groq_request(client, prompt, max_tokens=10, temperature=0.1)
+    if answer is None:
+        return None
+
+    match = re.search(r'\d+', answer)
+    if match:
+        idx = int(match.group())
+        if 1 <= idx <= min(len(candidates), 5):
+            return candidates[idx - 1]["url"]
+
+    return None
+
+
+async def estimate_room_count_from_name(
+    client: httpx.AsyncClient,
+    hotel_name: str,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+) -> Optional[int]:
+    """Estimate room count from hotel name and location alone (no website).
+
+    This is the lowest-confidence fallback when no website can be found.
+    """
+    location_parts = [p for p in [city, state] if p]
+    location_str = ", ".join(location_parts) if location_parts else "unknown location"
+
+    prompt = f"""Estimate the number of bookable rooms/units at this property based ONLY on the name and location.
+
+Hotel/Property: {hotel_name}
+Location: {location_str}
+
+Guidelines:
+- Single cabin/cottage/house/villa rental = 1
+- Small cabin/cottage rental company (plural name) = 8-15
+- B&B, bed and breakfast, small inn = 5-12
+- Boutique hotel = 15-50
+- Motel = 25-60
+- Mid-size hotel = 50-150
+- Large hotel or resort = 150-400
+- If the name contains a number (e.g., "The 404 Hotel") it may hint at size
+
+Use the property type words in the name as your primary signal.
+
+Return ONLY a number (e.g., "42"). You MUST estimate:"""
+
+    answer = await _groq_request(client, prompt, max_tokens=10, temperature=0.3)
+    if answer is None:
+        return None
+
+    match = re.search(r'\d+', answer)
+    if match:
+        count = int(match.group())
+        if 1 <= count <= 2000:
+            return count
+
+    # Fallback heuristic from name
+    name_lower = hotel_name.lower()
+    if any(kw in name_lower for kw in ['cabin', 'cottage', 'house', 'chalet', 'villa']):
+        return 1
+    elif any(kw in name_lower for kw in ['cabins', 'cottages', 'rentals']):
+        return 10
+    elif any(kw in name_lower for kw in ['b&b', 'bed and breakfast', 'inn', 'guesthouse']):
+        return 8
+    elif any(kw in name_lower for kw in ['motel']):
+        return 30
+    elif any(kw in name_lower for kw in ['hotel', 'resort', 'lodge']):
+        return 50
+    else:
+        return 10
+
+
+# ============================================================================
+# MAIN ENRICHMENT ENTRY POINT
+# ============================================================================
 
 
 async def enrich_hotel_room_count(
     client: httpx.AsyncClient,
     hotel_id: int,
     hotel_name: str,
-    website: str,
-) -> Tuple[Optional[int], str]:
+    website: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+) -> Tuple[Optional[int], str, Optional[str]]:
     """
     Enrich a single hotel with room count.
 
-    Returns (room_count, source) where source is 'regex' or 'groq'.
-    Returns (None, '') if no room count could be determined.
+    Returns (room_count, source, discovered_website) where:
+    - source is 'regex', 'groq', 'serper_regex', 'serper_groq', or 'name_only'
+    - discovered_website is the URL found via Serper (None if hotel already had one)
+
+    Returns (None, '', None) if no room count could be determined.
     """
     log(f"Processing: {hotel_name}")
 
-    # Fetch website and try regex extraction first
-    regex_count, text = await fetch_and_extract_room_count(client, website)
+    has_website = website and website.strip()
 
-    if regex_count:
-        log(f"  Found via regex: {regex_count} rooms")
-        return regex_count, "regex"
+    if has_website:
+        # Existing flow: hotel has a known website
+        regex_count, text = await fetch_and_extract_room_count(client, website)
 
-    if not text:
-        log(f"  Could not fetch website")
-        return None, ""
+        if regex_count:
+            log(f"  Found via regex: {regex_count} rooms")
+            return regex_count, "regex", None
 
-    # Fall back to LLM estimation
-    count = await extract_room_count_llm(client, hotel_name, text)
+        if not text:
+            log(f"  Could not fetch website")
+            return None, "", None
 
+        # Fall back to LLM estimation
+        count = await extract_room_count_llm(client, hotel_name, text)
+
+        if count:
+            log(f"  LLM estimate: ~{count} rooms")
+            return count, "groq", None
+        else:
+            log(f"  Could not estimate room count")
+            return None, "", None
+
+    # No website - try to discover one via Serper
+    discovered_website = await search_hotel_website(client, hotel_name, city, state)
+
+    if discovered_website:
+        log(f"  Discovered website: {discovered_website}")
+
+        # Scrape discovered website and extract room count
+        regex_count, text = await fetch_and_extract_room_count(client, discovered_website)
+
+        if regex_count:
+            log(f"  Found via regex on discovered site: {regex_count} rooms")
+            return regex_count, "serper_regex", discovered_website
+
+        if text:
+            count = await extract_room_count_llm(client, hotel_name, text)
+            if count:
+                log(f"  LLM estimate from discovered site: ~{count} rooms")
+                return count, "serper_groq", discovered_website
+
+        # Website found but couldn't extract room count - still save the website
+        # Fall through to name_only estimation
+        log(f"  Could not extract room count from discovered site, trying name-only")
+
+    # Last resort: estimate from name only
+    count = await estimate_room_count_from_name(client, hotel_name, city, state)
     if count:
-        log(f"  LLM estimate: ~{count} rooms")
-        return count, "groq"
+        log(f"  Name-only estimate: ~{count} rooms")
+        return count, "name_only", discovered_website
     else:
         log(f"  Could not estimate room count")
-        return None, ""
+        return None, "", discovered_website
 
 
 def get_groq_api_key() -> Optional[str]:

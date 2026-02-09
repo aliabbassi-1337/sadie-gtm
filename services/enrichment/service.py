@@ -836,15 +836,29 @@ class Service(IService):
 
     async def _enrich_single_hotel(self, client: httpx.AsyncClient, hotel) -> bool:
         """Enrich a single hotel with room count. Returns True if successful."""
-        room_count, source = await enrich_hotel_room_count(
+        room_count, source, discovered_website = await enrich_hotel_room_count(
             client=client,
             hotel_id=hotel.id,
             hotel_name=hotel.name,
             website=hotel.website,
+            city=hotel.city,
+            state=hotel.state,
         )
 
+        # Save discovered website to hotel record (even if room count extraction failed)
+        if discovered_website:
+            await repo.update_hotel_website_only(hotel.id, discovered_website)
+
         if room_count:
-            confidence = Decimal("1.0") if source == "regex" else Decimal("0.7")
+            # Confidence mapping by source
+            confidence_map = {
+                "regex": Decimal("1.0"),       # Regex from known website
+                "groq": Decimal("0.7"),        # LLM from known website content
+                "serper_regex": Decimal("0.8"), # Regex from LLM-discovered website
+                "serper_groq": Decimal("0.5"),  # LLM from LLM-discovered website
+                "name_only": Decimal("0.3"),   # LLM estimate from name/location
+            }
+            confidence = confidence_map.get(source, Decimal("0.5"))
             await repo.insert_room_count(
                 hotel_id=hotel.id,
                 room_count=room_count,
