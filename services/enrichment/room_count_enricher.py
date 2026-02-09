@@ -2,7 +2,7 @@
 Room Count Enricher (LLM-powered)
 =================================
 Uses Azure OpenAI to extract room counts from hotel websites.
-For hotels without websites, discovers websites via Serper + LLM,
+For hotels without websites, discovers websites via LLM,
 or falls back to name-only LLM estimation.
 
 This is an internal helper module - only service.py can call repo functions.
@@ -18,8 +18,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from dotenv import load_dotenv
 
-# Reuse domain blocklist and name cleaning from website enricher
-from services.enrichment.website_enricher import SKIP_DOMAINS, BAD_URL_PATTERNS, clean_hotel_name
+from services.enrichment.website_enricher import clean_hotel_name
 
 # Load environment variables
 load_dotenv()
@@ -29,9 +28,6 @@ AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
-
-SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-SERPER_SEARCH_URL = "https://google.serper.dev/search"
 
 # Pages to check for room count info - be thorough!
 ABOUT_PAGE_PATTERNS = [
@@ -63,18 +59,6 @@ def log(msg: str) -> None:
     """Print timestamped log message."""
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}")
-
-
-def _extract_domain(url: str) -> Optional[str]:
-    """Extract domain from a URL, stripping www. prefix."""
-    try:
-        parsed = urlparse(url if "://" in url else f"https://{url}")
-        domain = parsed.netloc.lower()
-        if domain.startswith("www."):
-            domain = domain[4:]
-        return domain or None
-    except Exception:
-        return None
 
 
 async def _llm_request(
@@ -444,7 +428,7 @@ Return ONLY a number (e.g., "12"). You MUST estimate even if unsure:"""
 
 
 # ============================================================================
-# WEBSITE DISCOVERY (Serper + LLM)
+# WEBSITE DISCOVERY (LLM)
 # ============================================================================
 
 
@@ -454,130 +438,55 @@ async def search_hotel_website(
     city: Optional[str] = None,
     state: Optional[str] = None,
 ) -> Optional[str]:
-    """Search for a hotel's website using Serper and LLM selection.
+    """Ask GPT for the hotel's official website URL.
 
     Returns the discovered website URL, or None if not found.
     """
-    if not SERPER_API_KEY:
-        log("  No SERPER_API_KEY configured, skipping website discovery")
-        return None
-
     cleaned_name = clean_hotel_name(hotel_name)
-    location_parts = [p for p in [city, state] if p]
-    location_str = ", ".join(location_parts) if location_parts else ""
-
-    query = f"{cleaned_name} hotel official website"
-    if location_str:
-        query = f"{cleaned_name} {location_str} hotel official website"
-
-    log(f"  Searching Serper: {query}")
-
-    try:
-        resp = await client.post(
-            SERPER_SEARCH_URL,
-            headers={
-                "X-API-KEY": SERPER_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={"q": query, "num": 10},
-            timeout=15.0,
-        )
-
-        if resp.status_code != 200:
-            log(f"  Serper API error: {resp.status_code}")
-            return None
-
-        data = resp.json()
-        organic = data.get("organic", [])
-        if not organic:
-            log("  No Serper results")
-            return None
-
-        # Filter out blocked domains and bad URL patterns
-        candidates = []
-        for result in organic:
-            url = result.get("link", "")
-            title = result.get("title", "")
-            snippet = result.get("snippet", "")
-            domain = _extract_domain(url)
-
-            if not domain:
-                continue
-            # Check domain and parent domain against blocklist
-            parent_domain = ".".join(domain.split(".")[-2:]) if domain.count(".") > 1 else domain
-            if domain in SKIP_DOMAINS or parent_domain in SKIP_DOMAINS:
-                continue
-            if any(pattern in url.lower() for pattern in BAD_URL_PATTERNS):
-                continue
-
-            candidates.append({
-                "url": url,
-                "title": title,
-                "snippet": snippet,
-                "domain": domain,
-            })
-
-        if not candidates:
-            log("  No viable candidates after filtering")
-            return None
-
-        # If only one candidate, use it directly
-        if len(candidates) == 1:
-            picked = candidates[0]["url"]
-            log(f"  Single candidate: {picked}")
-            return picked
-
-        # Use LLM to pick the best match
-        picked = await _llm_pick_website(client, hotel_name, city, state, candidates)
-        if picked:
-            log(f"  LLM picked website: {picked}")
-        return picked
-
-    except Exception as e:
-        log(f"  Serper search error: {e}")
-        return None
-
-
-async def _llm_pick_website(
-    client: httpx.AsyncClient,
-    hotel_name: str,
-    city: Optional[str],
-    state: Optional[str],
-    candidates: List[dict],
-) -> Optional[str]:
-    """Use Groq LLM to pick the correct hotel website from search results."""
     location_parts = [p for p in [city, state] if p]
     location_str = ", ".join(location_parts) if location_parts else "unknown location"
 
-    results_text = ""
-    for i, c in enumerate(candidates[:5], 1):  # Max 5 candidates
-        results_text += f"{i}. {c['url']}\n   Title: {c['title']}\n   Snippet: {c['snippet'][:150]}\n\n"
+    log(f"  Asking LLM for website: {cleaned_name} ({location_str})")
 
-    prompt = f"""Which search result is the official website for this hotel?
+    prompt = f"""What is the official website URL for this hotel?
 
-Hotel: {hotel_name}
+Hotel: {cleaned_name}
 Location: {location_str}
 
-Search results:
-{results_text}
-
 Rules:
-- Pick the hotel's own website (not OTAs, directories, or review sites)
-- The domain should match or relate to the hotel name
-- If none are the hotel's official site, respond with "0"
+- Return ONLY the hotel's own website domain (e.g., "https://www.hotelella.com")
+- Do NOT return OTA links (booking.com, expedia.com, tripadvisor.com, etc.)
+- Do NOT return social media links (facebook.com, instagram.com, yelp.com, etc.)
+- If you don't know or aren't confident, return "NONE"
 
-Reply with ONLY the number (1-{min(len(candidates), 5)}) or "0":"""
+Reply with ONLY the URL or "NONE":"""
 
     answer = await _llm_request(client, prompt, max_tokens=500)
     if answer is None:
         return None
 
-    match = re.search(r'\d+', answer)
-    if match:
-        idx = int(match.group())
-        if 1 <= idx <= min(len(candidates), 5):
-            return candidates[idx - 1]["url"]
+    # Clean up response
+    answer = answer.strip().strip('"').strip("'")
 
+    if not answer or answer.upper() == "NONE" or "none" in answer.lower():
+        log(f"  LLM doesn't know website")
+        return None
+
+    # Extract URL from response (LLM might wrap it in text)
+    url_match = re.search(r'https?://[^\s<>"\']+', answer)
+    if url_match:
+        url = url_match.group().rstrip(".")
+        log(f"  LLM found website: {url}")
+        return url
+
+    # Maybe it returned just a domain without protocol
+    domain_match = re.search(r'(?:www\.)?[\w.-]+\.\w{2,}', answer)
+    if domain_match:
+        url = f"https://{domain_match.group()}"
+        log(f"  LLM found website: {url}")
+        return url
+
+    log(f"  Could not parse LLM website response: {answer[:80]}")
     return None
 
 
@@ -656,8 +565,8 @@ async def enrich_hotel_room_count(
     Enrich a single hotel with room count.
 
     Returns (room_count, source, discovered_website) where:
-    - source is 'regex', 'groq', 'serper_regex', 'serper_groq', or 'name_only'
-    - discovered_website is the URL found via Serper (None if hotel already had one)
+    - source is 'regex', 'groq', 'llm_regex', 'llm_groq', or 'name_only'
+    - discovered_website is the URL found via LLM (None if hotel already had one)
 
     Returns (None, '', None) if no room count could be determined.
     """
@@ -693,7 +602,7 @@ async def enrich_hotel_room_count(
             log(f"  Could not estimate room count")
             return None, "", None
 
-    # No website - try to discover one via Serper
+    # No website - ask LLM for it
     discovered_website = await search_hotel_website(client, hotel_name, city, state)
 
     if discovered_website:
@@ -704,13 +613,13 @@ async def enrich_hotel_room_count(
 
         if regex_count:
             log(f"  Found via regex on discovered site: {regex_count} rooms")
-            return regex_count, "serper_regex", discovered_website
+            return regex_count, "llm_regex", discovered_website
 
         if text:
             count = await extract_room_count_llm(client, hotel_name, text)
             if count:
                 log(f"  LLM estimate from discovered site: ~{count} rooms")
-                return count, "serper_groq", discovered_website
+                return count, "llm_groq", discovered_website
 
         # Website found but couldn't extract room count - still save the website
         # Fall through to name_only estimation

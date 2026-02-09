@@ -854,8 +854,8 @@ class Service(IService):
             confidence_map = {
                 "regex": Decimal("1.0"),       # Regex from known website
                 "groq": Decimal("0.7"),        # LLM from known website content
-                "serper_regex": Decimal("0.8"), # Regex from LLM-discovered website
-                "serper_groq": Decimal("0.5"),  # LLM from LLM-discovered website
+                "llm_regex": Decimal("0.8"),   # Regex from LLM-discovered website
+                "llm_groq": Decimal("0.5"),    # LLM from LLM-discovered website
                 "name_only": Decimal("0.3"),   # LLM estimate from name/location
             }
             confidence = confidence_map.get(source, Decimal("0.5"))
