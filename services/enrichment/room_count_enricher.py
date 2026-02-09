@@ -399,7 +399,7 @@ WEBSITE CONTENT:
 
 Return ONLY a number (e.g., "12"). You MUST estimate even if unsure:"""
 
-    answer = await _llm_request(client, prompt, max_tokens=1000)
+    answer = await _llm_request(client, prompt, max_tokens=2000)
     if answer is None:
         return None
 
@@ -461,7 +461,7 @@ Rules:
 
 Reply with ONLY the URL or "NONE":"""
 
-    answer = await _llm_request(client, prompt, max_tokens=500)
+    answer = await _llm_request(client, prompt, max_tokens=2000)
     if answer is None:
         return None
 
@@ -490,25 +490,30 @@ Reply with ONLY the URL or "NONE":"""
     return None
 
 
-async def estimate_room_count_from_name(
+# ============================================================================
+# MAIN ENRICHMENT ENTRY POINT
+# ============================================================================
+
+
+async def _llm_estimate_room_count(
     client: httpx.AsyncClient,
     hotel_name: str,
     city: Optional[str] = None,
     state: Optional[str] = None,
 ) -> Optional[int]:
-    """Estimate room count from hotel name and location alone (no website).
-
-    This is the lowest-confidence fallback when no website can be found.
-    """
+    """Ask GPT to estimate room count using its knowledge of the hotel."""
     location_parts = [p for p in [city, state] if p]
     location_str = ", ".join(location_parts) if location_parts else "unknown location"
 
-    prompt = f"""Estimate the number of bookable rooms/units at this property based ONLY on the name and location.
+    prompt = f"""How many bookable rooms/units does this property have?
 
 Hotel/Property: {hotel_name}
 Location: {location_str}
 
-Guidelines:
+Use your knowledge of this property. If you know it, give the real number.
+If you don't know it exactly, estimate based on the property type and name.
+
+Guidelines for estimation:
 - Single cabin/cottage/house/villa rental = 1
 - Small cabin/cottage rental company (plural name) = 8-15
 - B&B, bed and breakfast, small inn = 5-12
@@ -516,13 +521,10 @@ Guidelines:
 - Motel = 25-60
 - Mid-size hotel = 50-150
 - Large hotel or resort = 150-400
-- If the name contains a number (e.g., "The 404 Hotel") it may hint at size
 
-Use the property type words in the name as your primary signal.
+Return ONLY a number (e.g., "42"). You MUST provide an answer:"""
 
-Return ONLY a number (e.g., "42"). You MUST estimate:"""
-
-    answer = await _llm_request(client, prompt, max_tokens=500)
+    answer = await _llm_request(client, prompt, max_tokens=2000)
     if answer is None:
         return None
 
@@ -532,25 +534,7 @@ Return ONLY a number (e.g., "42"). You MUST estimate:"""
         if 1 <= count <= 2000:
             return count
 
-    # Fallback heuristic from name
-    name_lower = hotel_name.lower()
-    if any(kw in name_lower for kw in ['cabin', 'cottage', 'house', 'chalet', 'villa']):
-        return 1
-    elif any(kw in name_lower for kw in ['cabins', 'cottages', 'rentals']):
-        return 10
-    elif any(kw in name_lower for kw in ['b&b', 'bed and breakfast', 'inn', 'guesthouse']):
-        return 8
-    elif any(kw in name_lower for kw in ['motel']):
-        return 30
-    elif any(kw in name_lower for kw in ['hotel', 'resort', 'lodge']):
-        return 50
-    else:
-        return 10
-
-
-# ============================================================================
-# MAIN ENRICHMENT ENTRY POINT
-# ============================================================================
+    return None
 
 
 async def enrich_hotel_room_count(
@@ -565,14 +549,14 @@ async def enrich_hotel_room_count(
     Enrich a single hotel with room count.
 
     Returns (room_count, source, discovered_website) where:
-    - source is 'regex', 'groq', 'llm_regex', 'llm_groq', or 'name_only'
+    - source is 'regex', 'llm', 'llm_regex', or 'llm_search'
     - discovered_website is the URL found via LLM (None if hotel already had one)
 
     Returns (None, '', None) if no room count could be determined.
     """
     log(f"Processing: {hotel_name}")
 
-    # Skip hotels with blank/junk names - can't search or estimate meaningfully
+    # Skip hotels with blank/junk names
     cleaned = hotel_name.strip().replace("\ufeff", "") if hotel_name else ""
     if not cleaned or cleaned.lower() in ("new booking", "unknown", "test"):
         log(f"  Skipping: blank or junk hotel name")
@@ -581,28 +565,23 @@ async def enrich_hotel_room_count(
     has_website = website and website.strip()
 
     if has_website:
-        # Existing flow: hotel has a known website
+        # Hotel has a known website — scrape and extract
         regex_count, text = await fetch_and_extract_room_count(client, website)
 
         if regex_count:
             log(f"  Found via regex: {regex_count} rooms")
             return regex_count, "regex", None
 
-        if not text:
-            log(f"  Could not fetch website")
-            return None, "", None
+        if text:
+            count = await extract_room_count_llm(client, hotel_name, text)
+            if count:
+                log(f"  LLM estimate from website: ~{count} rooms")
+                return count, "llm", None
 
-        # Fall back to LLM estimation
-        count = await extract_room_count_llm(client, hotel_name, text)
+        log(f"  Could not extract from known website")
+        return None, "", None
 
-        if count:
-            log(f"  LLM estimate: ~{count} rooms")
-            return count, "groq", None
-        else:
-            log(f"  Could not estimate room count")
-            return None, "", None
-
-    # No website - ask LLM for it
+    # No website — ask LLM to find it
     discovered_website = await search_hotel_website(client, hotel_name, city, state)
 
     if discovered_website:
@@ -619,17 +598,13 @@ async def enrich_hotel_room_count(
             count = await extract_room_count_llm(client, hotel_name, text)
             if count:
                 log(f"  LLM estimate from discovered site: ~{count} rooms")
-                return count, "llm_groq", discovered_website
+                return count, "llm_search", discovered_website
 
-        # Website found but couldn't extract room count - still save the website
-        # Fall through to name_only estimation
-        log(f"  Could not extract room count from discovered site, trying name-only")
-
-    # Last resort: estimate from name only
-    count = await estimate_room_count_from_name(client, hotel_name, city, state)
+    # No website found or couldn't extract — ask LLM to estimate from its knowledge
+    count = await _llm_estimate_room_count(client, hotel_name, city, state)
     if count:
-        log(f"  Name-only estimate: ~{count} rooms")
-        return count, "name_only", discovered_website
+        log(f"  LLM knowledge estimate: ~{count} rooms")
+        return count, "llm_search", discovered_website
     else:
         log(f"  Could not estimate room count")
         return None, "", discovered_website

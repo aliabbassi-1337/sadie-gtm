@@ -853,10 +853,9 @@ class Service(IService):
             # Confidence mapping by source
             confidence_map = {
                 "regex": Decimal("1.0"),       # Regex from known website
-                "groq": Decimal("0.7"),        # LLM from known website content
+                "llm": Decimal("0.7"),         # LLM from known website content
                 "llm_regex": Decimal("0.8"),   # Regex from LLM-discovered website
-                "llm_groq": Decimal("0.5"),    # LLM from LLM-discovered website
-                "name_only": Decimal("0.3"),   # LLM estimate from name/location
+                "llm_search": Decimal("0.5"),  # LLM estimated (discovered site or knowledge)
             }
             confidence = confidence_map.get(source, Decimal("0.5"))
             await repo.insert_room_count(
