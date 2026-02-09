@@ -520,7 +520,7 @@ async def enrich_hotel_room_count(
 
     # Skip hotels with blank/junk names
     cleaned = hotel_name.strip().replace("\ufeff", "") if hotel_name else ""
-    if not cleaned or cleaned.lower() in ("new booking", "unknown", "test"):
+    if not cleaned or len(cleaned) < 3 or cleaned.lower() in ("new booking", "unknown", "test"):
         log(f"  Skipping: blank or junk hotel name")
         return None, "", None
 

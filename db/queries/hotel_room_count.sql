@@ -78,7 +78,9 @@ WHERE hrc.id IS NULL
 -- name: insert_room_count<!
 -- Insert/update room count for a hotel
 -- status: -1=processing, 0=failed, 1=success
--- Only overwrites if existing source is from enrichment (not authoritative sources like texas_hot)
+-- Guards:
+--   1. Never overwrite authoritative sources (texas_hot)
+--   2. Never overwrite a success (status=1) with a failure (status=0)
 INSERT INTO sadie_gtm.hotel_room_count (hotel_id, room_count, source, confidence, status)
 VALUES (:hotel_id, :room_count, :source, :confidence, :status)
 ON CONFLICT (hotel_id) DO UPDATE SET
@@ -88,6 +90,7 @@ ON CONFLICT (hotel_id) DO UPDATE SET
     status = EXCLUDED.status,
     enriched_at = CURRENT_TIMESTAMP
 WHERE sadie_gtm.hotel_room_count.source NOT IN ('texas_hot')
+  AND NOT (sadie_gtm.hotel_room_count.status = 1 AND EXCLUDED.status != 1)
 RETURNING id;
 
 -- name: get_room_count_by_hotel_id^
