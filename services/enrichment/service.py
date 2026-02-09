@@ -2834,6 +2834,128 @@ class Service(IService):
             logger.success(f"Normalized {total_fixed} hotels ({junk_nulled} junk states NULLed).")
             return {"fixes": all_fixes, "total_fixed": total_fixed}
 
+    async def infer_locations_bulk(self, dry_run: bool = False) -> dict:
+        """Infer and fix country/state for misclassified or missing hotels.
+
+        Uses TLD, phone prefix, and address patterns to infer the correct
+        country and state. Processes:
+        1. Hotels currently classified as "United States" that have non-US signals
+        2. Hotels with NULL country that have inferable signals
+
+        Args:
+            dry_run: If True, only report what would be fixed
+
+        Returns:
+            dict with 'country_fixes' count and 'state_fixes' count
+        """
+        from db.client import queries, get_conn
+        from services.enrichment.location_inference import infer_location
+
+        country_fixes = 0
+        state_fixes = 0
+        details = {}  # country -> count
+
+        # Process "United States" hotels (most likely misclassified)
+        for source_country in ["United States", None]:
+            include_null = source_country is None
+            label = source_country or "NULL country"
+
+            async with get_conn() as conn:
+                rows = await queries.get_hotels_for_location_inference(
+                    conn,
+                    country=source_country or "",
+                    include_null=include_null,
+                )
+
+            if not rows:
+                continue
+
+            logger.info(f"Scanning {len(rows)} hotels with country={label}...")
+            fixes_for_source = []
+
+            for row in rows:
+                hotel_id = row["id"]
+                inferred_country, inferred_state, confidence = infer_location(
+                    website=row["website"],
+                    phone_google=row["phone_google"],
+                    phone_website=row["phone_website"],
+                    address=row["address"],
+                    current_country=row["country"],
+                    current_state=row["state"],
+                )
+
+                if not inferred_country:
+                    continue
+
+                # For "United States" hotels, only fix if inferred != US
+                if source_country == "United States" and inferred_country == "United States":
+                    continue
+
+                # For NULL country hotels, fix to whatever we inferred
+                # Skip ambiguous US/CA
+                if inferred_country == "US/CA":
+                    continue
+
+                # Only apply high-confidence fixes
+                if confidence < 0.5:
+                    continue
+
+                fixes_for_source.append({
+                    "id": hotel_id,
+                    "name": row["name"],
+                    "old_country": row["country"],
+                    "old_state": row["state"],
+                    "new_country": inferred_country,
+                    "new_state": inferred_state,
+                    "confidence": confidence,
+                })
+
+            if not fixes_for_source:
+                logger.info(f"  No fixes needed for {label}")
+                continue
+
+            # Group and log by inferred country
+            by_country = {}
+            for fix in fixes_for_source:
+                c = fix["new_country"]
+                by_country[c] = by_country.get(c, 0) + 1
+
+            for c, count in sorted(by_country.items(), key=lambda x: -x[1]):
+                prefix = "[DRY-RUN] " if dry_run else ""
+                logger.info(f"  {prefix}{label} -> {c}: {count} hotels")
+                details[c] = details.get(c, 0) + count
+
+            # Apply fixes
+            if not dry_run:
+                async with get_conn() as conn:
+                    for fix in fixes_for_source:
+                        if fix["new_state"]:
+                            await queries.fix_hotel_country_and_state(
+                                conn,
+                                hotel_id=fix["id"],
+                                country=fix["new_country"],
+                                state=fix["new_state"],
+                            )
+                            state_fixes += 1
+                        else:
+                            await queries.fix_hotel_country_only(
+                                conn,
+                                hotel_id=fix["id"],
+                                country=fix["new_country"],
+                            )
+                        country_fixes += 1
+
+            else:
+                country_fixes += len(fixes_for_source)
+                state_fixes += sum(1 for f in fixes_for_source if f["new_state"])
+
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would fix {country_fixes} countries, {state_fixes} states")
+        else:
+            logger.success(f"Inferred {country_fixes} countries, {state_fixes} states")
+
+        return {"country_fixes": country_fixes, "state_fixes": state_fixes, "details": details}
+
     def extract_state_from_text(self, text: str) -> Optional[str]:
         """Extract US state from a text string (address, city, etc).
         
