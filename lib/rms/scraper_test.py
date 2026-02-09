@@ -202,7 +202,7 @@ class TestRMSScraperParseAddress:
         
         assert city == "Austin"
         assert state == "TX"
-        assert country == "USA"
+        assert country == "United States"
     
     def test_parses_us_address_california(self, scraper):
         """Should parse California address."""
@@ -212,7 +212,7 @@ class TestRMSScraperParseAddress:
         
         assert city == "San Diego"
         assert state == "CA"
-        assert country == "USA"
+        assert country == "United States"
     
     def test_parses_nz_address(self, scraper):
         """Should parse New Zealand address."""
@@ -286,7 +286,7 @@ class TestRMSScraperParseAddress:
         city, state, country = scraper._parse_address(address)
         
         assert state == "TX"
-        assert country == "USA"
+        assert country == "United States"
     
     def test_handles_mixed_case_country(self, scraper):
         """Should handle mixed case country names."""
@@ -304,7 +304,7 @@ class TestRMSScraperParseAddress:
         
         assert city == "Los Angeles"
         assert state == "CA"
-        assert country == "USA"
+        assert country == "United States"
     
     def test_handles_po_box_address(self, scraper):
         """Should handle PO Box addresses."""

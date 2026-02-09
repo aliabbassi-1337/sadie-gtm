@@ -463,7 +463,7 @@ class RMSApiClient:
                 result["city"] = us_match.group(1).strip().rstrip(',')
                 result["state"] = us_match.group(2).upper()
                 result["postcode"] = us_match.group(3)
-                result["country"] = "USA"
+                result["country"] = "United States"
                 break
         
         return result
@@ -478,7 +478,7 @@ class RMSApiClient:
         if "new zealand" in country_lower:
             return "NZ"
         if "usa" in country_lower or "united states" in country_lower:
-            return "USA"
+            return "United States"
         if "canada" in country_lower:
             return "CA"
         if "uk" in country_lower or "united kingdom" in country_lower:

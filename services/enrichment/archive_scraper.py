@@ -36,11 +36,11 @@ class ExtractionResult(BaseModel):
     data: Optional[ExtractedBookingData] = None
 
 
-# Map full country names to ISO 2-letter codes (USA is special case -> "USA")
+# Map full country names to ISO 2-letter codes (US mapped to "United States")
 COUNTRY_TO_CODE = {
     # USA special case (including Spanish/French variants)
-    'US': 'USA', 'United States': 'USA', 'United States of America': 'USA',
-    'Estados Unidos': 'USA', 'États-Unis': 'USA',
+    'US': 'United States', 'United States': 'United States', 'United States of America': 'United States',
+    'Estados Unidos': 'United States', 'États-Unis': 'United States', 'USA': 'United States',
     # Common full names to ISO codes
     'Germany': 'DE', 'Taiwan': 'TW', 'New Zealand': 'NZ', 'Italy': 'IT',
     'Malta': 'MT', 'Sri Lanka': 'LK', 'France': 'FR', 'India': 'IN',
@@ -123,7 +123,7 @@ US_STATES = {
 }
 
 def normalize_country(country: Optional[str]) -> Optional[str]:
-    """Normalize country names to ISO 2-letter codes (USA stays as 'USA')."""
+    """Normalize country names to canonical English names or ISO 2-letter codes."""
     if not country:
         return None
     country = country.strip()
@@ -141,7 +141,7 @@ def infer_country_from_state(state: Optional[str]) -> Optional[str]:
     state = state.strip()
     # Check if it's a US state code
     if state.upper() in US_STATES:
-        return 'USA'
+        return 'United States'
     # Check if it's a known region
     if state in STATE_TO_COUNTRY:
         return STATE_TO_COUNTRY[state]

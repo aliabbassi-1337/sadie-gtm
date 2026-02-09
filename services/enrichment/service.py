@@ -2645,6 +2645,82 @@ class Service(IService):
         """
         return state_utils.normalize_state(state, country)
 
+    async def normalize_countries_bulk(self, dry_run: bool = False) -> dict:
+        """Normalize country codes and variations to standard English names.
+
+        Three passes:
+        1. ISO 2-letter codes (AU -> Australia, etc.)
+        2. Native language names and common variations (USA -> United States, etc.)
+        3. Garbage values -> NULL
+
+        Returns:
+            dict with 'total_fixed' count
+        """
+        from db.client import queries, get_conn
+        from services.enrichment.country_utils import COUNTRY_CODES, COUNTRY_VARIATIONS, GARBAGE_COUNTRIES
+
+        total = 0
+
+        # Pass 1: ISO 2-letter codes
+        logger.info("Normalizing country codes...")
+        async with get_conn() as conn:
+            for code, name in COUNTRY_CODES.items():
+                if dry_run:
+                    row = await queries.count_hotels_by_country_value(conn, old_value=code)
+                    count = row["count"] if row else 0
+                    if count > 0:
+                        logger.info(f"  [DRY-RUN] {code} -> {name}: {count}")
+                        total += count
+                else:
+                    result = await queries.update_country_value(conn, new_value=name, old_value=code)
+                    count = int(result.split()[-1]) if result else 0
+                    if count > 0:
+                        logger.info(f"  {code} -> {name}: {count}")
+                        total += count
+
+        # Pass 2: Variations (USA, native names, etc.)
+        logger.info("Normalizing country name variations...")
+        async with get_conn() as conn:
+            for old, new in COUNTRY_VARIATIONS.items():
+                if dry_run:
+                    row = await queries.count_hotels_by_country_value(conn, old_value=old)
+                    count = row["count"] if row else 0
+                    if count > 0:
+                        logger.info(f"  [DRY-RUN] {old[:40]} -> {new}: {count}")
+                        total += count
+                else:
+                    result = await queries.update_country_value(conn, new_value=new, old_value=old)
+                    count = int(result.split()[-1]) if result else 0
+                    if count > 0:
+                        logger.info(f"  {old[:40]} -> {new}: {count}")
+                        total += count
+
+        # Pass 3: Garbage -> NULL
+        logger.info("Removing garbage country values...")
+        async with get_conn() as conn:
+            for g in GARBAGE_COUNTRIES:
+                if g == "NA":
+                    continue
+                if dry_run:
+                    row = await queries.count_hotels_by_country_value(conn, old_value=g)
+                    count = row["count"] if row else 0
+                    if count > 0:
+                        logger.info(f"  [DRY-RUN] '{g}' -> NULL: {count}")
+                        total += count
+                else:
+                    result = await queries.null_country_value(conn, old_value=g)
+                    count = int(result.split()[-1]) if result else 0
+                    if count > 0:
+                        logger.info(f"  '{g}' -> NULL: {count}")
+                        total += count
+
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would fix {total} hotels")
+        else:
+            logger.success(f"Normalized {total} country values")
+
+        return {"total_fixed": total}
+
     async def normalize_states_bulk(self, dry_run: bool = False) -> dict:
         """Normalize state abbreviations to full names in database.
         
@@ -2658,74 +2734,88 @@ class Service(IService):
         Returns:
             dict with 'fixes' (list of tuples) and 'total_fixed' count
         """
-        from db.client import get_conn
-        
+        from db.client import queries, get_conn
+
         # Define supported countries and their state maps
         COUNTRY_STATE_MAPS = {
             "United States": state_utils.US_STATES,
             "Australia": state_utils.AU_STATES,
+            "Canada": state_utils.CA_PROVINCES,
         }
-        
+
         all_fixes = []
         total_fixed = 0
-        
+
         for country_name, state_map in COUNTRY_STATE_MAPS.items():
             valid_full_names = set(state_map.values())
-            
+
             # Get unique states for this country
             async with get_conn() as conn:
-                rows = await conn.fetch('''
-                    SELECT state, COUNT(*) as cnt
-                    FROM sadie_gtm.hotels 
-                    WHERE status != -1 
-                      AND country = $1
-                      AND state IS NOT NULL
-                    GROUP BY state
-                    ORDER BY cnt DESC
-                ''', country_name)
-            
+                rows = await queries.get_state_counts_for_country(conn, country=country_name)
+
             if not rows:
                 continue
-                
+
             logger.info(f"{country_name}: {len(rows)} unique state values")
-            
+
             # Find states that need normalization
             for row in rows:
                 state = row['state']
                 count = row['cnt']
-                
+
                 # Skip if already a valid full name
                 if state in valid_full_names:
                     continue
-                
+
                 # Check if it's an abbreviation we can normalize
                 state_upper = state.strip().upper()
                 if state_upper in state_map:
                     new_state = state_map[state_upper]
                     all_fixes.append((state, new_state, country_name, count))
-                    
+
                     logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
-                    
+
                     if not dry_run:
                         async with get_conn() as conn:
-                            result = await conn.execute('''
-                                UPDATE sadie_gtm.hotels 
-                                SET state = $2, updated_at = CURRENT_TIMESTAMP
-                                WHERE status != -1 AND country = $3 AND state = $1
-                            ''', state, new_state, country_name)
+                            result = await queries.update_state_value(
+                                conn, new_state=new_state, country=country_name, old_state=state
+                            )
                             fixed = int(result.split()[-1]) if result else 0
                             total_fixed += fixed
-        
+
+        # Second pass: NULL out junk state values that fail is_valid_state()
+        junk_nulled = 0
+        for country_name, state_map in COUNTRY_STATE_MAPS.items():
+            async with get_conn() as conn:
+                rows = await queries.get_state_counts_for_country(conn, country=country_name)
+
+            for row in rows:
+                state_val = row['state']
+                count = row['cnt']
+
+                if not state_utils.is_valid_state(state_val, country_name):
+                    logger.info(f"  Junk state \"{state_val}\" in {country_name} ({count} hotels) -> NULL")
+                    all_fixes.append((state_val, None, country_name, count))
+
+                    if not dry_run:
+                        async with get_conn() as conn:
+                            result = await queries.null_state_value(
+                                conn, country=country_name, old_state=state_val
+                            )
+                            nulled = int(result.split()[-1]) if result else 0
+                            junk_nulled += nulled
+                            total_fixed += nulled
+
         if not all_fixes:
             logger.info("No state normalization needed")
             return {"fixes": [], "total_fixed": 0}
-        
+
         if dry_run:
             would_fix = sum(c for _, _, _, c in all_fixes)
             logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
             return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
         else:
-            logger.success(f"Normalized {total_fixed} hotels.")
+            logger.success(f"Normalized {total_fixed} hotels ({junk_nulled} junk states NULLed).")
             return {"fixes": all_fixes, "total_fixed": total_fixed}
 
     def extract_state_from_text(self, text: str) -> Optional[str]:

@@ -221,31 +221,135 @@ SELECT COUNT(*) FROM sadie_gtm.hotel_room_count WHERE status = 1;
 
 ---
 
+## EXPORT DATA QUALITY ISSUES (Jan 25, 2026)
+
+Issues discovered by sampling 9,572 launched US hotels for the USA_leads.xlsx export.
+
+### BUG-014: ~1,041 non-US hotels contaminating US leads export
+**Priority:** P0 | **Count:** 1,041 | **Source:** rms_scan (831), archive_discovery (114), others
+**Description:** Hotels in UAE, India, Indonesia, China, Bermuda, Sri Lanka, Poland, Australia etc. are marked as `country='United States'` and `status=1` (launched). They appear in USA_leads.xlsx and state exports with NULL city/state.
+**Examples:**
+- `Carpe Diem Lifestyle - Palm Jumeria` (addr: "Palm Jumeriah, UAE")
+- `Citadines Berawa Beach Bali Resort` (addr: Bali, Indonesia)
+- `DUBAI HILLS ESTATE EMAAR` (addr: Dubai)
+- `Hotel Warszawa **Demo Version**` (addr: Poland)
+- `Sterling Athirapilly` (addr: India)
+**Root Cause:** RMS Cloud is a global PMS. The `rms_scan` and `archive_discovery` sources imported all RMS properties worldwide and set `country='United States'` by default. 1,036 of 1,041 NULL-city US hotels are RMS Cloud.
+**Fix:** Query hotels with `country='United States' AND city IS NULL` → reverse geocode or reclassify using address field. For those with foreign addresses, update country to correct value and set status=-1 for US pipeline.
+```sql
+SELECT count(*) FROM sadie_gtm.hotels
+WHERE country='United States' AND status=1 AND city IS NULL;
+-- Result: 1,086
+```
+
+---
+
+### BUG-015: 668 hotels with abbreviated states excluded from exports
+**Priority:** P1 | **Count:** 668
+**Description:** Hotels have 2-letter state codes (CA: 100, FL: 85, NY: 43, TX: 34, etc.) while exports use full state names. The `get_distinct_states_for_country` query filters `LENGTH(h.state) > 3`, so these 668 hotels are silently excluded from all per-state Excel exports. They DO appear in the country-level USA_leads.xlsx.
+**Additional junk states:** `*` (2), `-` (1), `Wa` (1), `Ky` (1), `Ma` (1), `nc` (1), `nv` (1), `Fl` (1), `` (empty, 1)
+**Fix:** Run state normalization to expand abbreviations to full names (CA → California, etc.). Already have SQL queries `normalize_us_state` in hotels.sql. Need to execute normalization script.
+```sql
+SELECT state, count(*) FROM sadie_gtm.hotels
+WHERE country='United States' AND status=1 AND length(state) <= 2
+GROUP BY state ORDER BY count(*) DESC;
+-- Top: CA=100, FL=85, NY=43, TX=34, MI=25...
+```
+
+---
+
+### BUG-016: 504 OTA/chain-engine hotels in leads
+**Priority:** P1 | **Count:** 504
+**Description:** Hotels with OTA booking engines showing up as leads. These are NOT independent hotels using a PMS — they're OTA listings that shouldn't be in sales lists.
+**Breakdown:** Booking.com (166), Hotels.com (130), Airbnb (61), Kayak (38), VRBO (34), Expedia (26), Marriott (22), IHG (8), Agoda (7), Priceline (7), Hilton (4), Trivago (1)
+**Fix:** Either exclude OTA engines from exports, or don't launch hotels whose only engine is an OTA. Add OTA tier=0 filter in export queries.
+```sql
+SELECT be.name, count(*) FROM sadie_gtm.hotels h
+JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+WHERE h.country='United States' AND h.status=1
+AND be.name IN ('Hotels.com','Booking.com','Airbnb','VRBO','Expedia','Kayak','Priceline','Agoda','Trivago','Marriott','IHG','Hilton')
+GROUP BY be.name ORDER BY count(*) DESC;
+```
+
+---
+
+### BUG-017: 80 demo/test hotels in launched data
+**Priority:** P1 | **Count:** 80
+**Description:** Hotels with "DEMO", "TEST", or "SAMPLE" in names are launched (status=1). The launcher now has filters to prevent this, but these were launched before filters were added.
+**Examples:** `FOX Lite Hotel Grogol Jakarta - DEMO`, `Hotel Warszawa **Demo Version**`
+**Fix:** Batch update these to status=-1.
+```sql
+UPDATE sadie_gtm.hotels SET status = -1
+WHERE status = 1 AND (name ILIKE '%demo%' OR name ILIKE '%test%' OR name ILIKE '%sample%');
+```
+
+---
+
+### BUG-018: 130 duplicate hotel entries in exports
+**Priority:** P2 | **Count:** 130 extra rows
+**Description:** Same hotel (name + city + state) appearing multiple times. Duplicates inflate lead counts.
+**Examples:**
+- BLUE OCEAN VACATION RENTALS LLC | South Padre Island | Texas → 12 copies
+- BUZZ VACATION RENTALS, INC | Houston | Texas → 4 copies
+- Nautica Residences | NULL | NULL → 6 copies
+**Fix:** Deduplicate by keeping newest (or most complete) record, set others to status=-1.
+```sql
+SELECT name, city, state, count(*) FROM sadie_gtm.hotels
+WHERE country='United States' AND status=1
+GROUP BY name, city, state HAVING count(*) > 1
+ORDER BY count(*) DESC;
+```
+
+---
+
+### BUG-019: Rating (98.3%) and review_count (100%) empty
+**Priority:** P2 | **Count:** 9,414 / 9,572 missing rating; 9,572 / 9,572 missing reviews
+**Description:** These columns appear in exports but are almost entirely blank. Rating and review_count come from Google Places API but were never populated for most hotels.
+**Fix:** Either remove from exports (columns auto-hide when all empty — already implemented) or batch-enrich via Places API. Current dynamic column filter should already handle this, but verify.
+
+---
+
+### BUG-020: Hotels with engine but no booking_url
+**Priority:** P2 | **Count:** varies (Hotels.com, VRBO, FareHarbor, Streamline)
+**Description:** Hotels have a detected engine but empty booking_url field. These show in exports with engine name but no actionable link.
+**Examples:** COACHLIGHT INN (Hotels.com), BARE FEET RETREAT (VRBO)
+**Fix:** For OTAs this is expected (fix via BUG-016). For real PMS engines, re-run enrichment.
+
+---
+
 ## PRIORITY ORDER
 
 ### P0 (Critical - Do Now)
-1. BUG-012: Low live hotel count
-2. BUG-001: 1,158 Cloudbeds NULL country
-3. BUG-002: 2,915 Mews "New booking" names
-4. BUG-003: 222 RMS "Online Bookings" names
+1. **BUG-014**: 1,041 non-US hotels contaminating US leads export ⚠️ NEW
+2. BUG-012: Low live hotel count
+3. BUG-001: 1,158 Cloudbeds NULL country
+4. BUG-002: 2,915 Mews "New booking" names
+5. BUG-003: 222 RMS "Online Bookings" names
 
 ### P1 (High - This Week)
-5. BUG-009: Normalize state/country data
-6. BUG-004: RMS URL format issues
-7. BUG-005: State contains region text
-8. BUG-011: RMS timeout issues
-9. FEAT-007: Normalize country data
-10. FEAT-008: Normalize state data
-11. FEAT-010: Contact enrichment
+6. **BUG-015**: 668 abbreviated-state hotels excluded from exports ⚠️ NEW
+7. **BUG-016**: 504 OTA/chain-engine hotels in leads ⚠️ NEW
+8. **BUG-017**: 80 demo/test hotels launched ⚠️ NEW
+9. BUG-009: Normalize state/country data
+10. BUG-004: RMS URL format issues
+11. BUG-005: State contains region text
+12. BUG-011: RMS timeout issues
+13. FEAT-007: Normalize country data
+14. FEAT-008: Normalize state data
+15. FEAT-010: Contact enrichment
 
 ### P2 (Medium - This Sprint)
-12. FEAT-001: Scrape Cloudbeds Collection
-13. FEAT-002: Ingest RMS hex slugs
-14. FEAT-006: Merge export workflows
-15. FEAT-009: Cleanup S3 exports
-16. FEAT-012: Investigate room_count
+16. **BUG-018**: 130 duplicate hotel entries ⚠️ NEW
+17. **BUG-019**: Rating/review_count 98-100% empty ⚠️ NEW
+18. **BUG-020**: Hotels with engine but no booking_url ⚠️ NEW
+19. FEAT-001: Scrape Cloudbeds Collection
+20. FEAT-002: Ingest RMS hex slugs
+21. FEAT-006: Merge export workflows
+22. FEAT-009: Cleanup S3 exports
+23. FEAT-012: Investigate room_count
 
 ### P3 (Low - Backlog)
-17. FEAT-003: Scrape more from Wayback/CC
-18. FEAT-004: IP rotation with Brightdata
-19. FEAT-005: iPMS247 investigation
+24. FEAT-003: Scrape more from Wayback/CC
+25. FEAT-004: IP rotation with Brightdata
+26. FEAT-005: iPMS247 investigation
