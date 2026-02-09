@@ -1158,7 +1158,7 @@ resource "aws_cloudwatch_event_target" "rms_enqueue" {
 }
 
 # =============================================================================
-# ROOM COUNT ENRICHMENT (Groq LLM)
+# ROOM COUNT ENRICHMENT (Azure OpenAI)
 # =============================================================================
 
 resource "aws_ecs_task_definition" "room_count_enrichment" {
@@ -1173,18 +1173,20 @@ resource "aws_ecs_task_definition" "room_count_enrichment" {
   container_definitions = jsonencode([{
     name  = "enrichment"
     image = "${var.ecr_repo_url}:latest"
-    
+
     command = ["uv", "run", "python", "workflows/enrichment.py", "room-counts", "--limit", "100"]
-    
+
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" }
     ]
-    
+
     secrets = [
       { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
-      { name = "GROQ_API_KEY", valueFrom = "/${var.app_name}/groq-api-key" }
+      { name = "AZURE_OPENAI_API_KEY", valueFrom = "/${var.app_name}/azure-openai-api-key" },
+      { name = "AZURE_OPENAI_ENDPOINT", valueFrom = "/${var.app_name}/azure-openai-endpoint" },
+      { name = "AZURE_OPENAI_DEPLOYMENT", valueFrom = "/${var.app_name}/azure-openai-deployment" }
     ]
-    
+
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -1198,8 +1200,9 @@ resource "aws_ecs_task_definition" "room_count_enrichment" {
 
 resource "aws_cloudwatch_event_rule" "room_count_enrichment" {
   name                = "${var.app_name}-room-count-enrichment"
-  description         = "Enrich hotels with room counts every 2 minutes"
+  description         = "Enrich hotels with room counts (disabled - run manually)"
   schedule_expression = "rate(2 minutes)"
+  state               = "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "room_count_enrichment" {

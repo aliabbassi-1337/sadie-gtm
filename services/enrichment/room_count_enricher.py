@@ -1,7 +1,9 @@
 """
 Room Count Enricher (LLM-powered)
 =================================
-Uses Groq's fast LLM API to extract room counts from hotel websites.
+Uses Azure OpenAI to extract room counts from hotel websites.
+For hotels without websites, asks GPT to find the website and estimate
+room count in a single call.
 
 This is an internal helper module - only service.py can call repo functions.
 """
@@ -16,14 +18,16 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from dotenv import load_dotenv
 
+from services.enrichment.website_enricher import clean_hotel_name
+
 # Load environment variables
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("ROOM_COUNT_ENRICHER_AGENT_GROQ_KEY")
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-# Fast model - good balance of speed and accuracy
-MODEL = "llama-3.1-8b-instant"
+# Azure OpenAI config
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
 
 # Pages to check for room count info - be thorough!
 ABOUT_PAGE_PATTERNS = [
@@ -55,6 +59,70 @@ def log(msg: str) -> None:
     """Print timestamped log message."""
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}")
+
+
+async def _llm_request(
+    client: httpx.AsyncClient,
+    prompt: str,
+    max_tokens: int = 100,
+    temperature: float = 0.3,
+) -> Optional[str]:
+    """Make an Azure OpenAI API request with retry logic for rate limits.
+
+    Returns the LLM response text, or None on failure.
+    """
+    url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    try:
+        resp = await client.post(
+            url,
+            headers={
+                "api-key": AZURE_OPENAI_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30.0,
+        )
+
+        if resp.status_code == 429:
+            for retry in range(3):
+                wait_time = (retry + 1) * 5  # 5s, 10s, 15s
+                log(f"    Rate limited, waiting {wait_time}s (attempt {retry + 1}/3)")
+                await asyncio.sleep(wait_time)
+
+                retry_resp = await client.post(
+                    url,
+                    headers={
+                        "api-key": AZURE_OPENAI_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=30.0,
+                )
+                if retry_resp.status_code == 200:
+                    resp = retry_resp
+                    break
+                elif retry_resp.status_code != 429:
+                    return None
+            else:
+                log("    Rate limit exceeded after 3 retries")
+                return None
+
+        if resp.status_code != 200:
+            log(f"    Azure OpenAI error: {resp.status_code} - {resp.text[:200]}")
+            return None
+
+        data = resp.json()
+        return data["choices"][0]["message"]["content"].strip()
+
+    except Exception as e:
+        log(f"  LLM request error: {e}")
+        return None
 
 
 async def fetch_page_raw(client: httpx.AsyncClient, url: str) -> str:
@@ -333,123 +401,159 @@ WEBSITE CONTENT:
 
 Return ONLY a number (e.g., "12"). You MUST estimate even if unsure:"""
 
-    try:
-        resp = await client.post(
-            GROQ_API_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 20,
-                "temperature": 0.3,  # Slight creativity for estimation
-            },
-            timeout=30.0,
-        )
-
-        if resp.status_code == 429:
-            # Rate limited - wait and retry up to 3 times
-            for retry in range(3):
-                wait_time = (retry + 1) * 5  # 5s, 10s, 15s
-                log(f"    Rate limited, waiting {wait_time}s (attempt {retry + 1}/3)")
-                await asyncio.sleep(wait_time)
-
-                retry_resp = await client.post(
-                    GROQ_API_URL,
-                    headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": MODEL,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 20,
-                        "temperature": 0.3,
-                    },
-                    timeout=30.0,
-                )
-                if retry_resp.status_code == 200:
-                    resp = retry_resp
-                    break
-                elif retry_resp.status_code != 429:
-                    return None
-            else:
-                log("    Rate limit exceeded after 3 retries")
-                return None
-
-        if resp.status_code != 200:
-            log(f"    Groq API error: {resp.status_code}")
-            return None
-
-        data = resp.json()
-        answer = data["choices"][0]["message"]["content"].strip()
-
-        # Extract number from response
-        match = re.search(r'\d+', answer)
-        if match:
-            count = int(match.group())
-            # Sanity check - most properties have 1-2000 rooms
-            if 1 <= count <= 2000:
-                return count
-
-        # LLM didn't return a number - make a default estimate based on property name
-        name_lower = hotel_name.lower()
-        if any(kw in name_lower for kw in ['cabin', 'cottage', 'house', 'chalet', 'villa']):
-            return 1  # Single rental unit
-        elif any(kw in name_lower for kw in ['cabins', 'cottages', 'rentals']):
-            return 10  # Small rental company
-        elif any(kw in name_lower for kw in ['b&b', 'bed and breakfast', 'inn', 'guesthouse']):
-            return 8  # Small B&B
-        elif any(kw in name_lower for kw in ['motel']):
-            return 30  # Typical motel
-        elif any(kw in name_lower for kw in ['hotel', 'resort', 'lodge']):
-            return 50  # Default hotel
-        else:
-            return 10  # Generic default
-
-    except Exception as e:
-        log(f"  LLM error: {e}")
+    answer = await _llm_request(client, prompt, max_tokens=20)
+    if answer is None:
         return None
+
+    # Extract number from response
+    match = re.search(r'\d+', answer)
+    if match:
+        count = int(match.group())
+        # Sanity check - most properties have 1-2000 rooms
+        if 1 <= count <= 2000:
+            return count
+
+    # LLM didn't return a number - make a default estimate based on property name
+    name_lower = hotel_name.lower()
+    if any(kw in name_lower for kw in ['cabin', 'cottage', 'house', 'chalet', 'villa']):
+        return 1  # Single rental unit
+    elif any(kw in name_lower for kw in ['cabins', 'cottages', 'rentals']):
+        return 10  # Small rental company
+    elif any(kw in name_lower for kw in ['b&b', 'bed and breakfast', 'inn', 'guesthouse']):
+        return 8  # Small B&B
+    elif any(kw in name_lower for kw in ['motel']):
+        return 30  # Typical motel
+    elif any(kw in name_lower for kw in ['hotel', 'resort', 'lodge']):
+        return 50  # Default hotel
+    else:
+        return 10  # Generic default
+
+
+# ============================================================================
+# LLM WEBSITE + ROOM COUNT (single call)
+# ============================================================================
+
+
+async def _llm_find_website_and_rooms(
+    client: httpx.AsyncClient,
+    hotel_name: str,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[int]]:
+    """Ask GPT to find the hotel's website and estimate room count in one call.
+
+    Returns (website_url, room_count). Either or both may be None.
+    """
+    cleaned_name = clean_hotel_name(hotel_name)
+    location_parts = [p for p in [city, state] if p]
+    location_str = ", ".join(location_parts) if location_parts else "unknown location"
+
+    log(f"  Asking LLM for website + rooms: {cleaned_name} ({location_str})")
+
+    prompt = f"""Find the official website and estimate room count for this hotel:
+Name: {cleaned_name}
+Location: {location_str}
+
+Reply ONLY in this exact format:
+website: <url or NONE>
+rooms: <number or UNKNOWN>"""
+
+    answer = await _llm_request(client, prompt, max_tokens=100)
+    if answer is None:
+        return None, None
+
+    website = None
+    rooms = None
+
+    for line in answer.strip().split("\n"):
+        line = line.strip()
+        if line.lower().startswith("website:"):
+            val = line.split(":", 1)[1].strip()
+            if val.upper() != "NONE" and "none" not in val.lower():
+                url_match = re.search(r'https?://[^\s<>"\']+', val)
+                if url_match:
+                    website = url_match.group().rstrip(".")
+                else:
+                    domain_match = re.search(r'(?:www\.)?[\w.-]+\.\w{2,}', val)
+                    if domain_match:
+                        website = f"https://{domain_match.group()}"
+        elif line.lower().startswith("rooms:"):
+            val = line.split(":", 1)[1].strip()
+            if val.upper() != "UNKNOWN" and "unknown" not in val.lower():
+                match = re.search(r'\d+', val)
+                if match:
+                    count = int(match.group())
+                    if 1 <= count <= 2000:
+                        rooms = count
+
+    if website:
+        log(f"  LLM found website: {website}")
+    if rooms:
+        log(f"  LLM estimated rooms: {rooms}")
+
+    return website, rooms
+
+
+# ============================================================================
+# MAIN ENRICHMENT ENTRY POINT
+# ============================================================================
 
 
 async def enrich_hotel_room_count(
     client: httpx.AsyncClient,
     hotel_id: int,
     hotel_name: str,
-    website: str,
-) -> Tuple[Optional[int], str]:
+    website: Optional[str] = None,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+) -> Tuple[Optional[int], str, Optional[str]]:
     """
     Enrich a single hotel with room count.
 
-    Returns (room_count, source) where source is 'regex' or 'groq'.
-    Returns (None, '') if no room count could be determined.
+    Returns (room_count, source, discovered_website) where:
+    - source is 'regex', 'llm', 'llm_regex', or 'llm_search'
+    - discovered_website is the URL found via LLM (None if hotel already had one)
+
+    Returns (None, '', None) if no room count could be determined.
     """
     log(f"Processing: {hotel_name}")
 
-    # Fetch website and try regex extraction first
-    regex_count, text = await fetch_and_extract_room_count(client, website)
+    # Skip hotels with blank/junk names
+    cleaned = hotel_name.strip().replace("\ufeff", "") if hotel_name else ""
+    if not cleaned or len(cleaned) < 3 or cleaned.lower() in ("new booking", "unknown", "test"):
+        log(f"  Skipping: blank or junk hotel name")
+        return None, "", None
 
-    if regex_count:
-        log(f"  Found via regex: {regex_count} rooms")
-        return regex_count, "regex"
+    has_website = website and website.strip()
 
-    if not text:
-        log(f"  Could not fetch website")
-        return None, ""
+    if has_website:
+        # Hotel has a known website — scrape and extract
+        regex_count, text = await fetch_and_extract_room_count(client, website)
 
-    # Fall back to LLM estimation
-    count = await extract_room_count_llm(client, hotel_name, text)
+        if regex_count:
+            log(f"  Found via regex: {regex_count} rooms")
+            return regex_count, "regex", None
 
-    if count:
-        log(f"  LLM estimate: ~{count} rooms")
-        return count, "groq"
-    else:
-        log(f"  Could not estimate room count")
-        return None, ""
+        if text:
+            count = await extract_room_count_llm(client, hotel_name, text)
+            if count:
+                log(f"  LLM estimate from website: ~{count} rooms")
+                return count, "llm", None
+
+        log(f"  Could not extract from known website")
+        return None, "", None
+
+    # No website — ask GPT for both website and room count in one call
+    discovered_website, rooms = await _llm_find_website_and_rooms(client, hotel_name, city, state)
+
+    if rooms:
+        log(f"  LLM result: ~{rooms} rooms" + (f" (website: {discovered_website})" if discovered_website else ""))
+        return rooms, "llm_search", discovered_website
+
+    log(f"  Could not estimate room count")
+    return None, "", discovered_website
 
 
-def get_groq_api_key() -> Optional[str]:
-    """Get the Groq API key from environment."""
-    return GROQ_API_KEY
+def get_llm_api_key() -> Optional[str]:
+    """Get the Azure OpenAI API key from environment."""
+    return AZURE_OPENAI_API_KEY

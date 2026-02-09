@@ -19,7 +19,6 @@ async def get_hotels_pending_enrichment(
     """Get hotels that need room count enrichment (read-only, for status display).
 
     Criteria:
-    - has website
     - not already in hotel_room_count table
     - optionally filtered by state and/or country
     """
@@ -67,8 +66,8 @@ async def get_pending_enrichment_count(
     state: Optional[str] = None,
     country: Optional[str] = None,
 ) -> int:
-    """Count hotels waiting for enrichment (has website, not yet in hotel_room_count).
-    
+    """Count hotels waiting for enrichment (not yet in hotel_room_count).
+
     Args:
         state: Optional state filter (e.g., "California")
         country: Optional country filter (e.g., "United States")
@@ -302,6 +301,16 @@ async def update_hotel_website(hotel_id: int, website: str) -> None:
     async with get_conn() as conn:
         await queries.update_hotel_website(conn, hotel_id=hotel_id, website=website)
         await queries.advance_to_has_website(conn, hotel_id=hotel_id)
+
+
+async def update_hotel_website_only(hotel_id: int, website: str) -> None:
+    """Update hotel website without advancing pipeline stage.
+
+    Used by room count enricher when it discovers a website via Serper.
+    These hotels are already launched, so we don't need to advance_to_has_website.
+    """
+    async with get_conn() as conn:
+        await queries.update_hotel_website(conn, hotel_id=hotel_id, website=website)
 
 
 async def update_hotel_location_point_if_null(hotel_id: int, lat: float, lng: float) -> None:

@@ -18,7 +18,7 @@ from services.enrichment import repo
 from services.enrichment import state_utils
 from services.enrichment.room_count_enricher import (
     enrich_hotel_room_count,
-    get_groq_api_key,
+    get_llm_api_key,
     log,
 )
 from services.enrichment.customer_proximity import (
@@ -790,8 +790,8 @@ class Service(IService):
         Returns number of hotels successfully enriched.
         """
         # Check for API key
-        if not get_groq_api_key():
-            log("Error: ROOM_COUNT_ENRICHER_AGENT_GROQ_KEY not found in .env")
+        if not get_llm_api_key():
+            log("Error: AZURE_OPENAI_API_KEY not found in .env")
             return 0
 
         # Claim hotels for enrichment (multi-worker safe)
@@ -836,15 +836,27 @@ class Service(IService):
 
     async def _enrich_single_hotel(self, client: httpx.AsyncClient, hotel) -> bool:
         """Enrich a single hotel with room count. Returns True if successful."""
-        room_count, source = await enrich_hotel_room_count(
+        room_count, source, discovered_website = await enrich_hotel_room_count(
             client=client,
             hotel_id=hotel.id,
             hotel_name=hotel.name,
             website=hotel.website,
+            city=hotel.city,
+            state=hotel.state,
         )
 
+        # Save discovered website to hotel record (even if room count extraction failed)
+        if discovered_website:
+            await repo.update_hotel_website_only(hotel.id, discovered_website)
+
         if room_count:
-            confidence = Decimal("1.0") if source == "regex" else Decimal("0.7")
+            # Confidence mapping by source
+            confidence_map = {
+                "regex": Decimal("1.0"),       # Regex from known website
+                "llm": Decimal("0.7"),         # LLM from known website content
+                "llm_search": Decimal("0.5"),  # LLM estimated website + room count
+            }
+            confidence = confidence_map.get(source, Decimal("0.5"))
             await repo.insert_room_count(
                 hotel_id=hotel.id,
                 room_count=room_count,
