@@ -1,7 +1,7 @@
 """
 Room Count Enricher (LLM-powered)
 =================================
-Uses Groq's fast LLM API to extract room counts from hotel websites.
+Uses Azure OpenAI to extract room counts from hotel websites.
 For hotels without websites, discovers websites via Serper + LLM,
 or falls back to name-only LLM estimation.
 
@@ -24,14 +24,14 @@ from services.enrichment.website_enricher import SKIP_DOMAINS, BAD_URL_PATTERNS,
 # Load environment variables
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("ROOM_COUNT_ENRICHER_AGENT_GROQ_KEY")
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+# Azure OpenAI config
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
-
-# Fast model - good balance of speed and accuracy
-MODEL = "llama-3.1-8b-instant"
 
 # Pages to check for room count info - be thorough!
 ABOUT_PAGE_PATTERNS = [
@@ -77,29 +77,29 @@ def _extract_domain(url: str) -> Optional[str]:
         return None
 
 
-async def _groq_request(
+async def _llm_request(
     client: httpx.AsyncClient,
     prompt: str,
     max_tokens: int = 20,
-    temperature: float = 0.3,
 ) -> Optional[str]:
-    """Make a Groq API request with retry logic for rate limits.
+    """Make an Azure OpenAI API request with retry logic for rate limits.
 
     Returns the LLM response text, or None on failure.
     """
+    url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "max_completion_tokens": max_tokens,
+    }
+
     try:
         resp = await client.post(
-            GROQ_API_URL,
+            url,
             headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "api-key": AZURE_OPENAI_API_KEY,
                 "Content-Type": "application/json",
             },
-            json={
-                "model": MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            },
+            json=payload,
             timeout=30.0,
         )
 
@@ -110,17 +110,12 @@ async def _groq_request(
                 await asyncio.sleep(wait_time)
 
                 retry_resp = await client.post(
-                    GROQ_API_URL,
+                    url,
                     headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "api-key": AZURE_OPENAI_API_KEY,
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": MODEL,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                    },
+                    json=payload,
                     timeout=30.0,
                 )
                 if retry_resp.status_code == 200:
@@ -133,14 +128,14 @@ async def _groq_request(
                 return None
 
         if resp.status_code != 200:
-            log(f"    Groq API error: {resp.status_code}")
+            log(f"    Azure OpenAI error: {resp.status_code} - {resp.text[:200]}")
             return None
 
         data = resp.json()
         return data["choices"][0]["message"]["content"].strip()
 
     except Exception as e:
-        log(f"  Groq request error: {e}")
+        log(f"  LLM request error: {e}")
         return None
 
 
@@ -420,7 +415,7 @@ WEBSITE CONTENT:
 
 Return ONLY a number (e.g., "12"). You MUST estimate even if unsure:"""
 
-    answer = await _groq_request(client, prompt, max_tokens=20, temperature=0.3)
+    answer = await _llm_request(client, prompt, max_tokens=1000)
     if answer is None:
         return None
 
@@ -508,7 +503,9 @@ async def search_hotel_website(
 
             if not domain:
                 continue
-            if domain in SKIP_DOMAINS:
+            # Check domain and parent domain against blocklist
+            parent_domain = ".".join(domain.split(".")[-2:]) if domain.count(".") > 1 else domain
+            if domain in SKIP_DOMAINS or parent_domain in SKIP_DOMAINS:
                 continue
             if any(pattern in url.lower() for pattern in BAD_URL_PATTERNS):
                 continue
@@ -571,7 +568,7 @@ Rules:
 
 Reply with ONLY the number (1-{min(len(candidates), 5)}) or "0":"""
 
-    answer = await _groq_request(client, prompt, max_tokens=10, temperature=0.1)
+    answer = await _llm_request(client, prompt, max_tokens=500)
     if answer is None:
         return None
 
@@ -616,7 +613,7 @@ Use the property type words in the name as your primary signal.
 
 Return ONLY a number (e.g., "42"). You MUST estimate:"""
 
-    answer = await _groq_request(client, prompt, max_tokens=10, temperature=0.3)
+    answer = await _llm_request(client, prompt, max_tokens=500)
     if answer is None:
         return None
 
@@ -665,6 +662,12 @@ async def enrich_hotel_room_count(
     Returns (None, '', None) if no room count could be determined.
     """
     log(f"Processing: {hotel_name}")
+
+    # Skip hotels with blank/junk names - can't search or estimate meaningfully
+    cleaned = hotel_name.strip().replace("\ufeff", "") if hotel_name else ""
+    if not cleaned or cleaned.lower() in ("new booking", "unknown", "test"):
+        log(f"  Skipping: blank or junk hotel name")
+        return None, "", None
 
     has_website = website and website.strip()
 
@@ -723,6 +726,6 @@ async def enrich_hotel_room_count(
         return None, "", discovered_website
 
 
-def get_groq_api_key() -> Optional[str]:
-    """Get the Groq API key from environment."""
-    return GROQ_API_KEY
+def get_llm_api_key() -> Optional[str]:
+    """Get the Azure OpenAI API key from environment."""
+    return AZURE_OPENAI_API_KEY

@@ -18,7 +18,7 @@ from services.enrichment import repo
 from services.enrichment import state_utils
 from services.enrichment.room_count_enricher import (
     enrich_hotel_room_count,
-    get_groq_api_key,
+    get_llm_api_key,
     log,
 )
 from services.enrichment.customer_proximity import (
@@ -790,8 +790,8 @@ class Service(IService):
         Returns number of hotels successfully enriched.
         """
         # Check for API key
-        if not get_groq_api_key():
-            log("Error: ROOM_COUNT_ENRICHER_AGENT_GROQ_KEY not found in .env")
+        if not get_llm_api_key():
+            log("Error: AZURE_OPENAI_API_KEY not found in .env")
             return 0
 
         # Claim hotels for enrichment (multi-worker safe)
