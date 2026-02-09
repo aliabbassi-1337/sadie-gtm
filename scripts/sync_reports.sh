@@ -35,15 +35,10 @@ else
     done
 fi
 
-# Sync reports directory
-mkdir -p "$ONEDRIVE_BASE/reports"
-echo "Syncing: reports"
-aws s3 sync "$S3_BASE/reports/" "$ONEDRIVE_BASE/reports/" --region "$AWS_REGION"
-
-# Sync crawl-data directory (Cloudbeds, RMS, IPMS247, etc.)
-mkdir -p "$ONEDRIVE_BASE/crawl-data"
-echo "Syncing: crawl-data"
-aws s3 sync "$S3_BASE/crawl-data/" "$ONEDRIVE_BASE/crawl-data/" --region "$AWS_REGION"
+# Sync booking-engines directory (Cloudbeds, RMS, SiteMinder, Mews)
+mkdir -p "$ONEDRIVE_BASE/booking-engines"
+echo "Syncing: booking-engines"
+aws s3 sync "$S3_BASE/booking-engines/" "$ONEDRIVE_BASE/booking-engines/" --region "$AWS_REGION"
 
 echo ""
 echo "Done! Files synced to: $ONEDRIVE_BASE"

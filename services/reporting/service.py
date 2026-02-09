@@ -373,7 +373,7 @@ class Service(IService):
         try:
             # Filename: cloudbeds_leads.xlsx
             filename = f"{booking_engine.lower()}_leads.xlsx"
-            s3_uri = f"s3://sadie-gtm/HotelLeadGen/crawl-data/{filename}"
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/booking-engines/{filename}"
 
             # Try s5cmd first (faster)
             result = subprocess.run(
@@ -384,7 +384,7 @@ class Service(IService):
 
             if result.returncode != 0:
                 logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
-                s3_key = f"HotelLeadGen/crawl-data/{filename}"
+                s3_key = f"HotelLeadGen/booking-engines/{filename}"
                 s3_uri = upload_file(tmp_path, s3_key)
 
             logger.info(f"Uploaded crawl data report to {s3_uri}")
@@ -427,7 +427,7 @@ class Service(IService):
             tmp_path = tmp.name
 
         try:
-            s3_uri = f"s3://sadie-gtm/HotelLeadGen/crawl-data/{filename}"
+            s3_uri = f"s3://sadie-gtm/HotelLeadGen/booking-engines/{filename}"
 
             result = subprocess.run(
                 ["s5cmd", "cp", tmp_path, s3_uri],
@@ -437,7 +437,7 @@ class Service(IService):
 
             if result.returncode != 0:
                 logger.warning(f"s5cmd failed, using boto3: {result.stderr}")
-                s3_key = f"HotelLeadGen/crawl-data/{filename}"
+                s3_key = f"HotelLeadGen/booking-engines/{filename}"
                 s3_uri = upload_file(tmp_path, s3_key)
 
             logger.info(f"Uploaded source report to {s3_uri}")

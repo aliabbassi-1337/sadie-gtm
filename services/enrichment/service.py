@@ -2656,7 +2656,7 @@ class Service(IService):
         Returns:
             dict with 'total_fixed' count
         """
-        from db.client import get_conn
+        from db.client import queries, get_conn
         from workflows.normalize_countries import COUNTRY_CODES, COUNTRY_VARIATIONS, GARBAGE_COUNTRIES
 
         total = 0
@@ -2666,17 +2666,13 @@ class Service(IService):
         async with get_conn() as conn:
             for code, name in COUNTRY_CODES.items():
                 if dry_run:
-                    count = await conn.fetchval(
-                        "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1", code
-                    )
+                    row = await queries.count_hotels_by_country_value(conn, old_value=code)
+                    count = row["count"] if row else 0
                     if count > 0:
                         logger.info(f"  [DRY-RUN] {code} -> {name}: {count}")
                         total += count
                 else:
-                    result = await conn.execute(
-                        "UPDATE sadie_gtm.hotels SET country = $1, updated_at = NOW() WHERE country = $2 AND status != -1",
-                        name, code
-                    )
+                    result = await queries.update_country_value(conn, new_value=name, old_value=code)
                     count = int(result.split()[-1]) if result else 0
                     if count > 0:
                         logger.info(f"  {code} -> {name}: {count}")
@@ -2687,17 +2683,13 @@ class Service(IService):
         async with get_conn() as conn:
             for old, new in COUNTRY_VARIATIONS.items():
                 if dry_run:
-                    count = await conn.fetchval(
-                        "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1", old
-                    )
+                    row = await queries.count_hotels_by_country_value(conn, old_value=old)
+                    count = row["count"] if row else 0
                     if count > 0:
                         logger.info(f"  [DRY-RUN] {old[:40]} -> {new}: {count}")
                         total += count
                 else:
-                    result = await conn.execute(
-                        "UPDATE sadie_gtm.hotels SET country = $1, updated_at = NOW() WHERE country = $2 AND status != -1",
-                        new, old
-                    )
+                    result = await queries.update_country_value(conn, new_value=new, old_value=old)
                     count = int(result.split()[-1]) if result else 0
                     if count > 0:
                         logger.info(f"  {old[:40]} -> {new}: {count}")
@@ -2710,17 +2702,13 @@ class Service(IService):
                 if g == "NA":
                     continue
                 if dry_run:
-                    count = await conn.fetchval(
-                        "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1", g
-                    )
+                    row = await queries.count_hotels_by_country_value(conn, old_value=g)
+                    count = row["count"] if row else 0
                     if count > 0:
                         logger.info(f"  [DRY-RUN] '{g}' -> NULL: {count}")
                         total += count
                 else:
-                    result = await conn.execute(
-                        "UPDATE sadie_gtm.hotels SET country = NULL, updated_at = NOW() WHERE country = $1 AND status != -1",
-                        g
-                    )
+                    result = await queries.null_country_value(conn, old_value=g)
                     count = int(result.split()[-1]) if result else 0
                     if count > 0:
                         logger.info(f"  '{g}' -> NULL: {count}")
@@ -2746,78 +2734,60 @@ class Service(IService):
         Returns:
             dict with 'fixes' (list of tuples) and 'total_fixed' count
         """
-        from db.client import get_conn
-        
+        from db.client import queries, get_conn
+
         # Define supported countries and their state maps
         COUNTRY_STATE_MAPS = {
             "United States": state_utils.US_STATES,
             "Australia": state_utils.AU_STATES,
             "Canada": state_utils.CA_PROVINCES,
         }
-        
+
         all_fixes = []
         total_fixed = 0
-        
+
         for country_name, state_map in COUNTRY_STATE_MAPS.items():
             valid_full_names = set(state_map.values())
-            
+
             # Get unique states for this country
             async with get_conn() as conn:
-                rows = await conn.fetch('''
-                    SELECT state, COUNT(*) as cnt
-                    FROM sadie_gtm.hotels 
-                    WHERE status != -1 
-                      AND country = $1
-                      AND state IS NOT NULL
-                    GROUP BY state
-                    ORDER BY cnt DESC
-                ''', country_name)
-            
+                rows = await queries.get_state_counts_for_country(conn, country=country_name)
+
             if not rows:
                 continue
-                
+
             logger.info(f"{country_name}: {len(rows)} unique state values")
-            
+
             # Find states that need normalization
             for row in rows:
                 state = row['state']
                 count = row['cnt']
-                
+
                 # Skip if already a valid full name
                 if state in valid_full_names:
                     continue
-                
+
                 # Check if it's an abbreviation we can normalize
                 state_upper = state.strip().upper()
                 if state_upper in state_map:
                     new_state = state_map[state_upper]
                     all_fixes.append((state, new_state, country_name, count))
-                    
+
                     logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
-                    
+
                     if not dry_run:
                         async with get_conn() as conn:
-                            result = await conn.execute('''
-                                UPDATE sadie_gtm.hotels 
-                                SET state = $2, updated_at = CURRENT_TIMESTAMP
-                                WHERE status != -1 AND country = $3 AND state = $1
-                            ''', state, new_state, country_name)
+                            result = await queries.update_state_value(
+                                conn, new_state=new_state, country=country_name, old_state=state
+                            )
                             fixed = int(result.split()[-1]) if result else 0
                             total_fixed += fixed
-        
+
         # Second pass: NULL out junk state values that fail is_valid_state()
         junk_nulled = 0
         for country_name, state_map in COUNTRY_STATE_MAPS.items():
             async with get_conn() as conn:
-                rows = await conn.fetch('''
-                    SELECT state, COUNT(*) as cnt
-                    FROM sadie_gtm.hotels
-                    WHERE status != -1
-                      AND country = $1
-                      AND state IS NOT NULL
-                    GROUP BY state
-                    ORDER BY cnt DESC
-                ''', country_name)
+                rows = await queries.get_state_counts_for_country(conn, country=country_name)
 
             for row in rows:
                 state_val = row['state']
@@ -2829,11 +2799,9 @@ class Service(IService):
 
                     if not dry_run:
                         async with get_conn() as conn:
-                            result = await conn.execute('''
-                                UPDATE sadie_gtm.hotels
-                                SET state = NULL, updated_at = CURRENT_TIMESTAMP
-                                WHERE status != -1 AND country = $2 AND state = $1
-                            ''', state_val, country_name)
+                            result = await queries.null_state_value(
+                                conn, country=country_name, old_state=state_val
+                            )
                             nulled = int(result.split()[-1]) if result else 0
                             junk_nulled += nulled
                             total_fixed += nulled
