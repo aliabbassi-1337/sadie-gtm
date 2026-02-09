@@ -2645,6 +2645,94 @@ class Service(IService):
         """
         return state_utils.normalize_state(state, country)
 
+    async def normalize_countries_bulk(self, dry_run: bool = False) -> dict:
+        """Normalize country codes and variations to standard English names.
+
+        Three passes:
+        1. ISO 2-letter codes (AU -> Australia, etc.)
+        2. Native language names and common variations (USA -> United States, etc.)
+        3. Garbage values -> NULL
+
+        Returns:
+            dict with 'total_fixed' count
+        """
+        from db.client import get_conn
+        from workflows.normalize_countries import COUNTRY_CODES, COUNTRY_VARIATIONS, GARBAGE_COUNTRIES
+
+        total = 0
+
+        # Pass 1: ISO 2-letter codes
+        logger.info("Normalizing country codes...")
+        async with get_conn() as conn:
+            for code, name in COUNTRY_CODES.items():
+                if dry_run:
+                    count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1", code
+                    )
+                    if count > 0:
+                        logger.info(f"  [DRY-RUN] {code} -> {name}: {count}")
+                        total += count
+                else:
+                    result = await conn.execute(
+                        "UPDATE sadie_gtm.hotels SET country = $1, updated_at = NOW() WHERE country = $2 AND status != -1",
+                        name, code
+                    )
+                    count = int(result.split()[-1]) if result else 0
+                    if count > 0:
+                        logger.info(f"  {code} -> {name}: {count}")
+                        total += count
+
+        # Pass 2: Variations (USA, native names, etc.)
+        logger.info("Normalizing country name variations...")
+        async with get_conn() as conn:
+            for old, new in COUNTRY_VARIATIONS.items():
+                if dry_run:
+                    count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1", old
+                    )
+                    if count > 0:
+                        logger.info(f"  [DRY-RUN] {old[:40]} -> {new}: {count}")
+                        total += count
+                else:
+                    result = await conn.execute(
+                        "UPDATE sadie_gtm.hotels SET country = $1, updated_at = NOW() WHERE country = $2 AND status != -1",
+                        new, old
+                    )
+                    count = int(result.split()[-1]) if result else 0
+                    if count > 0:
+                        logger.info(f"  {old[:40]} -> {new}: {count}")
+                        total += count
+
+        # Pass 3: Garbage -> NULL
+        logger.info("Removing garbage country values...")
+        async with get_conn() as conn:
+            for g in GARBAGE_COUNTRIES:
+                if g == "NA":
+                    continue
+                if dry_run:
+                    count = await conn.fetchval(
+                        "SELECT COUNT(*) FROM sadie_gtm.hotels WHERE country = $1 AND status != -1", g
+                    )
+                    if count > 0:
+                        logger.info(f"  [DRY-RUN] '{g}' -> NULL: {count}")
+                        total += count
+                else:
+                    result = await conn.execute(
+                        "UPDATE sadie_gtm.hotels SET country = NULL, updated_at = NOW() WHERE country = $1 AND status != -1",
+                        g
+                    )
+                    count = int(result.split()[-1]) if result else 0
+                    if count > 0:
+                        logger.info(f"  '{g}' -> NULL: {count}")
+                        total += count
+
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would fix {total} hotels")
+        else:
+            logger.success(f"Normalized {total} country values")
+
+        return {"total_fixed": total}
+
     async def normalize_states_bulk(self, dry_run: bool = False) -> dict:
         """Normalize state abbreviations to full names in database.
         
