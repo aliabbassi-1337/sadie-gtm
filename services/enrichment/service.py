@@ -817,7 +817,7 @@ class Service(IService):
 
         enriched_count = 0
 
-        async with httpx.AsyncClient(verify=False) as client:
+        async with httpx.AsyncClient(verify=False, limits=httpx.Limits(max_connections=200, max_keepalive_connections=50)) as client:
             if free_tier:
                 # Sequential processing with delays (30 RPM)
                 for hotel in hotels:
