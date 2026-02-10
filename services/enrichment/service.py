@@ -771,7 +771,7 @@ class Service(IService):
         self,
         limit: int = 100,
         free_tier: bool = False,
-        concurrency: int = 15,
+        concurrency: int = 50,
         state: str = None,
         country: str = None,
     ) -> int:
@@ -783,7 +783,7 @@ class Service(IService):
         Args:
             limit: Max hotels to process
             free_tier: If True, use slow sequential mode (30 RPM). Default False (1000 RPM).
-            concurrency: Max concurrent requests when not in free_tier mode. Default 15.
+            concurrency: Max concurrent requests when not in free_tier mode. Default 50.
             state: Optional state filter (e.g., "California")
             country: Optional country filter (e.g., "United States")
 

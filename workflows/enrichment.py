@@ -94,7 +94,7 @@ def main():
     room_parser = subparsers.add_parser("room-counts")
     room_parser.add_argument("--limit", "-l", type=int, default=100)
     room_parser.add_argument("--free-tier", action="store_true")
-    room_parser.add_argument("--concurrency", "-c", type=int, default=15)
+    room_parser.add_argument("--concurrency", "-c", type=int, default=50)
     room_parser.add_argument("--no-notify", action="store_true")
     room_parser.add_argument("--state", "-s", type=str, default=None)
     room_parser.add_argument("--country", type=str, default=None)
