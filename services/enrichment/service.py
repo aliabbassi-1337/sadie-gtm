@@ -2669,6 +2669,9 @@ class Service(IService):
         2. Native language names and common variations (USA -> United States, etc.)
         3. Garbage values -> NULL
 
+        Uses per-update connections to ensure commits persist through
+        Supabase pooler in transaction mode.
+
         Returns:
             dict with 'total_fixed' count
         """
@@ -2679,56 +2682,59 @@ class Service(IService):
 
         # Pass 1: ISO 2-letter codes
         logger.info("Normalizing country codes...")
-        async with get_conn() as conn:
-            for code, name in COUNTRY_CODES.items():
-                if dry_run:
+        for code, name in COUNTRY_CODES.items():
+            if dry_run:
+                async with get_conn() as conn:
                     row = await queries.count_hotels_by_country_value(conn, old_value=code)
-                    count = row["count"] if row else 0
-                    if count > 0:
-                        logger.info(f"  [DRY-RUN] {code} -> {name}: {count}")
-                        total += count
-                else:
+                count = row["count"] if row else 0
+                if count > 0:
+                    logger.info(f"  [DRY-RUN] {code} -> {name}: {count}")
+                    total += count
+            else:
+                async with get_conn() as conn:
                     result = await queries.update_country_value(conn, new_value=name, old_value=code)
-                    count = int(result.split()[-1]) if result else 0
-                    if count > 0:
-                        logger.info(f"  {code} -> {name}: {count}")
-                        total += count
+                count = int(result.split()[-1]) if result else 0
+                if count > 0:
+                    logger.info(f"  {code} -> {name}: {count}")
+                    total += count
 
         # Pass 2: Variations (USA, native names, etc.)
         logger.info("Normalizing country name variations...")
-        async with get_conn() as conn:
-            for old, new in COUNTRY_VARIATIONS.items():
-                if dry_run:
+        for old, new in COUNTRY_VARIATIONS.items():
+            if dry_run:
+                async with get_conn() as conn:
                     row = await queries.count_hotels_by_country_value(conn, old_value=old)
-                    count = row["count"] if row else 0
-                    if count > 0:
-                        logger.info(f"  [DRY-RUN] {old[:40]} -> {new}: {count}")
-                        total += count
-                else:
+                count = row["count"] if row else 0
+                if count > 0:
+                    logger.info(f"  [DRY-RUN] {old[:40]} -> {new}: {count}")
+                    total += count
+            else:
+                async with get_conn() as conn:
                     result = await queries.update_country_value(conn, new_value=new, old_value=old)
-                    count = int(result.split()[-1]) if result else 0
-                    if count > 0:
-                        logger.info(f"  {old[:40]} -> {new}: {count}")
-                        total += count
+                count = int(result.split()[-1]) if result else 0
+                if count > 0:
+                    logger.info(f"  {old[:40]} -> {new}: {count}")
+                    total += count
 
         # Pass 3: Garbage -> NULL
         logger.info("Removing garbage country values...")
-        async with get_conn() as conn:
-            for g in GARBAGE_COUNTRIES:
-                if g == "NA":
-                    continue
-                if dry_run:
+        for g in GARBAGE_COUNTRIES:
+            if g == "NA":
+                continue
+            if dry_run:
+                async with get_conn() as conn:
                     row = await queries.count_hotels_by_country_value(conn, old_value=g)
-                    count = row["count"] if row else 0
-                    if count > 0:
-                        logger.info(f"  [DRY-RUN] '{g}' -> NULL: {count}")
-                        total += count
-                else:
+                count = row["count"] if row else 0
+                if count > 0:
+                    logger.info(f"  [DRY-RUN] '{g}' -> NULL: {count}")
+                    total += count
+            else:
+                async with get_conn() as conn:
                     result = await queries.null_country_value(conn, old_value=g)
-                    count = int(result.split()[-1]) if result else 0
-                    if count > 0:
-                        logger.info(f"  '{g}' -> NULL: {count}")
-                        total += count
+                count = int(result.split()[-1]) if result else 0
+                if count > 0:
+                    logger.info(f"  '{g}' -> NULL: {count}")
+                    total += count
 
         if dry_run:
             logger.info(f"[DRY-RUN] Would fix {total} hotels")
@@ -2765,7 +2771,6 @@ class Service(IService):
         for country_name, state_map in COUNTRY_STATE_MAPS.items():
             valid_full_names = set(state_map.values())
 
-            # Get unique states for this country
             async with get_conn() as conn:
                 rows = await queries.get_state_counts_for_country(conn, country=country_name)
 
@@ -2774,16 +2779,13 @@ class Service(IService):
 
             logger.info(f"{country_name}: {len(rows)} unique state values")
 
-            # Find states that need normalization
             for row in rows:
                 state = row['state']
                 count = row['cnt']
 
-                # Skip if already a valid full name
                 if state in valid_full_names:
                     continue
 
-                # Check if it's an abbreviation we can normalize
                 state_upper = state.strip().upper()
                 if state_upper in state_map:
                     new_state = state_map[state_upper]
@@ -2842,6 +2844,9 @@ class Service(IService):
         1. Hotels currently classified as "United States" that have non-US signals
         2. Hotels with NULL country that have inferable signals
 
+        Uses per-update connections to ensure commits persist through
+        Supabase pooler in transaction mode.
+
         Args:
             dry_run: If True, only report what would be fixed
 
@@ -2855,7 +2860,6 @@ class Service(IService):
         state_fixes = 0
         details = {}  # country -> count
 
-        # Process "United States" hotels (most likely misclassified)
         for source_country in ["United States", None]:
             include_null = source_country is None
             label = source_country or "NULL country"
@@ -2874,7 +2878,6 @@ class Service(IService):
             fixes_for_source = []
 
             for row in rows:
-                hotel_id = row["id"]
                 inferred_country, inferred_state, confidence = infer_location(
                     website=row["website"],
                     phone_google=row["phone_google"],
@@ -2886,25 +2889,16 @@ class Service(IService):
 
                 if not inferred_country:
                     continue
-
-                # For "United States" hotels, only fix if inferred != US
                 if source_country == "United States" and inferred_country == "United States":
                     continue
-
-                # For NULL country hotels, fix to whatever we inferred
-                # Skip ambiguous US/CA
                 if inferred_country == "US/CA":
                     continue
-
-                # Only apply high-confidence fixes
                 if confidence < 0.5:
                     continue
 
                 fixes_for_source.append({
-                    "id": hotel_id,
+                    "id": row["id"],
                     "name": row["name"],
-                    "old_country": row["country"],
-                    "old_state": row["state"],
                     "new_country": inferred_country,
                     "new_state": inferred_state,
                     "confidence": confidence,
@@ -2914,7 +2908,6 @@ class Service(IService):
                 logger.info(f"  No fixes needed for {label}")
                 continue
 
-            # Group and log by inferred country
             by_country = {}
             for fix in fixes_for_source:
                 c = fix["new_country"]
@@ -2925,10 +2918,9 @@ class Service(IService):
                 logger.info(f"  {prefix}{label} -> {c}: {count} hotels")
                 details[c] = details.get(c, 0) + count
 
-            # Apply fixes
             if not dry_run:
-                async with get_conn() as conn:
-                    for fix in fixes_for_source:
+                for fix in fixes_for_source:
+                    async with get_conn() as conn:
                         if fix["new_state"]:
                             await queries.fix_hotel_country_and_state(
                                 conn,
@@ -2943,8 +2935,7 @@ class Service(IService):
                                 hotel_id=fix["id"],
                                 country=fix["new_country"],
                             )
-                        country_fixes += 1
-
+                    country_fixes += 1
             else:
                 country_fixes += len(fixes_for_source)
                 state_fixes += sum(1 for f in fixes_for_source if f["new_state"])
