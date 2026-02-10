@@ -2767,8 +2767,11 @@ class Service(IService):
         fixes_by_country = {}   # country -> {old_states: [], new_states: []}
         nulls_by_country = {}   # country -> [junk_states]
 
-        # Read current state data (read-only, single connection)
-        async with get_conn() as conn:
+        # Read + write in same transaction to avoid read replica lag
+        total_fixed = 0
+        junk_nulled = 0
+
+        async with get_transaction() as conn:
             for country_name, state_map in COUNTRY_STATE_MAPS.items():
                 rows = await queries.get_state_counts_for_country(conn, country=country_name)
                 if not rows:
@@ -2805,20 +2808,15 @@ class Service(IService):
                 if junk_states:
                     nulls_by_country[country_name] = junk_states
 
-        if not all_fixes:
-            logger.info("No state normalization needed")
-            return {"fixes": [], "total_fixed": 0}
+            if not all_fixes:
+                logger.info("No state normalization needed")
+                return {"fixes": [], "total_fixed": 0}
 
-        if dry_run:
-            would_fix = sum(c for _, _, _, c in all_fixes)
-            logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
-            return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
+            if dry_run:
+                would_fix = sum(c for _, _, _, c in all_fixes)
+                logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
+                return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
 
-        # Batch write all fixes in one transaction
-        total_fixed = 0
-        junk_nulled = 0
-
-        async with get_transaction() as conn:
             # Global junk cleanup first (all countries)
             result = await queries.batch_null_global_junk_states(
                 conn, junk_values=GLOBAL_JUNK,
@@ -2876,7 +2874,7 @@ class Service(IService):
             include_null = source_country is None
             label = source_country or "NULL country"
 
-            async with get_conn() as conn:
+            async with get_transaction() as conn:
                 rows = await queries.get_hotels_for_location_inference(
                     conn,
                     country=source_country or "",
@@ -2975,7 +2973,7 @@ class Service(IService):
         city_count = 0
 
         for country in SUPPORTED_COUNTRIES:
-            async with get_conn() as conn:
+            async with get_transaction() as conn:
                 rows = await queries.get_hotels_for_address_enrichment(conn, country=country)
 
             if not rows:
@@ -3328,8 +3326,9 @@ class Service(IService):
         """
         from db.client import queries, get_conn, get_transaction
 
+        # Read from primary (get_transaction) to avoid read replica lag
         # Step 1: Build reference lookup
-        async with get_conn() as conn:
+        async with get_transaction() as conn:
             ref_rows = await queries.get_city_state_reference_pairs(conn)
 
         if not ref_rows:
@@ -3348,7 +3347,7 @@ class Service(IService):
         logger.info(f"City-state lookup: {len(unambiguous)} unambiguous, {ambiguous_count} ambiguous (skipped)")
 
         # Step 2: Get hotels missing state with city
-        async with get_conn() as conn:
+        async with get_transaction() as conn:
             missing_rows = await queries.get_hotels_missing_state_with_city(conn)
 
         if not missing_rows:
@@ -3390,3 +3389,20 @@ class Service(IService):
             logger.success(f"Inferred state from city for {len(ids)} hotels")
 
         return {"total_missing": len(missing_rows), "matched": len(ids), "updated": len(ids) if not dry_run else 0}
+
+    def send_normalize_trigger(self):
+        """Send a normalization trigger message to SQS.
+
+        No-op if SQS_NORMALIZATION_QUEUE_URL is not set.
+        Safe to call multiple times — normalization is idempotent.
+        """
+        queue_url = os.getenv("SQS_NORMALIZATION_QUEUE_URL", "")
+        if not queue_url:
+            return
+
+        try:
+            from infra.sqs import send_message
+            send_message(queue_url, {"action": "normalize"})
+            logger.info("Sent normalization trigger to SQS")
+        except Exception as e:
+            logger.warning(f"Failed to send normalization trigger: {e}")

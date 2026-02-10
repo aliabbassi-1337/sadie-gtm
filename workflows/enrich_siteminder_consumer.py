@@ -134,6 +134,7 @@ async def run_sqs_consumer(concurrency: int = 20, use_brightdata: bool = False):
 
         logger.info(f"Consumer stopped. Total: {total_processed} processed, {total_enriched} enriched, {total_timeouts} timeouts")
     finally:
+        service.send_normalize_trigger()
         await close_db()
 
 

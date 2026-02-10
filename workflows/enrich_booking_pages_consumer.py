@@ -194,6 +194,7 @@ async def run_worker(delay: float = 0.5, poll_interval: int = 5, use_archive_fal
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
         finally:
+            service.send_normalize_trigger()
             await close_db()
             logger.info(f"Final stats: {processed} processed, {names_updated} names, {addresses_updated} addresses, {dead_urls} dead, {errors} errors")
 

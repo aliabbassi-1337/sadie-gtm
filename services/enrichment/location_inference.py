@@ -443,7 +443,11 @@ _COUNTRY_IN_ADDRESS = {
     re.compile(r'\bSharjah\b', re.IGNORECASE): "United Arab Emirates",
     re.compile(r'\bPakistan\b', re.IGNORECASE): "Pakistan",
     re.compile(r'\bPapua\s+New\s+Guinea\b', re.IGNORECASE): "Papua New Guinea",
-    # RMS underscore artifacts: "Saudi_Arabia", "Korea_South", "UnitedStates", etc.
+    # RMS artifacts: "UnitedStates", "United_States", "Saudi_Arabia", etc.
+    re.compile(r'\bUnitedStates\b', re.IGNORECASE): "United States",
+    re.compile(r'\bUnited_States\b', re.IGNORECASE): "United States",
+    re.compile(r'\bUnitedKingdom\b', re.IGNORECASE): "United Kingdom",
+    re.compile(r'\bUnited_Kingdom\b', re.IGNORECASE): "United Kingdom",
     re.compile(r'\bSaudi_Arabia\b', re.IGNORECASE): "Saudi Arabia",
     re.compile(r'\bKorea_South\b', re.IGNORECASE): "South Korea",
     re.compile(r'\bSouth_Africa\b', re.IGNORECASE): "South Africa",
@@ -927,9 +931,9 @@ def extract_us_city_from_address(address: str) -> Optional[str]:
     if not address:
         return None
 
-    # Strip country suffix
+    # Strip country suffix (including RMS artifacts like "UnitedStates")
     cleaned = re.sub(
-        r',?\s*(?:United\s+States|USA|US)\s*$', '', address, flags=re.IGNORECASE
+        r',?\s*(?:United\s*States|UnitedStates|USA|US)\s*$', '', address, flags=re.IGNORECASE
     ).strip()
 
     # Remove state + zip at end
