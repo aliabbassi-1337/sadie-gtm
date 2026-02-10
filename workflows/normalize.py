@@ -43,8 +43,9 @@ async def run(
     countries_only: bool = False,
     states_only: bool = False,
     infer_only: bool = False,
+    enrich_only: bool = False,
 ):
-    """Run normalization: countries first, then states, then inference."""
+    """Run normalization: countries -> states -> inference -> address enrichment."""
     await init_db()
 
     try:
@@ -53,10 +54,12 @@ async def run(
         country_result = {"total_fixed": 0}
         state_result = {"total_fixed": 0}
         infer_result = {"country_fixes": 0, "state_fixes": 0}
+        enrich_result = {"state_fixes": 0, "city_fixes": 0}
 
-        run_countries = not states_only and not infer_only
-        run_states = not countries_only and not infer_only
-        run_infer = not countries_only and not states_only
+        run_countries = not states_only and not infer_only and not enrich_only
+        run_states = not countries_only and not infer_only and not enrich_only
+        run_infer = not countries_only and not states_only and not enrich_only
+        run_enrich = not countries_only and not states_only and not infer_only
 
         # Step 1: Normalize countries
         if run_countries:
@@ -81,6 +84,14 @@ async def run(
             logger.info("=" * 50)
             infer_result = await service.infer_locations_bulk(dry_run=dry_run)
 
+        # Step 4: Enrich state/city from address text
+        if run_enrich:
+            logger.info("")
+            logger.info("=" * 50)
+            logger.info("STEP 4: ADDRESS ENRICHMENT")
+            logger.info("=" * 50)
+            enrich_result = await service.enrich_state_city_from_address_bulk(dry_run=dry_run)
+
         # Summary
         logger.info("")
         logger.info("=" * 50)
@@ -90,10 +101,12 @@ async def run(
             logger.info(f"Countries: would fix {country_result.get('total_fixed', 0)} hotels")
             logger.info(f"States: would fix {state_result.get('would_fix', state_result.get('total_fixed', 0))} hotels")
             logger.info(f"Inference: would fix {infer_result.get('country_fixes', 0)} countries, {infer_result.get('state_fixes', 0)} states")
+            logger.info(f"Address enrichment: would enrich {enrich_result.get('state_fixes', 0)} states, {enrich_result.get('city_fixes', 0)} cities")
         else:
             logger.info(f"Countries: fixed {country_result.get('total_fixed', 0)} hotels")
             logger.info(f"States: fixed {state_result.get('total_fixed', 0)} hotels")
             logger.info(f"Inference: fixed {infer_result.get('country_fixes', 0)} countries, {infer_result.get('state_fixes', 0)} states")
+            logger.info(f"Address enrichment: enriched {enrich_result.get('state_fixes', 0)} states, {enrich_result.get('city_fixes', 0)} cities")
 
     finally:
         await close_db()
@@ -105,6 +118,7 @@ def main():
     parser.add_argument("--countries-only", action="store_true", help="Only normalize countries")
     parser.add_argument("--states-only", action="store_true", help="Only normalize states")
     parser.add_argument("--infer-only", action="store_true", help="Only run location inference")
+    parser.add_argument("--enrich-only", action="store_true", help="Only run address enrichment (state/city)")
 
     args = parser.parse_args()
 
@@ -116,6 +130,7 @@ def main():
         countries_only=args.countries_only,
         states_only=args.states_only,
         infer_only=args.infer_only,
+        enrich_only=args.enrich_only,
     ))
 
 

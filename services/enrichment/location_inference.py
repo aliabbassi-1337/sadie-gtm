@@ -654,3 +654,247 @@ def infer_location(
             inferred_state = infer_au_state_from_address(address)
 
     return best_country, inferred_state, confidence
+
+
+# ============================================================================
+# UK postcode area -> county mapping
+# ============================================================================
+
+# UK postcode format: A9 9AA, A99 9AA, A9A 9AA, AA9 9AA, AA99 9AA, AA9A 9AA
+_UK_POSTCODE = re.compile(
+    r'\b([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})\b', re.IGNORECASE
+)
+
+UK_POSTCODE_TO_COUNTY = {
+    # England
+    'B': 'West Midlands', 'BA': 'Somerset', 'BB': 'Lancashire',
+    'BD': 'West Yorkshire', 'BH': 'Dorset', 'BL': 'Greater Manchester',
+    'BN': 'East Sussex', 'BR': 'Greater London', 'BS': 'Somerset',
+    'CA': 'Cumbria', 'CB': 'Cambridgeshire', 'CH': 'Cheshire',
+    'CM': 'Essex', 'CO': 'Essex', 'CR': 'Greater London',
+    'CT': 'Kent', 'CV': 'Warwickshire', 'CW': 'Cheshire',
+    'DA': 'Kent', 'DE': 'Derbyshire', 'DH': 'Durham',
+    'DL': 'North Yorkshire', 'DN': 'South Yorkshire', 'DT': 'Dorset',
+    'DY': 'West Midlands', 'E': 'Greater London', 'EC': 'Greater London',
+    'EN': 'Hertfordshire', 'EX': 'Devon', 'FY': 'Lancashire',
+    'GL': 'Gloucestershire', 'GU': 'Surrey', 'HA': 'Greater London',
+    'HD': 'West Yorkshire', 'HG': 'North Yorkshire', 'HP': 'Buckinghamshire',
+    'HR': 'Herefordshire', 'HU': 'East Yorkshire', 'HX': 'West Yorkshire',
+    'IG': 'Greater London', 'IP': 'Suffolk', 'KT': 'Surrey',
+    'L': 'Merseyside', 'LA': 'Lancashire', 'LE': 'Leicestershire',
+    'LN': 'Lincolnshire', 'LS': 'West Yorkshire', 'LU': 'Bedfordshire',
+    'M': 'Greater Manchester', 'ME': 'Kent', 'MK': 'Buckinghamshire',
+    'N': 'Greater London', 'NE': 'Northumberland', 'NG': 'Nottinghamshire',
+    'NN': 'Northamptonshire', 'NR': 'Norfolk', 'NW': 'Greater London',
+    'OL': 'Greater Manchester', 'OX': 'Oxfordshire', 'PE': 'Cambridgeshire',
+    'PL': 'Devon', 'PO': 'Hampshire', 'PR': 'Lancashire',
+    'RG': 'Berkshire', 'RH': 'Surrey', 'RM': 'Greater London',
+    'S': 'South Yorkshire', 'SE': 'Greater London', 'SG': 'Hertfordshire',
+    'SK': 'Cheshire', 'SL': 'Berkshire', 'SM': 'Greater London',
+    'SN': 'Wiltshire', 'SO': 'Hampshire', 'SP': 'Wiltshire',
+    'SR': 'Tyne and Wear', 'SS': 'Essex', 'ST': 'Staffordshire',
+    'SW': 'Greater London', 'SY': 'Shropshire', 'TA': 'Somerset',
+    'TF': 'Shropshire', 'TN': 'Kent', 'TQ': 'Devon',
+    'TR': 'Cornwall', 'TS': 'North Yorkshire', 'TW': 'Greater London',
+    'UB': 'Greater London', 'W': 'Greater London', 'WA': 'Cheshire',
+    'WC': 'Greater London', 'WD': 'Hertfordshire', 'WF': 'West Yorkshire',
+    'WN': 'Greater Manchester', 'WR': 'Worcestershire', 'WS': 'Staffordshire',
+    'WV': 'West Midlands', 'YO': 'North Yorkshire',
+    # Bristol (technically its own county)
+    'BS': 'Somerset',
+    # Scotland
+    'AB': 'Aberdeenshire', 'DD': 'Angus', 'DG': 'Dumfries and Galloway',
+    'EH': 'Lothian', 'FK': 'Stirlingshire', 'G': 'Glasgow',
+    'HS': 'Western Isles', 'IV': 'Highland', 'KA': 'Ayrshire',
+    'KW': 'Highland', 'KY': 'Fife', 'ML': 'Lanarkshire',
+    'PA': 'Argyll and Bute', 'PH': 'Perthshire', 'TD': 'Scottish Borders',
+    'ZE': 'Shetland',
+    # Wales
+    'CF': 'South Glamorgan', 'LD': 'Powys', 'LL': 'Gwynedd',
+    'NP': 'Gwent', 'SA': 'Carmarthenshire', 'SY': 'Shropshire',
+    # Northern Ireland
+    'BT': 'Northern Ireland',
+    # Crown Dependencies
+    'GY': 'Guernsey', 'JE': 'Jersey', 'IM': 'Isle of Man',
+}
+
+# Known UK counties for matching in address text (includes historic + current)
+UK_COUNTIES = {
+    # English counties
+    'Bedfordshire', 'Berkshire', 'Bristol', 'Buckinghamshire', 'Cambridgeshire',
+    'Cheshire', 'Cornwall', 'Cumbria', 'Derbyshire', 'Devon', 'Dorset',
+    'Durham', 'East Sussex', 'East Yorkshire', 'Essex', 'Gloucestershire',
+    'Greater London', 'Greater Manchester', 'Hampshire', 'Herefordshire',
+    'Hertfordshire', 'Isle of Wight', 'Kent', 'Lancashire', 'Leicestershire',
+    'Lincolnshire', 'Merseyside', 'Norfolk', 'North Yorkshire',
+    'Northamptonshire', 'Northumberland', 'Nottinghamshire', 'Oxfordshire',
+    'Rutland', 'Shropshire', 'Somerset', 'South Yorkshire', 'Staffordshire',
+    'Suffolk', 'Surrey', 'Tyne and Wear', 'Warwickshire', 'West Midlands',
+    'West Sussex', 'West Yorkshire', 'Wiltshire', 'Worcestershire',
+    # Scottish regions
+    'Aberdeenshire', 'Angus', 'Argyll and Bute', 'Ayrshire',
+    'Dumfries and Galloway', 'Dumfries & Galloway',
+    'Fife', 'Glasgow', 'Highland', 'Highlands',
+    'Lanarkshire', 'Lothian', 'Moray', 'Perthshire',
+    'Scottish Borders', 'Stirlingshire', 'Shetland', 'Western Isles',
+    # Welsh counties
+    'Carmarthenshire', 'Ceredigion', 'Conwy', 'Denbighshire', 'Flintshire',
+    'Gwent', 'Gwynedd', 'Monmouthshire', 'Pembrokeshire', 'Powys',
+    'South Glamorgan', 'Vale of Glamorgan', 'West Glamorgan',
+    # Northern Ireland
+    'Antrim', 'Armagh', 'Down', 'Fermanagh', 'Londonderry', 'Tyrone',
+    'Northern Ireland',
+    # Constituent countries (used as state too)
+    'England', 'Scotland', 'Wales',
+}
+
+# Major UK cities for extraction from address
+_UK_MAJOR_CITIES = {
+    'London', 'Manchester', 'Birmingham', 'Leeds', 'Glasgow', 'Liverpool',
+    'Edinburgh', 'Bristol', 'Sheffield', 'Newcastle', 'Nottingham',
+    'Cardiff', 'Belfast', 'Leicester', 'Brighton', 'Plymouth', 'Southampton',
+    'Portsmouth', 'Oxford', 'Cambridge', 'York', 'Bath', 'Canterbury',
+    'Exeter', 'Chester', 'Durham', 'Aberdeen', 'Dundee', 'Inverness',
+    'Swansea', 'Newport', 'Bournemouth', 'Reading', 'Norwich', 'Ipswich',
+    'Derby', 'Coventry', 'Wolverhampton', 'Sunderland', 'Blackpool',
+    'Harrogate', 'Scarborough', 'Whitby', 'Windermere', 'Keswick',
+    'Torquay', 'Penzance', 'Stratford-upon-Avon', 'Stratford upon Avon',
+}
+
+# Build a regex that matches any UK county in text (longest first to match multi-word first)
+_UK_COUNTY_PATTERN = re.compile(
+    r'\b(' + '|'.join(
+        re.escape(c) for c in sorted(UK_COUNTIES, key=len, reverse=True)
+    ) + r')\b',
+    re.IGNORECASE
+)
+
+# Strip country suffixes from RMS addresses
+_COUNTRY_SUFFIX = re.compile(
+    r',?\s*(?:United\s*Kingdom|UnitedKingdom|England|Scotland|Wales|UK)\s*$',
+    re.IGNORECASE
+)
+
+
+def extract_uk_state_city_from_address(address: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extract county (state) and city from a UK address.
+
+    Strategy:
+    1. Strip country from end of address
+    2. Find UK postcode -> map area to county
+    3. Look for explicit county name in text (overrides postcode)
+    4. Try to extract city from address parts
+    """
+    if not address:
+        return None, None
+
+    # Strip country suffix
+    cleaned = _COUNTRY_SUFFIX.sub('', address).strip().rstrip(',').strip()
+
+    county = None
+    city = None
+
+    # 1. Try explicit county name in address
+    county_match = _UK_COUNTY_PATTERN.search(cleaned)
+    if county_match:
+        # Normalize county name to title case from our set
+        matched = county_match.group(1)
+        for c in UK_COUNTIES:
+            if c.lower() == matched.lower():
+                county = c
+                break
+
+    # 2. Fallback: UK postcode area -> county
+    postcode_match = _UK_POSTCODE.search(cleaned)
+    if not county and postcode_match:
+        area = postcode_match.group(1).upper()
+        # Try 2-letter area first, then 1-letter
+        county = UK_POSTCODE_TO_COUNTY.get(area[:2]) or UK_POSTCODE_TO_COUNTY.get(area[0])
+
+    # 3. Extract city
+    # Remove postcode from text for cleaner parsing
+    text_for_city = cleaned
+    if postcode_match:
+        text_for_city = cleaned[:postcode_match.start()].strip().rstrip(',').strip()
+
+    # Remove county name from text
+    if county:
+        text_for_city = re.sub(re.escape(county), '', text_for_city, flags=re.IGNORECASE).strip().rstrip(',').strip()
+
+    # Check for major city names anywhere in original address
+    for city_name in _UK_MAJOR_CITIES:
+        if re.search(r'\b' + re.escape(city_name) + r'\b', cleaned, re.IGNORECASE):
+            city = city_name
+            break
+
+    # If no major city found, take the last comma-separated part as city candidate
+    if not city and text_for_city:
+        parts = [p.strip() for p in text_for_city.split(',') if p.strip()]
+        if parts:
+            candidate = parts[-1].strip()
+            # Skip if it looks like a street address (has numbers at start)
+            if candidate and not re.match(r'^\d', candidate) and len(candidate) > 2:
+                # Clean up common prefixes
+                candidate = re.sub(r'^(?:Nr|Near)\s+', '', candidate, flags=re.IGNORECASE).strip()
+                if candidate and len(candidate) > 2:
+                    city = candidate
+
+    # If county is Greater London, set city to London
+    if county == 'Greater London' and not city:
+        city = 'London'
+
+    return county, city
+
+
+def extract_au_city_from_address(address: str) -> Optional[str]:
+    """Extract city/town from an Australian address.
+
+    AU addresses: "<street>, <suburb/city>, <STATE> <postcode>"
+    """
+    if not address:
+        return None
+
+    # Strip country
+    cleaned = re.sub(r',?\s*(?:Australia)\s*$', '', address, flags=re.IGNORECASE).strip()
+
+    # Remove postcode and state abbreviation at end
+    cleaned = re.sub(
+        r',?\s*(?:' + '|'.join(AU_STATES.keys()) + r')\s+\d{4}\s*$',
+        '', cleaned, flags=re.IGNORECASE
+    ).strip().rstrip(',').strip()
+
+    if not cleaned:
+        return None
+
+    # Take last comma-separated part as city
+    parts = [p.strip() for p in cleaned.split(',') if p.strip()]
+    if parts:
+        candidate = parts[-1].strip()
+        if candidate and not re.match(r'^\d', candidate) and len(candidate) > 2:
+            return candidate
+
+    return None
+
+
+def extract_state_city_from_address(
+    address: Optional[str], country: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Extract state and city from address based on country.
+
+    Returns:
+        (state, city) — either or both may be None
+    """
+    if not address or not country:
+        return None, None
+
+    if country == 'United Kingdom':
+        return extract_uk_state_city_from_address(address)
+
+    if country == 'Australia':
+        state = infer_state_from_au_state_in_address(address)
+        if not state:
+            state = infer_au_state_from_address(address)
+        city = extract_au_city_from_address(address)
+        return state, city
+
+    return None, None
