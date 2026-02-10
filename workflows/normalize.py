@@ -3,12 +3,12 @@ Workflow: Normalize Location Data
 =================================
 Unified normalization job that runs:
   1. Country code/variation normalization (AU -> Australia, USA -> United States)
-  2. State abbreviation normalization (CA -> California, NSW -> New South Wales)
-  3. Location inference (fix misclassified hotels using TLD, phone, address signals)
+  2. Location inference (fix misclassified hotels using TLD, phone, address signals)
+  3. State abbreviation normalization (CA -> California, NSW -> New South Wales)
   4. Address enrichment (extract state/city from address text)
   5. City→state inference (infer state from city using self-referencing data)
 
-Order matters: countries must be normalized before states, and both before inference.
+Order matters: all country-changing steps (1, 2) run before state normalization (3).
 
 USAGE:
     # Dry run (show what would be fixed)
@@ -51,7 +51,7 @@ async def run(
     enrich_only: bool = False,
     city_state_only: bool = False,
 ):
-    """Run normalization: countries -> states -> inference -> address enrichment -> city-state."""
+    """Run normalization: countries -> inference -> states -> address enrichment -> city-state."""
     await init_db()
 
     try:
@@ -79,21 +79,21 @@ async def run(
             logger.info("=" * 50)
             country_result = await service.normalize_countries_bulk(dry_run=dry_run)
 
-        # Step 2: Normalize states (must run after countries)
-        if run_states:
-            logger.info("")
-            logger.info("=" * 50)
-            logger.info("STEP 2: STATE NORMALIZATION")
-            logger.info("=" * 50)
-            state_result = await service.normalize_states_bulk(dry_run=dry_run)
-
-        # Step 3: Infer and fix misclassified locations
+        # Step 2: Infer and fix misclassified locations (also changes countries)
         if run_infer:
             logger.info("")
             logger.info("=" * 50)
-            logger.info("STEP 3: LOCATION INFERENCE")
+            logger.info("STEP 2: LOCATION INFERENCE")
             logger.info("=" * 50)
             infer_result = await service.infer_locations_bulk(dry_run=dry_run)
+
+        # Step 3: Normalize states (runs after ALL country-changing steps)
+        if run_states:
+            logger.info("")
+            logger.info("=" * 50)
+            logger.info("STEP 3: STATE NORMALIZATION")
+            logger.info("=" * 50)
+            state_result = await service.normalize_states_bulk(dry_run=dry_run)
 
         # Step 4: Enrich state/city from address text
         if run_enrich:
