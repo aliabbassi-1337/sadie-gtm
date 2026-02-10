@@ -133,7 +133,7 @@ async def fetch_page_raw(client: httpx.AsyncClient, url: str) -> str:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         }
-        resp = await client.get(url, timeout=15.0, follow_redirects=True, headers=headers)
+        resp = await client.get(url, timeout=45.0, follow_redirects=True, headers=headers)
         if resp.status_code != 200:
             return ""
         return resp.text
@@ -252,6 +252,7 @@ async def fetch_sitemap_links(client: httpx.AsyncClient, base_url: str) -> List[
 async def fetch_and_extract_room_count(client: httpx.AsyncClient, website: str) -> Tuple[Optional[int], str]:
     """
     Fetch hotel website pages and try to extract room count.
+    Fetches homepage + sitemap concurrently, then all subpages concurrently.
     Returns (room_count, all_text) - room_count is None if not found via regex.
     """
     # Normalize URL
@@ -259,60 +260,58 @@ async def fetch_and_extract_room_count(client: httpx.AsyncClient, website: str) 
         website = "https://" + website
     base_url = website.rstrip('/')
 
-    all_html = []
-    checked_urls = set()
-    all_links = []
+    # 1. Fetch homepage + sitemap concurrently
+    homepage_task = fetch_page_raw(client, website)
+    sitemap_task = fetch_sitemap_links(client, website)
+    homepage_html, sitemap_links = await asyncio.gather(homepage_task, sitemap_task)
 
-    # 1. Try homepage first
-    homepage_html = await fetch_page_raw(client, website)
+    # Check homepage regex immediately
     if homepage_html:
-        all_html.append(homepage_html)
-        checked_urls.add(base_url)
-        checked_urls.add(base_url + '/')
-
-        # Try regex on homepage
         count = extract_room_count_regex(homepage_html)
         if count:
             return count, html_to_text(homepage_html)
 
-        # Discover ALL internal links from homepage
+    # 2. Collect all subpage URLs to fetch
+    checked_urls = {base_url, base_url + '/'}
+    all_links = []
+    if homepage_html:
         all_links = find_all_internal_links(homepage_html, website)
-
-    # 2. Try sitemap.xml for more pages
-    sitemap_links = await fetch_sitemap_links(client, website)
     for link in sitemap_links:
         if link not in all_links:
             all_links.append(link)
 
-    # 3. Prioritize room-related links first
+    # Prioritize room-related links and deduplicate
     prioritized_links = prioritize_room_links(all_links)
-
-    # 4. Check prioritized links (limit to avoid hammering server)
-    max_pages = 15
-    pages_checked = 0
-
+    urls_to_fetch = []
     for link_url in prioritized_links:
-        if pages_checked >= max_pages:
+        if len(urls_to_fetch) >= 15:
             break
-
-        # Normalize URL for comparison
         normalized = link_url.rstrip('/')
-        if normalized in checked_urls or normalized + '/' in checked_urls:
-            continue
-        checked_urls.add(normalized)
-        pages_checked += 1
+        if normalized not in checked_urls and normalized + '/' not in checked_urls:
+            checked_urls.add(normalized)
+            urls_to_fetch.append(link_url)
 
-        page_html = await fetch_page_raw(client, link_url)
-        if page_html and len(page_html) > 500:
-            all_html.append(page_html)
-            count = extract_room_count_regex(page_html)
-            if count:
-                short_path = urlparse(link_url).path or '/'
-                log(f"    Found via regex on {short_path}: {count} rooms")
-                return count, html_to_text(page_html)
+    # 3. Fetch ALL subpages concurrently
+    if urls_to_fetch:
+        subpage_results = await asyncio.gather(
+            *[fetch_page_raw(client, url) for url in urls_to_fetch]
+        )
+
+        # Check regex on each result
+        for link_url, page_html in zip(urls_to_fetch, subpage_results):
+            if page_html and len(page_html) > 500:
+                count = extract_room_count_regex(page_html)
+                if count:
+                    short_path = urlparse(link_url).path or '/'
+                    log(f"    Found via regex on {short_path}: {count} rooms")
+                    return count, html_to_text(page_html)
+    else:
+        subpage_results = []
 
     # No regex match found - return all text for LLM fallback
-    combined_text = "\n\n".join(html_to_text(h) for h in all_html if h)
+    all_html = [homepage_html] if homepage_html else []
+    all_html.extend(h for h in subpage_results if h and len(h) > 500)
+    combined_text = "\n\n".join(html_to_text(h) for h in all_html)
     return None, combined_text
 
 
