@@ -2829,64 +2829,55 @@ class Service(IService):
         """Infer and fix country/state for misclassified or missing hotels.
 
         Uses TLD, phone prefix, and address patterns to infer the correct
-        country and state. Processes:
-        1. Hotels currently classified as "United States" that have non-US signals
-        2. Hotels with NULL country that have inferable signals
+        country and state. Fetches ALL hotels with signals in a single query,
+        then processes in memory. When the inferred country differs from current,
+        also extracts the correct state for the new country (or NULLs the old one).
 
-        All fixes are applied in a single batch UPDATE within one transaction.
+        All fixes are applied in a single batch UPDATE.
 
         Returns:
             dict with 'country_fixes' count and 'state_fixes' count
         """
         from services.enrichment.location_inference import infer_location
 
-        details = {}  # country -> count
         all_fixes = []
 
-        for source_country in ["United States", None]:
-            include_null = source_country is None
-            label = source_country or "NULL country"
+        # Single query — fetch all hotels with at least one signal
+        rows = await repo.get_all_hotels_for_location_inference(conn=conn)
+        logger.info(f"Scanning {len(rows)} hotels with signals...")
 
-            rows = await repo.get_hotels_for_location_inference(
-                country=source_country or "", include_null=include_null, conn=conn,
+        for row in rows:
+            inferred_country, inferred_state, confidence = infer_location(
+                website=row["website"],
+                phone_google=row["phone_google"],
+                phone_website=row["phone_website"],
+                address=row["address"],
+                current_country=row["country"],
+                current_state=row["state"],
             )
 
-            if not rows:
+            if not inferred_country:
+                continue
+            if inferred_country == row["country"]:
+                continue
+            if inferred_country == "US/CA":
+                continue
+            if confidence < 0.5:
                 continue
 
-            logger.info(f"Scanning {len(rows)} hotels with country={label}...")
-
-            for row in rows:
-                inferred_country, inferred_state, confidence = infer_location(
-                    website=row["website"],
-                    phone_google=row["phone_google"],
-                    phone_website=row["phone_website"],
-                    address=row["address"],
-                    current_country=row["country"],
-                    current_state=row["state"],
-                )
-
-                if not inferred_country:
-                    continue
-                if source_country == "United States" and inferred_country == "United States":
-                    continue
-                if inferred_country == "US/CA":
-                    continue
-                if confidence < 0.5:
-                    continue
-
-                all_fixes.append({
-                    "id": row["id"],
-                    "new_country": inferred_country,
-                    "new_state": inferred_state,
-                    "confidence": confidence,
-                })
+            all_fixes.append({
+                "id": row["id"],
+                "new_country": inferred_country,
+                "new_state": inferred_state,
+                "confidence": confidence,
+            })
 
         if not all_fixes:
             logger.info("No location fixes needed")
             return {"country_fixes": 0, "state_fixes": 0, "details": {}}
 
         # Log summary by inferred country
+        details = {}
         by_country = {}
         for fix in all_fixes:
             c = fix["new_country"]
@@ -2945,6 +2936,14 @@ class Service(IService):
 
             for row in rows:
                 state, city = extract_state_city_from_address(row['address'], country)
+
+                # Reject garbage cities (LLM hallucinations, booking instructions, site names)
+                if city and (
+                    len(city) > 40
+                    or '(' in city
+                    or re.search(r'\b(the|a|an|our|is|has|are|was|and|club|site|resort|hotel|motel|park|camping)\b', city, re.I)
+                ):
+                    city = None
 
                 need_state = state and not row['state']
                 need_city = city and not row['city']
@@ -3336,6 +3335,24 @@ class Service(IService):
             logger.success(f"Inferred state from city for {len(ids)} hotels")
 
         return {"total_missing": len(missing_rows), "matched": len(ids), "updated": len(ids) if not dry_run else 0}
+
+    async def cleanup_garbage_cities(self, dry_run: bool = False, conn=None) -> dict:
+        """NULL out city values that are LLM hallucinations (long sentences).
+
+        Detects cities >30 chars containing common English articles/prepositions,
+        which are telltale signs of hallucinated text from LLM extraction.
+
+        Returns:
+            dict with 'cleaned' count
+        """
+        count = await repo.cleanup_garbage_cities(dry_run=dry_run, conn=conn)
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would clean {count} garbage city values")
+        elif count > 0:
+            logger.success(f"Cleaned {count} garbage city values")
+        else:
+            logger.info("No garbage cities found")
+        return {"cleaned": count}
 
     def send_normalize_trigger(self):
         """Send a normalization trigger message to SQS.

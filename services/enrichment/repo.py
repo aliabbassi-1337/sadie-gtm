@@ -1270,11 +1270,19 @@ async def count_hotels_by_country_values(old_values: List[str], conn=None) -> Di
 
 
 async def batch_update_country_values(old_values: List[str], new_values: List[str], conn=None) -> int:
-    """Batch rename country values. Returns count of updated rows."""
+    """Batch rename country values. Returns count of updated rows.
+
+    Uses inline SQL — aiosql sorts params alphabetically which swaps
+    old_values/new_values in unnest.
+    """
+    _SQL = """
+        UPDATE sadie_gtm.hotels h
+        SET country = m.new_value, updated_at = NOW()
+        FROM unnest($1::text[], $2::text[]) AS m(old_value, new_value)
+        WHERE h.country = m.old_value
+    """
     async def _run(c):
-        return await queries.batch_update_country_values(
-            c, old_values=old_values, new_values=new_values,
-        )
+        return await c.execute(_SQL, old_values, new_values)
     if conn:
         return _parse_update_count(await _run(conn))
     async with get_conn() as c:
@@ -1314,11 +1322,19 @@ async def batch_null_global_junk_states(junk_values: List[str], conn=None) -> in
 
 
 async def batch_update_state_values(country: str, old_states: List[str], new_states: List[str], conn=None) -> int:
-    """Batch rename state abbreviations to full names for a country."""
+    """Batch rename state abbreviations to full names for a country.
+
+    Uses inline SQL — aiosql sorts params alphabetically which breaks
+    unnest($1, $2) when param names don't sort in positional order.
+    """
+    _SQL = """
+        UPDATE sadie_gtm.hotels h
+        SET state = m.new_state, updated_at = NOW()
+        FROM unnest($1::text[], $2::text[]) AS m(old_state, new_state)
+        WHERE h.country = $3 AND h.state = m.old_state
+    """
     async def _run(c):
-        return await queries.batch_update_state_values(
-            c, country=country, old_states=old_states, new_states=new_states,
-        )
+        return await c.execute(_SQL, old_states, new_states, country)
     if conn:
         return _parse_update_count(await _run(conn))
     async with get_conn() as c:
@@ -1352,11 +1368,25 @@ async def get_hotels_for_location_inference(country: str, include_null: bool, co
 
 
 async def batch_fix_hotel_locations(ids: List[int], countries: List[str], states: List[str], conn=None) -> int:
-    """Batch update country and state for multiple hotels by ID."""
+    """Batch update country and state for multiple hotels by ID.
+
+    Uses inline SQL — aiosql sorts params alphabetically which breaks
+    unnest positional params.
+    """
+    _SQL = """
+        UPDATE sadie_gtm.hotels h
+        SET country = m.country,
+            state = CASE
+                WHEN m.state IS NULL THEN h.state
+                WHEN m.state = '' THEN NULL
+                ELSE m.state
+            END,
+            updated_at = NOW()
+        FROM unnest($1::bigint[], $2::text[], $3::text[]) AS m(id, country, state)
+        WHERE h.id = m.id
+    """
     async def _run(c):
-        return await queries.batch_fix_hotel_locations(
-            c, ids=ids, countries=countries, states=states,
-        )
+        return await c.execute(_SQL, ids, countries, states)
     if conn:
         return _parse_update_count(await _run(conn))
     async with get_conn() as c:
@@ -1376,15 +1406,84 @@ async def get_hotels_for_address_enrichment(country: str, conn=None) -> list:
 
 
 async def batch_enrich_hotel_state_city(ids: List[int], states: List[str], cities: List[str], conn=None) -> int:
-    """Batch set state and city from address parsing."""
+    """Batch set state and city from address parsing.
+
+    Uses inline SQL — aiosql sorts params alphabetically which breaks
+    unnest positional params (cities, ids, states vs ids, states, cities).
+    """
+    _SQL = """
+        UPDATE sadie_gtm.hotels h
+        SET state = COALESCE(h.state, m.state),
+            city = COALESCE(h.city, m.city),
+            updated_at = NOW()
+        FROM unnest($1::bigint[], $2::text[], $3::text[]) AS m(id, state, city)
+        WHERE h.id = m.id
+          AND (h.state IS NULL OR h.city IS NULL)
+    """
     async def _run(c):
-        return await queries.batch_enrich_hotel_state_city(
-            c, ids=ids, states=states, cities=cities,
-        )
+        return await c.execute(_SQL, ids, states, cities)
     if conn:
         return _parse_update_count(await _run(conn))
     async with get_conn() as c:
         return _parse_update_count(await _run(c))
+
+
+# -- Inference helpers --
+
+async def get_all_hotels_for_location_inference(conn=None) -> list:
+    """Get ALL hotels with signals for location inference (single query)."""
+    async def _run(c):
+        return await queries.get_all_hotels_for_location_inference(c)
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
+
+
+async def get_all_countries(conn=None) -> list:
+    """Get all distinct non-null country values."""
+    async def _run(c):
+        return await c.fetch(
+            "SELECT DISTINCT country FROM sadie_gtm.hotels WHERE country IS NOT NULL ORDER BY country"
+        )
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
+
+
+async def cleanup_garbage_cities(dry_run: bool = False, conn=None) -> int:
+    """NULL out city values that are clearly LLM hallucinations.
+
+    Catches two patterns:
+    1. Long sentences (>30 chars) with articles/prepositions
+    2. Short phrases starting with articles that contain prepositions
+       (e.g. "the heart of", "a myriad of", "our peaceful pond")
+    """
+    _GARBAGE_CITY_SQL = """
+        (
+            length(city) > 30
+            AND city ~ '\\y(of|the|is|has|are|was|were|an|in|on|at|for|with|by|to|our|while|that|and)\\y'
+        )
+        OR (
+            city ~* '^(the|a|an|our|in|on|at) '
+            AND city ~ '\\y(of|is|has|are|was|were|at|for|with|by|to|our|while|that|and|on|in)\\y'
+        )
+    """
+    async def _run(c):
+        if dry_run:
+            rows = await c.fetch(f"SELECT count(*) as cnt FROM sadie_gtm.hotels WHERE {_GARBAGE_CITY_SQL}")
+            return rows[0]["cnt"]
+        result = await c.execute(f"""
+            UPDATE sadie_gtm.hotels
+            SET city = NULL, updated_at = NOW()
+            WHERE {_GARBAGE_CITY_SQL}
+        """)
+        return _parse_update_count(result)
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
 
 
 # -- City -> State inference --

@@ -63,6 +63,14 @@ WHERE (
 ORDER BY id;
 
 
+-- name: get_all_hotels_for_location_inference
+-- Get ALL hotels with at least one signal for location inference (single query)
+SELECT id, name, website, phone_google, phone_website, address, city, state, country
+FROM sadie_gtm.hotels
+WHERE website IS NOT NULL OR phone_google IS NOT NULL OR phone_website IS NOT NULL OR address IS NOT NULL
+ORDER BY country NULLS LAST, id;
+
+
 -- name: fix_hotel_country_and_state!
 -- Update a hotel's country and state based on inference
 UPDATE sadie_gtm.hotels
@@ -134,11 +142,17 @@ WHERE country = :country AND state = ANY(:old_states::text[]);
 
 
 -- name: batch_fix_hotel_locations!
--- Batch update country and optionally state for multiple hotels by ID
--- Pass NULL for state entries that should keep their existing value
+-- Batch update country and state for multiple hotels by ID
+-- NULL state  -> keep existing value
+-- Empty ''    -> set state to NULL (old state belongs to old country)
+-- Non-empty   -> set state to new value
 UPDATE sadie_gtm.hotels h
 SET country = m.country,
-    state = COALESCE(m.state, h.state),
+    state = CASE
+        WHEN m.state IS NULL THEN h.state
+        WHEN m.state = '' THEN NULL
+        ELSE m.state
+    END,
     updated_at = NOW()
 FROM unnest(:ids::bigint[], :countries::text[], :states::text[]) AS m(id, country, state)
 WHERE h.id = m.id;

@@ -50,8 +50,9 @@ async def run(
     infer_only: bool = False,
     enrich_only: bool = False,
     city_state_only: bool = False,
+    cleanup_only: bool = False,
 ):
-    """Run normalization: countries -> inference -> states -> address enrichment -> city-state."""
+    """Run normalization: countries -> inference -> states -> address enrichment -> city-state -> cleanup."""
     await init_db()
 
     try:
@@ -62,8 +63,9 @@ async def run(
         infer_result = {"country_fixes": 0, "state_fixes": 0}
         enrich_result = {"state_fixes": 0, "city_fixes": 0}
         city_state_result = {"total_missing": 0, "matched": 0, "updated": 0}
+        cleanup_result = {"cleaned": 0}
 
-        only_flags = [countries_only, states_only, infer_only, enrich_only, city_state_only]
+        only_flags = [countries_only, states_only, infer_only, enrich_only, city_state_only, cleanup_only]
         any_only = any(only_flags)
 
         run_countries = not any_only or countries_only
@@ -71,6 +73,7 @@ async def run(
         run_infer = not any_only or infer_only
         run_enrich = not any_only or enrich_only
         run_city_state = not any_only or city_state_only
+        run_cleanup = not any_only or cleanup_only
 
         # Single connection for the entire pipeline — ensures reads see prior writes
         # (Supabase pooler may route different connections to different backends)
@@ -115,6 +118,14 @@ async def run(
                 logger.info("=" * 50)
                 city_state_result = await service.infer_state_from_city_bulk(dry_run=dry_run, conn=conn)
 
+            # Step 6: Clean up garbage city values (LLM hallucinations)
+            if run_cleanup:
+                logger.info("")
+                logger.info("=" * 50)
+                logger.info("STEP 6: GARBAGE CITY CLEANUP")
+                logger.info("=" * 50)
+                cleanup_result = await service.cleanup_garbage_cities(dry_run=dry_run, conn=conn)
+
         # Summary
         logger.info("")
         logger.info("=" * 50)
@@ -126,12 +137,14 @@ async def run(
             logger.info(f"Inference: would fix {infer_result.get('country_fixes', 0)} countries, {infer_result.get('state_fixes', 0)} states")
             logger.info(f"Address enrichment: would enrich {enrich_result.get('state_fixes', 0)} states, {enrich_result.get('city_fixes', 0)} cities")
             logger.info(f"City→state: would infer {city_state_result.get('matched', 0)} states from city")
+            logger.info(f"Garbage cities: would clean {cleanup_result.get('cleaned', 0)} values")
         else:
             logger.info(f"Countries: fixed {country_result.get('total_fixed', 0)} hotels")
             logger.info(f"States: fixed {state_result.get('total_fixed', 0)} hotels")
             logger.info(f"Inference: fixed {infer_result.get('country_fixes', 0)} countries, {infer_result.get('state_fixes', 0)} states")
             logger.info(f"Address enrichment: enriched {enrich_result.get('state_fixes', 0)} states, {enrich_result.get('city_fixes', 0)} cities")
             logger.info(f"City→state: inferred {city_state_result.get('matched', 0)} states from city")
+            logger.info(f"Garbage cities: cleaned {cleanup_result.get('cleaned', 0)} values")
 
     finally:
         await close_db()
@@ -145,6 +158,7 @@ def main():
     parser.add_argument("--infer-only", action="store_true", help="Only run location inference")
     parser.add_argument("--enrich-only", action="store_true", help="Only run address enrichment (state/city)")
     parser.add_argument("--city-state-only", action="store_true", help="Only run city→state inference")
+    parser.add_argument("--cleanup-only", action="store_true", help="Only run garbage city cleanup")
 
     args = parser.parse_args()
 
@@ -158,6 +172,7 @@ def main():
         infer_only=args.infer_only,
         enrich_only=args.enrich_only,
         city_state_only=args.city_state_only,
+        cleanup_only=args.cleanup_only,
     ))
 
 
