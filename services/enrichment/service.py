@@ -2709,31 +2709,34 @@ class Service(IService):
 
             logger.info(f"[DRY-RUN] Would fix {total} hotels")
         else:
+            # Separate short transactions per pass to avoid Supabase pooler killing long txns
+            # Pass 1: ISO codes — single batch UPDATE
             async with get_transaction() as conn:
-                # Pass 1: ISO codes — single batch UPDATE
                 result = await queries.batch_update_country_values(
                     conn, old_values=list(COUNTRY_CODES.keys()), new_values=list(COUNTRY_CODES.values())
                 )
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    logger.info(f"  ISO country codes: {count} hotels")
-                total += count
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(f"  ISO country codes: {count} hotels")
+            total += count
 
-                # Pass 2: Variations — single batch UPDATE
+            # Pass 2: Variations — single batch UPDATE
+            async with get_transaction() as conn:
                 result = await queries.batch_update_country_values(
                     conn, old_values=list(COUNTRY_VARIATIONS.keys()), new_values=list(COUNTRY_VARIATIONS.values())
                 )
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    logger.info(f"  Country variations: {count} hotels")
-                total += count
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(f"  Country variations: {count} hotels")
+            total += count
 
-                # Pass 3: Garbage — single batch UPDATE
+            # Pass 3: Garbage — single batch UPDATE
+            async with get_transaction() as conn:
                 result = await queries.batch_null_country_values(conn, old_values=garbage_list)
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    logger.info(f"  Garbage -> NULL: {count} hotels")
-                total += count
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(f"  Garbage -> NULL: {count} hotels")
+            total += count
 
             logger.success(f"Normalized {total} country values")
 
@@ -2767,10 +2770,7 @@ class Service(IService):
         fixes_by_country = {}   # country -> {old_states: [], new_states: []}
         nulls_by_country = {}   # country -> [junk_states]
 
-        # Read + write in same transaction to avoid read replica lag
-        total_fixed = 0
-        junk_nulled = 0
-
+        # Phase 1: Read (short transaction, then release)
         async with get_transaction() as conn:
             for country_name, state_map in COUNTRY_STATE_MAPS.items():
                 rows = await queries.get_state_counts_for_country(conn, country=country_name)
@@ -2808,15 +2808,20 @@ class Service(IService):
                 if junk_states:
                     nulls_by_country[country_name] = junk_states
 
-            if not all_fixes:
-                logger.info("No state normalization needed")
-                return {"fixes": [], "total_fixed": 0}
+        if not all_fixes:
+            logger.info("No state normalization needed")
+            return {"fixes": [], "total_fixed": 0}
 
-            if dry_run:
-                would_fix = sum(c for _, _, _, c in all_fixes)
-                logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
-                return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
+        if dry_run:
+            would_fix = sum(c for _, _, _, c in all_fixes)
+            logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
+            return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
 
+        # Phase 2: Write (separate short transaction)
+        total_fixed = 0
+        junk_nulled = 0
+
+        async with get_transaction() as conn:
             # Global junk cleanup first (all countries)
             result = await queries.batch_null_global_junk_states(
                 conn, junk_values=GLOBAL_JUNK,
