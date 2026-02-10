@@ -234,6 +234,8 @@ SELECT
     be.name AS booking_engine_name,
     be.tier AS booking_engine_tier,
     hrc.room_count,
+    hrc.source AS room_count_source,
+    hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
@@ -268,6 +270,8 @@ SELECT
     hbe.booking_url,
     hbe.engine_property_id,
     hrc.room_count,
+    hrc.source AS room_count_source,
+    hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
@@ -302,6 +306,8 @@ SELECT
     hbe.booking_url,
     hbe.engine_property_id,
     hrc.room_count,
+    hrc.source AS room_count_source,
+    hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
@@ -336,6 +342,8 @@ SELECT
     hbe.booking_url,
     hbe.engine_property_id,
     hrc.room_count,
+    hrc.source AS room_count_source,
+    hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
@@ -371,6 +379,8 @@ SELECT
     hbe.booking_url,
     hbe.engine_property_id,
     hrc.room_count,
+    hrc.source AS room_count_source,
+    hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h
@@ -405,6 +415,8 @@ SELECT
     hbe.booking_url,
     hbe.engine_property_id,
     NULL::integer AS room_count,
+    NULL::text AS room_count_source,
+    NULL::numeric AS room_count_confidence,
     NULL::text AS nearest_customer_name,
     NULL::numeric AS nearest_customer_distance_km
 FROM sadie_gtm.hotels h

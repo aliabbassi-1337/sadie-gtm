@@ -36,6 +36,8 @@ class HotelLead(BaseModel):
 
     # Enrichment data
     room_count: Optional[int] = None
+    room_count_source: Optional[str] = None
+    room_count_confidence: Optional[Decimal] = None
     nearest_customer_name: Optional[str] = None
     nearest_customer_distance_km: Optional[Decimal] = None
 
