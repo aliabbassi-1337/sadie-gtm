@@ -650,12 +650,24 @@ def infer_location(
     best_country = max(country_votes, key=country_votes.get)
     confidence = country_votes[best_country] / sum(country_votes.values())
 
-    # Infer state if country is Australia
+    # Infer state from address for the inferred country
     inferred_state = None
-    if best_country == "Australia" and address:
-        inferred_state = infer_state_from_au_state_in_address(address)
-        if not inferred_state:
-            inferred_state = infer_au_state_from_address(address)
+    if address:
+        if best_country == "Australia":
+            inferred_state = infer_state_from_au_state_in_address(address)
+            if not inferred_state:
+                inferred_state = infer_au_state_from_address(address)
+        elif best_country == "United States":
+            inferred_state = extract_us_state_from_address(address)
+        elif best_country == "United Kingdom":
+            state, _ = extract_uk_state_city_from_address(address)
+            inferred_state = state
+
+    # If country changed and we couldn't infer state from address,
+    # NULL out the old state (it belongs to the old country)
+    if inferred_state is None and current_country and best_country != current_country:
+        # Use empty string as sentinel to signal "set state to NULL"
+        inferred_state = ""
 
     return best_country, inferred_state, confidence
 
