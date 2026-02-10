@@ -5,6 +5,8 @@ Unified normalization job that runs:
   1. Country code/variation normalization (AU -> Australia, USA -> United States)
   2. State abbreviation normalization (CA -> California, NSW -> New South Wales)
   3. Location inference (fix misclassified hotels using TLD, phone, address signals)
+  4. Address enrichment (extract state/city from address text)
+  5. City→state inference (infer state from city using self-referencing data)
 
 Order matters: countries must be normalized before states, and both before inference.
 
@@ -23,6 +25,9 @@ USAGE:
 
     # Inference only (fix misclassified countries using signals)
     uv run python -m workflows.normalize --infer-only
+
+    # City->state inference only
+    uv run python -m workflows.normalize --city-state-only
 """
 
 import sys
@@ -44,8 +49,9 @@ async def run(
     states_only: bool = False,
     infer_only: bool = False,
     enrich_only: bool = False,
+    city_state_only: bool = False,
 ):
-    """Run normalization: countries -> states -> inference -> address enrichment."""
+    """Run normalization: countries -> states -> inference -> address enrichment -> city-state."""
     await init_db()
 
     try:
@@ -55,11 +61,16 @@ async def run(
         state_result = {"total_fixed": 0}
         infer_result = {"country_fixes": 0, "state_fixes": 0}
         enrich_result = {"state_fixes": 0, "city_fixes": 0}
+        city_state_result = {"total_missing": 0, "matched": 0, "updated": 0}
 
-        run_countries = not states_only and not infer_only and not enrich_only
-        run_states = not countries_only and not infer_only and not enrich_only
-        run_infer = not countries_only and not states_only and not enrich_only
-        run_enrich = not countries_only and not states_only and not infer_only
+        only_flags = [countries_only, states_only, infer_only, enrich_only, city_state_only]
+        any_only = any(only_flags)
+
+        run_countries = not any_only or countries_only
+        run_states = not any_only or states_only
+        run_infer = not any_only or infer_only
+        run_enrich = not any_only or enrich_only
+        run_city_state = not any_only or city_state_only
 
         # Step 1: Normalize countries
         if run_countries:
@@ -92,6 +103,14 @@ async def run(
             logger.info("=" * 50)
             enrich_result = await service.enrich_state_city_from_address_bulk(dry_run=dry_run)
 
+        # Step 5: Infer state from city (self-referencing)
+        if run_city_state:
+            logger.info("")
+            logger.info("=" * 50)
+            logger.info("STEP 5: CITY→STATE INFERENCE")
+            logger.info("=" * 50)
+            city_state_result = await service.infer_state_from_city_bulk(dry_run=dry_run)
+
         # Summary
         logger.info("")
         logger.info("=" * 50)
@@ -102,11 +121,13 @@ async def run(
             logger.info(f"States: would fix {state_result.get('would_fix', state_result.get('total_fixed', 0))} hotels")
             logger.info(f"Inference: would fix {infer_result.get('country_fixes', 0)} countries, {infer_result.get('state_fixes', 0)} states")
             logger.info(f"Address enrichment: would enrich {enrich_result.get('state_fixes', 0)} states, {enrich_result.get('city_fixes', 0)} cities")
+            logger.info(f"City→state: would infer {city_state_result.get('matched', 0)} states from city")
         else:
             logger.info(f"Countries: fixed {country_result.get('total_fixed', 0)} hotels")
             logger.info(f"States: fixed {state_result.get('total_fixed', 0)} hotels")
             logger.info(f"Inference: fixed {infer_result.get('country_fixes', 0)} countries, {infer_result.get('state_fixes', 0)} states")
             logger.info(f"Address enrichment: enriched {enrich_result.get('state_fixes', 0)} states, {enrich_result.get('city_fixes', 0)} cities")
+            logger.info(f"City→state: inferred {city_state_result.get('matched', 0)} states from city")
 
     finally:
         await close_db()
@@ -119,6 +140,7 @@ def main():
     parser.add_argument("--states-only", action="store_true", help="Only normalize states")
     parser.add_argument("--infer-only", action="store_true", help="Only run location inference")
     parser.add_argument("--enrich-only", action="store_true", help="Only run address enrichment (state/city)")
+    parser.add_argument("--city-state-only", action="store_true", help="Only run city→state inference")
 
     args = parser.parse_args()
 
@@ -131,6 +153,7 @@ def main():
         states_only=args.states_only,
         infer_only=args.infer_only,
         enrich_only=args.enrich_only,
+        city_state_only=args.city_state_only,
     ))
 
 

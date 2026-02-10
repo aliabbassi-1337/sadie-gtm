@@ -80,6 +80,15 @@ SET country = :country,
 WHERE id = :hotel_id;
 
 
+-- name: batch_null_global_junk_states!
+-- NULL out globally invalid state values across ALL countries
+-- Catches: single chars, symbols, placeholder text, numeric-only values
+UPDATE sadie_gtm.hotels
+SET state = NULL, updated_at = NOW()
+WHERE state = ANY(:junk_values::text[])
+   OR length(trim(state)) <= 1;
+
+
 -- ============================================================================
 -- BATCH OPERATIONS
 -- These use unnest/ANY for bulk updates in a single SQL statement
@@ -161,3 +170,35 @@ SET state = COALESCE(h.state, m.state),
 FROM unnest(:ids::bigint[], :states::text[], :cities::text[]) AS m(id, state, city)
 WHERE h.id = m.id
   AND (h.state IS NULL OR h.city IS NULL);
+
+
+-- ============================================================================
+-- CITY -> STATE INFERENCE
+-- Infer state from city using self-referencing data
+-- ============================================================================
+
+
+-- name: get_city_state_reference_pairs
+-- Get distinct (city, country, state) triples for building a lookup dict
+SELECT DISTINCT lower(city) AS city_lower, country, state
+FROM sadie_gtm.hotels
+WHERE state IS NOT NULL AND state != ''
+  AND city IS NOT NULL AND city != '';
+
+
+-- name: get_hotels_missing_state_with_city
+-- Get hotels that have a city but no state
+SELECT id, city, country
+FROM sadie_gtm.hotels
+WHERE city IS NOT NULL AND city != ''
+  AND country IS NOT NULL AND country != ''
+  AND (state IS NULL OR state = '')
+ORDER BY id;
+
+
+-- name: batch_set_state_from_city!
+-- Batch set state inferred from city
+UPDATE sadie_gtm.hotels h
+SET state = m.state, updated_at = NOW()
+FROM unnest(:ids::bigint[], :states::text[]) AS m(id, state)
+WHERE h.id = m.id AND (h.state IS NULL OR h.state = '');

@@ -2750,6 +2750,13 @@ class Service(IService):
         """
         from db.client import queries, get_conn, get_transaction
 
+        # Global junk values that are never valid states in any country
+        GLOBAL_JUNK = [
+            '*', '-', '--', '.', '...', '/', 'N/A', 'n/a', 'NA', 'na',
+            'none', 'None', 'null', 'NULL', 'TBD', 'tbd',
+            'unknown', 'Unknown', 'UNKNOWN', 'test', 'Test', 'TEST',
+        ]
+
         COUNTRY_STATE_MAPS = {
             "United States": state_utils.US_STATES,
             "Australia": state_utils.AU_STATES,
@@ -2812,6 +2819,17 @@ class Service(IService):
         junk_nulled = 0
 
         async with get_transaction() as conn:
+            # Global junk cleanup first (all countries)
+            result = await queries.batch_null_global_junk_states(
+                conn, junk_values=GLOBAL_JUNK,
+            )
+            global_junk_count = int(result.split()[-1]) if result else 0
+            if global_junk_count:
+                junk_nulled += global_junk_count
+                total_fixed += global_junk_count
+                logger.info(f"  Global junk states: {global_junk_count} -> NULL")
+
+            # Per-country abbreviation expansion
             for country_name, fix_data in fixes_by_country.items():
                 result = await queries.batch_update_state_values(
                     conn, country=country_name,
@@ -2822,6 +2840,7 @@ class Service(IService):
                 total_fixed += count
                 logger.info(f"  {country_name} abbreviations: {count} hotels")
 
+            # Per-country junk cleanup (country-specific invalid states)
             for country_name, junk_list in nulls_by_country.items():
                 result = await queries.batch_null_state_values(
                     conn, country=country_name, old_states=junk_list,
@@ -2947,7 +2966,7 @@ class Service(IService):
         from db.client import queries, get_conn, get_transaction
         from services.enrichment.location_inference import extract_state_city_from_address
 
-        SUPPORTED_COUNTRIES = ['United Kingdom', 'Australia']
+        SUPPORTED_COUNTRIES = ['United Kingdom', 'Australia', 'United States']
 
         all_ids = []
         all_states = []
@@ -3296,3 +3315,78 @@ class Service(IService):
             logger.success(f"Updated {updated} hotels with extracted state")
         
         return {"total": len(hotels), "matched": len(updates), "updated": updated}
+
+    async def infer_state_from_city_bulk(self, dry_run: bool = False) -> dict:
+        """Infer missing state from city using self-referencing data.
+
+        Builds a lookup of (city, country) -> state from hotels that already
+        have both city and state. Only uses unambiguous mappings (one state
+        per city+country combo). Then applies to hotels missing state.
+
+        Returns:
+            dict with 'total_missing', 'matched', 'updated' counts
+        """
+        from db.client import queries, get_conn, get_transaction
+
+        # Step 1: Build reference lookup
+        async with get_conn() as conn:
+            ref_rows = await queries.get_city_state_reference_pairs(conn)
+
+        if not ref_rows:
+            logger.info("No city-state reference data found")
+            return {"total_missing": 0, "matched": 0, "updated": 0}
+
+        # Build {(city_lower, country): set(states)}
+        city_state_map: dict[tuple[str, str], set[str]] = {}
+        for row in ref_rows:
+            key = (row['city_lower'], row['country'])
+            city_state_map.setdefault(key, set()).add(row['state'])
+
+        # Filter to unambiguous only (skip Portland, Springfield, etc.)
+        unambiguous = {k: next(iter(v)) for k, v in city_state_map.items() if len(v) == 1}
+        ambiguous_count = sum(1 for v in city_state_map.values() if len(v) > 1)
+        logger.info(f"City-state lookup: {len(unambiguous)} unambiguous, {ambiguous_count} ambiguous (skipped)")
+
+        # Step 2: Get hotels missing state with city
+        async with get_conn() as conn:
+            missing_rows = await queries.get_hotels_missing_state_with_city(conn)
+
+        if not missing_rows:
+            logger.info("No hotels with city but missing state")
+            return {"total_missing": 0, "matched": 0, "updated": 0}
+
+        logger.info(f"Found {len(missing_rows)} hotels with city but no state")
+
+        # Step 3: Match against lookup
+        ids = []
+        states = []
+        for row in missing_rows:
+            key = (row['city'].lower(), row['country'])
+            state = unambiguous.get(key)
+            if state:
+                ids.append(row['id'])
+                states.append(state)
+
+        if not ids:
+            logger.info("No city-state matches found")
+            return {"total_missing": len(missing_rows), "matched": 0, "updated": 0}
+
+        logger.info(f"Matched {len(ids)} hotels to infer state from city")
+
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would set state for {len(ids)} hotels from city lookup")
+            # Show sample
+            for i in range(min(10, len(ids))):
+                row = missing_rows[[r['id'] for r in missing_rows].index(ids[i])]
+                logger.info(f"  {ids[i]}: {row['city']} ({row['country']}) -> {states[i]}")
+        else:
+            async with get_transaction() as conn:
+                result = await queries.batch_set_state_from_city(
+                    conn, ids=ids, states=states,
+                )
+                count = int(result.split()[-1]) if result else 0
+                logger.info(f"  Batch set state for {count} hotels")
+
+            logger.success(f"Inferred state from city for {len(ids)} hotels")
+
+        return {"total_missing": len(missing_rows), "matched": len(ids), "updated": len(ids) if not dry_run else 0}

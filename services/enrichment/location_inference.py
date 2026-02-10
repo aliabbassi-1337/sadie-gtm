@@ -876,6 +876,83 @@ def extract_au_city_from_address(address: str) -> Optional[str]:
     return None
 
 
+# ============================================================================
+# US address state extraction
+# ============================================================================
+
+# Match ", <STATE_ABBREV> <ZIP>" pattern (e.g. "Seward, AK 99664" or "Seward AK 99664-1234")
+_US_ADDR_STATE_ZIP = re.compile(r',?\s+([A-Z]{2})\s+\d{5}(?:-\d{4})?\b')
+
+# Match ", <STATE_ABBREV>" at end of address (e.g. "Seward, AK")
+_US_ADDR_STATE_END = re.compile(r',\s*([A-Z]{2})\s*$')
+
+
+def extract_us_state_from_address(address: str) -> Optional[str]:
+    """Extract US state from address using state abbreviation patterns.
+
+    Looks for:
+    - "City, ST 12345" or "City ST 12345" (state + zip)
+    - "City, ST" at end of address (state at end)
+
+    Validates extracted 2-letter code against US_STATES before returning.
+
+    Returns:
+        Full US state name or None
+    """
+    if not address:
+        return None
+
+    # Try state + zip pattern first (more specific)
+    match = _US_ADDR_STATE_ZIP.search(address)
+    if match:
+        abbrev = match.group(1).upper()
+        if abbrev in US_STATES:
+            return US_STATES[abbrev]
+
+    # Fallback: state abbreviation at end of address
+    match = _US_ADDR_STATE_END.search(address)
+    if match:
+        abbrev = match.group(1).upper()
+        if abbrev in US_STATES:
+            return US_STATES[abbrev]
+
+    return None
+
+
+def extract_us_city_from_address(address: str) -> Optional[str]:
+    """Extract city from a US address.
+
+    US addresses: "<street>, <city>, <ST> <zip>"
+    """
+    if not address:
+        return None
+
+    # Strip country suffix
+    cleaned = re.sub(
+        r',?\s*(?:United\s+States|USA|US)\s*$', '', address, flags=re.IGNORECASE
+    ).strip()
+
+    # Remove state + zip at end
+    cleaned = re.sub(
+        r',?\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\s*$', '', cleaned
+    ).strip().rstrip(',').strip()
+
+    # Remove trailing state abbreviation
+    cleaned = re.sub(r',\s*[A-Z]{2}\s*$', '', cleaned).strip().rstrip(',').strip()
+
+    if not cleaned:
+        return None
+
+    # Take last comma-separated part as city
+    parts = [p.strip() for p in cleaned.split(',') if p.strip()]
+    if parts:
+        candidate = parts[-1].strip()
+        if candidate and not re.match(r'^\d', candidate) and len(candidate) > 2:
+            return candidate
+
+    return None
+
+
 def extract_state_city_from_address(
     address: Optional[str], country: Optional[str]
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -895,6 +972,11 @@ def extract_state_city_from_address(
         if not state:
             state = infer_au_state_from_address(address)
         city = extract_au_city_from_address(address)
+        return state, city
+
+    if country == 'United States':
+        state = extract_us_state_from_address(address)
+        city = extract_us_city_from_address(address)
         return state, city
 
     return None, None
