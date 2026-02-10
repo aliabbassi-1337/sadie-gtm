@@ -136,3 +136,32 @@ SET country = m.country,
     updated_at = NOW()
 FROM unnest(:ids::bigint[], :countries::text[], :states::text[]) AS m(id, country, state)
 WHERE h.id = m.id AND h.status != -1;
+
+
+-- ============================================================================
+-- ADDRESS ENRICHMENT
+-- Extract state/city from address text
+-- ============================================================================
+
+
+-- name: get_hotels_for_address_enrichment
+-- Get hotels with address but missing state or city for a country
+SELECT id, address, city, state, country
+FROM sadie_gtm.hotels
+WHERE status != -1
+  AND address IS NOT NULL
+  AND country = :country
+  AND (state IS NULL OR city IS NULL)
+ORDER BY id;
+
+
+-- name: batch_enrich_hotel_state_city!
+-- Batch set state and city from address parsing
+-- Uses COALESCE to only fill in NULL fields (never overwrite existing values)
+UPDATE sadie_gtm.hotels h
+SET state = COALESCE(h.state, m.state),
+    city = COALESCE(h.city, m.city),
+    updated_at = NOW()
+FROM unnest(:ids::bigint[], :states::text[], :cities::text[]) AS m(id, state, city)
+WHERE h.id = m.id AND h.status != -1
+  AND (h.state IS NULL OR h.city IS NULL);

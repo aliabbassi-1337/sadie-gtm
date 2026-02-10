@@ -2932,6 +2932,77 @@ class Service(IService):
 
         return {"country_fixes": country_fixes, "state_fixes": state_fixes, "details": details}
 
+    async def enrich_state_city_from_address_bulk(self, dry_run: bool = False) -> dict:
+        """Enrich missing state/city by parsing address text.
+
+        Extracts county/state and city from structured address fields
+        for hotels that have an address but missing state or city.
+        Currently supports: United Kingdom, Australia.
+
+        All fixes applied in a single batch UPDATE within one transaction.
+
+        Returns:
+            dict with 'state_fixes' and 'city_fixes' counts
+        """
+        from db.client import queries, get_conn, get_transaction
+        from services.enrichment.location_inference import extract_state_city_from_address
+
+        SUPPORTED_COUNTRIES = ['United Kingdom', 'Australia']
+
+        all_ids = []
+        all_states = []
+        all_cities = []
+        state_count = 0
+        city_count = 0
+
+        for country in SUPPORTED_COUNTRIES:
+            async with get_conn() as conn:
+                rows = await queries.get_hotels_for_address_enrichment(conn, country=country)
+
+            if not rows:
+                continue
+
+            logger.info(f"Parsing {len(rows)} {country} addresses for state/city...")
+
+            for row in rows:
+                state, city = extract_state_city_from_address(row['address'], country)
+
+                need_state = state and not row['state']
+                need_city = city and not row['city']
+
+                if need_state or need_city:
+                    all_ids.append(row['id'])
+                    all_states.append(state if need_state else None)
+                    all_cities.append(city if need_city else None)
+                    if need_state:
+                        state_count += 1
+                    if need_city:
+                        city_count += 1
+
+            # Log summary for this country
+            country_state = sum(1 for i, s in enumerate(all_states) if s and i >= len(all_ids) - len(rows))
+            country_city = sum(1 for i, c in enumerate(all_cities) if c and i >= len(all_ids) - len(rows))
+            if country_state or country_city:
+                logger.info(f"  {country}: {country_state} states, {country_city} cities to enrich")
+
+        if not all_ids:
+            logger.info("No address enrichment needed")
+            return {"state_fixes": 0, "city_fixes": 0}
+
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would enrich {state_count} states, {city_count} cities")
+        else:
+            async with get_transaction() as conn:
+                result = await queries.batch_enrich_hotel_state_city(
+                    conn, ids=all_ids, states=all_states, cities=all_cities,
+                )
+                count = int(result.split()[-1]) if result else 0
+                logger.info(f"  Batch enriched {count} hotels")
+
+            logger.success(f"Enriched {state_count} states, {city_count} cities from addresses")
+
+        return {"state_fixes": state_count, "city_fixes": city_count}
+
     def extract_state_from_text(self, text: str) -> Optional[str]:
         """Extract US state from a text string (address, city, etc).
         
