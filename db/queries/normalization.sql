@@ -172,6 +172,7 @@ WHERE h.id = m.id
   AND (h.state IS NULL OR h.city IS NULL);
 
 
+
 -- ============================================================================
 -- CITY -> STATE INFERENCE
 -- Infer state from city using self-referencing data

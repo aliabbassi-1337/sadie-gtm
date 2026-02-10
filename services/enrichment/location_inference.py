@@ -957,6 +957,7 @@ def extract_us_city_from_address(address: str) -> Optional[str]:
     return None
 
 
+
 def extract_state_city_from_address(
     address: Optional[str], country: Optional[str]
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -982,5 +983,6 @@ def extract_state_city_from_address(
         state = extract_us_state_from_address(address)
         city = extract_us_city_from_address(address)
         return state, city
+
 
     return None, None
