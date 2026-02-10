@@ -122,6 +122,7 @@ async def run_consumer(concurrency: int = 10):
 
         logger.info(f"Consumer stopped. Total: {total_processed} processed, {total_enriched} enriched, {total_timeouts} timeouts")
     finally:
+        svc.send_normalize_trigger()
         await client.close()
         await close_db()
 

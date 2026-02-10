@@ -86,6 +86,7 @@ async def run_consumer(concurrency: int = 20, use_legacy: bool = False, use_brig
         print("=" * 60 + "\n")
 
     finally:
+        service.send_normalize_trigger()
         await close_db()
 
 

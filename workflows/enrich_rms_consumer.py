@@ -63,6 +63,7 @@ async def run(args):
             f"Failed: {result.hotels_failed}"
         )
     finally:
+        service.send_normalize_trigger()
         await close_db()
 
 
