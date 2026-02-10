@@ -81,3 +81,58 @@ UPDATE sadie_gtm.hotels
 SET country = :country,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id AND status != -1;
+
+
+-- ============================================================================
+-- BATCH OPERATIONS
+-- These use unnest/ANY for bulk updates in a single SQL statement
+-- ============================================================================
+
+
+-- name: count_hotels_by_country_values
+-- Batch count hotels matching any of the given country values (for dry-run)
+SELECT country AS old_value, COUNT(*) AS count
+FROM sadie_gtm.hotels
+WHERE country = ANY(:old_values::text[]) AND status != -1
+GROUP BY country;
+
+
+-- name: batch_update_country_values!
+-- Batch normalize multiple country values in one UPDATE
+UPDATE sadie_gtm.hotels h
+SET country = m.new_value, updated_at = NOW()
+FROM unnest(:old_values::text[], :new_values::text[]) AS m(old_value, new_value)
+WHERE h.country = m.old_value AND h.status != -1;
+
+
+-- name: batch_null_country_values!
+-- Batch NULL out multiple garbage country values in one UPDATE
+UPDATE sadie_gtm.hotels
+SET country = NULL, updated_at = NOW()
+WHERE country = ANY(:old_values::text[]) AND status != -1;
+
+
+-- name: batch_update_state_values!
+-- Batch normalize multiple state values for a country in one UPDATE
+UPDATE sadie_gtm.hotels h
+SET state = m.new_state, updated_at = NOW()
+FROM unnest(:old_states::text[], :new_states::text[]) AS m(old_state, new_state)
+WHERE h.country = :country AND h.state = m.old_state AND h.status != -1;
+
+
+-- name: batch_null_state_values!
+-- Batch NULL out multiple junk state values for a country in one UPDATE
+UPDATE sadie_gtm.hotels
+SET state = NULL, updated_at = NOW()
+WHERE country = :country AND state = ANY(:old_states::text[]) AND status != -1;
+
+
+-- name: batch_fix_hotel_locations!
+-- Batch update country and optionally state for multiple hotels by ID
+-- Pass NULL for state entries that should keep their existing value
+UPDATE sadie_gtm.hotels h
+SET country = m.country,
+    state = COALESCE(m.state, h.state),
+    updated_at = NOW()
+FROM unnest(:ids::bigint[], :countries::text[], :states::text[]) AS m(id, country, state)
+WHERE h.id = m.id AND h.status != -1;
