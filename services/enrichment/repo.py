@@ -3,7 +3,7 @@
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
 from pydantic import BaseModel
-from db.client import queries, get_conn
+from db.client import queries, get_conn, get_transaction
 from db.models.hotel import Hotel
 from db.models.hotel_room_count import HotelRoomCount
 from db.models.existing_customer import ExistingCustomer
@@ -1241,3 +1241,181 @@ async def get_mews_hotels_missing_location_count(
         if hasattr(result, 'get'):
             return result.get('count', 0) or 0
         return result or 0
+
+
+# ============================================================================
+# NORMALIZATION REPO FUNCTIONS
+# All accept an optional `conn` parameter. When the workflow passes a single
+# connection, all reads/writes go through the same backend — no stale reads
+# from different pooler connections. When conn is None, gets its own.
+# ============================================================================
+
+
+def _parse_update_count(result) -> int:
+    """Parse row count from aiosql execute result like 'UPDATE 42'."""
+    return int(result.split()[-1]) if result else 0
+
+
+# -- Country normalization --
+
+async def count_hotels_by_country_values(old_values: List[str], conn=None) -> Dict[str, int]:
+    """Count hotels matching each country value (for dry-run reporting)."""
+    async def _run(c):
+        rows = await queries.count_hotels_by_country_values(c, old_values=old_values)
+        return {r['old_value']: r['count'] for r in rows}
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
+
+
+async def batch_update_country_values(old_values: List[str], new_values: List[str], conn=None) -> int:
+    """Batch rename country values. Returns count of updated rows."""
+    async def _run(c):
+        return await queries.batch_update_country_values(
+            c, old_values=old_values, new_values=new_values,
+        )
+    if conn:
+        return _parse_update_count(await _run(conn))
+    async with get_conn() as c:
+        return _parse_update_count(await _run(c))
+
+
+async def batch_null_country_values(old_values: List[str], conn=None) -> int:
+    """Batch NULL out garbage country values. Returns count of updated rows."""
+    async def _run(c):
+        return await queries.batch_null_country_values(c, old_values=old_values)
+    if conn:
+        return _parse_update_count(await _run(conn))
+    async with get_conn() as c:
+        return _parse_update_count(await _run(c))
+
+
+# -- State normalization --
+
+async def get_state_counts_for_country(country: str, conn=None) -> list:
+    """Get unique state values and counts for a country."""
+    async def _run(c):
+        return await queries.get_state_counts_for_country(c, country=country)
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
+
+
+async def batch_null_global_junk_states(junk_values: List[str], conn=None) -> int:
+    """NULL out globally invalid state values across all countries."""
+    async def _run(c):
+        return await queries.batch_null_global_junk_states(c, junk_values=junk_values)
+    if conn:
+        return _parse_update_count(await _run(conn))
+    async with get_conn() as c:
+        return _parse_update_count(await _run(c))
+
+
+async def batch_update_state_values(country: str, old_states: List[str], new_states: List[str], conn=None) -> int:
+    """Batch rename state abbreviations to full names for a country."""
+    async def _run(c):
+        return await queries.batch_update_state_values(
+            c, country=country, old_states=old_states, new_states=new_states,
+        )
+    if conn:
+        return _parse_update_count(await _run(conn))
+    async with get_conn() as c:
+        return _parse_update_count(await _run(c))
+
+
+async def batch_null_state_values(country: str, old_states: List[str], conn=None) -> int:
+    """Batch NULL out junk state values for a country."""
+    async def _run(c):
+        return await queries.batch_null_state_values(
+            c, country=country, old_states=old_states,
+        )
+    if conn:
+        return _parse_update_count(await _run(conn))
+    async with get_conn() as c:
+        return _parse_update_count(await _run(c))
+
+
+# -- Location inference --
+
+async def get_hotels_for_location_inference(country: str, include_null: bool, conn=None) -> list:
+    """Get hotels that may need country/state inference."""
+    async def _run(c):
+        return await queries.get_hotels_for_location_inference(
+            c, country=country, include_null=include_null,
+        )
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
+
+
+async def batch_fix_hotel_locations(ids: List[int], countries: List[str], states: List[str], conn=None) -> int:
+    """Batch update country and state for multiple hotels by ID."""
+    async def _run(c):
+        return await queries.batch_fix_hotel_locations(
+            c, ids=ids, countries=countries, states=states,
+        )
+    if conn:
+        return _parse_update_count(await _run(conn))
+    async with get_conn() as c:
+        return _parse_update_count(await _run(c))
+
+
+# -- Address enrichment --
+
+async def get_hotels_for_address_enrichment(country: str, conn=None) -> list:
+    """Get hotels with address but missing state or city."""
+    async def _run(c):
+        return await queries.get_hotels_for_address_enrichment(c, country=country)
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
+
+
+async def batch_enrich_hotel_state_city(ids: List[int], states: List[str], cities: List[str], conn=None) -> int:
+    """Batch set state and city from address parsing."""
+    async def _run(c):
+        return await queries.batch_enrich_hotel_state_city(
+            c, ids=ids, states=states, cities=cities,
+        )
+    if conn:
+        return _parse_update_count(await _run(conn))
+    async with get_conn() as c:
+        return _parse_update_count(await _run(c))
+
+
+# -- City -> State inference --
+
+async def get_city_state_reference_pairs(conn=None) -> list:
+    """Get distinct (city, country, state) triples for building lookup."""
+    async def _run(c):
+        return await queries.get_city_state_reference_pairs(c)
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
+
+
+async def get_hotels_missing_state_with_city(conn=None) -> list:
+    """Get hotels that have a city but no state."""
+    async def _run(c):
+        return await queries.get_hotels_missing_state_with_city(c)
+    if conn:
+        return await _run(conn)
+    async with get_conn() as c:
+        return await _run(c)
+
+
+async def batch_set_state_from_city(ids: List[int], states: List[str], conn=None) -> int:
+    """Batch set state inferred from city."""
+    async def _run(c):
+        return await queries.batch_set_state_from_city(
+            c, ids=ids, states=states,
+        )
+    if conn:
+        return _parse_update_count(await _run(conn))
+    async with get_conn() as c:
+        return _parse_update_count(await _run(c))

@@ -39,7 +39,7 @@ import asyncio
 import argparse
 from loguru import logger
 
-from db.client import init_db, close_db
+from db.client import init_db, close_db, get_conn
 from services.enrichment.service import Service
 
 
@@ -72,44 +72,48 @@ async def run(
         run_enrich = not any_only or enrich_only
         run_city_state = not any_only or city_state_only
 
-        # Step 1: Normalize countries
-        if run_countries:
-            logger.info("=" * 50)
-            logger.info("STEP 1: COUNTRY NORMALIZATION")
-            logger.info("=" * 50)
-            country_result = await service.normalize_countries_bulk(dry_run=dry_run)
+        # Single connection for the entire pipeline — ensures reads see prior writes
+        # (Supabase pooler may route different connections to different backends)
+        async with get_conn() as conn:
 
-        # Step 2: Infer and fix misclassified locations (also changes countries)
-        if run_infer:
-            logger.info("")
-            logger.info("=" * 50)
-            logger.info("STEP 2: LOCATION INFERENCE")
-            logger.info("=" * 50)
-            infer_result = await service.infer_locations_bulk(dry_run=dry_run)
+            # Step 1: Normalize countries
+            if run_countries:
+                logger.info("=" * 50)
+                logger.info("STEP 1: COUNTRY NORMALIZATION")
+                logger.info("=" * 50)
+                country_result = await service.normalize_countries_bulk(dry_run=dry_run, conn=conn)
 
-        # Step 3: Normalize states (runs after ALL country-changing steps)
-        if run_states:
-            logger.info("")
-            logger.info("=" * 50)
-            logger.info("STEP 3: STATE NORMALIZATION")
-            logger.info("=" * 50)
-            state_result = await service.normalize_states_bulk(dry_run=dry_run)
+            # Step 2: Infer and fix misclassified locations (also changes countries)
+            if run_infer:
+                logger.info("")
+                logger.info("=" * 50)
+                logger.info("STEP 2: LOCATION INFERENCE")
+                logger.info("=" * 50)
+                infer_result = await service.infer_locations_bulk(dry_run=dry_run, conn=conn)
 
-        # Step 4: Enrich state/city from address text
-        if run_enrich:
-            logger.info("")
-            logger.info("=" * 50)
-            logger.info("STEP 4: ADDRESS ENRICHMENT")
-            logger.info("=" * 50)
-            enrich_result = await service.enrich_state_city_from_address_bulk(dry_run=dry_run)
+            # Step 3: Normalize states (runs after ALL country-changing steps)
+            if run_states:
+                logger.info("")
+                logger.info("=" * 50)
+                logger.info("STEP 3: STATE NORMALIZATION")
+                logger.info("=" * 50)
+                state_result = await service.normalize_states_bulk(dry_run=dry_run, conn=conn)
 
-        # Step 5: Infer state from city (self-referencing)
-        if run_city_state:
-            logger.info("")
-            logger.info("=" * 50)
-            logger.info("STEP 5: CITY→STATE INFERENCE")
-            logger.info("=" * 50)
-            city_state_result = await service.infer_state_from_city_bulk(dry_run=dry_run)
+            # Step 4: Enrich state/city from address text
+            if run_enrich:
+                logger.info("")
+                logger.info("=" * 50)
+                logger.info("STEP 4: ADDRESS ENRICHMENT")
+                logger.info("=" * 50)
+                enrich_result = await service.enrich_state_city_from_address_bulk(dry_run=dry_run, conn=conn)
+
+            # Step 5: Infer state from city (self-referencing)
+            if run_city_state:
+                logger.info("")
+                logger.info("=" * 50)
+                logger.info("STEP 5: CITY→STATE INFERENCE")
+                logger.info("=" * 50)
+                city_state_result = await service.infer_state_from_city_bulk(dry_run=dry_run, conn=conn)
 
         # Summary
         logger.info("")

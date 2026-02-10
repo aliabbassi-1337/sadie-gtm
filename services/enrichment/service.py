@@ -2661,7 +2661,7 @@ class Service(IService):
         """
         return state_utils.normalize_state(state, country)
 
-    async def normalize_countries_bulk(self, dry_run: bool = False) -> dict:
+    async def normalize_countries_bulk(self, dry_run: bool = False, conn=None) -> dict:
         """Normalize country codes and variations to standard English names.
 
         Three passes (each a single batch UPDATE):
@@ -2672,68 +2672,50 @@ class Service(IService):
         Returns:
             dict with 'total_fixed' count
         """
-        from db.client import queries, get_conn, get_transaction
         from services.enrichment.country_utils import COUNTRY_CODES, COUNTRY_VARIATIONS, GARBAGE_COUNTRIES
 
         total = 0
         garbage_list = [g for g in GARBAGE_COUNTRIES if g != "NA"]
 
         if dry_run:
-            async with get_conn() as conn:
-                # Pass 1: ISO codes
-                rows = await queries.count_hotels_by_country_values(conn, old_values=list(COUNTRY_CODES.keys()))
-                code_counts = {r['old_value']: r['count'] for r in rows}
-                for code, name in COUNTRY_CODES.items():
-                    count = code_counts.get(code, 0)
-                    if count > 0:
-                        logger.info(f"  [DRY-RUN] {code} -> {name}: {count}")
-                        total += count
+            code_counts = await repo.count_hotels_by_country_values(list(COUNTRY_CODES.keys()), conn=conn)
+            for code, name in COUNTRY_CODES.items():
+                count = code_counts.get(code, 0)
+                if count > 0:
+                    logger.info(f"  [DRY-RUN] {code} -> {name}: {count}")
+                    total += count
 
-                # Pass 2: Variations
-                rows = await queries.count_hotels_by_country_values(conn, old_values=list(COUNTRY_VARIATIONS.keys()))
-                var_counts = {r['old_value']: r['count'] for r in rows}
-                for old, new in COUNTRY_VARIATIONS.items():
-                    count = var_counts.get(old, 0)
-                    if count > 0:
-                        logger.info(f"  [DRY-RUN] {old[:40]} -> {new}: {count}")
-                        total += count
+            var_counts = await repo.count_hotels_by_country_values(list(COUNTRY_VARIATIONS.keys()), conn=conn)
+            for old, new in COUNTRY_VARIATIONS.items():
+                count = var_counts.get(old, 0)
+                if count > 0:
+                    logger.info(f"  [DRY-RUN] {old[:40]} -> {new}: {count}")
+                    total += count
 
-                # Pass 3: Garbage
-                rows = await queries.count_hotels_by_country_values(conn, old_values=garbage_list)
-                garb_counts = {r['old_value']: r['count'] for r in rows}
-                for g in garbage_list:
-                    count = garb_counts.get(g, 0)
-                    if count > 0:
-                        logger.info(f"  [DRY-RUN] '{g}' -> NULL: {count}")
-                        total += count
+            garb_counts = await repo.count_hotels_by_country_values(garbage_list, conn=conn)
+            for g in garbage_list:
+                count = garb_counts.get(g, 0)
+                if count > 0:
+                    logger.info(f"  [DRY-RUN] '{g}' -> NULL: {count}")
+                    total += count
 
             logger.info(f"[DRY-RUN] Would fix {total} hotels")
         else:
-            # Separate short transactions per pass to avoid Supabase pooler killing long txns
-            # Pass 1: ISO codes — single batch UPDATE
-            async with get_transaction() as conn:
-                result = await queries.batch_update_country_values(
-                    conn, old_values=list(COUNTRY_CODES.keys()), new_values=list(COUNTRY_CODES.values())
-                )
-            count = int(result.split()[-1]) if result else 0
+            count = await repo.batch_update_country_values(
+                list(COUNTRY_CODES.keys()), list(COUNTRY_CODES.values()), conn=conn,
+            )
             if count > 0:
                 logger.info(f"  ISO country codes: {count} hotels")
             total += count
 
-            # Pass 2: Variations — single batch UPDATE
-            async with get_transaction() as conn:
-                result = await queries.batch_update_country_values(
-                    conn, old_values=list(COUNTRY_VARIATIONS.keys()), new_values=list(COUNTRY_VARIATIONS.values())
-                )
-            count = int(result.split()[-1]) if result else 0
+            count = await repo.batch_update_country_values(
+                list(COUNTRY_VARIATIONS.keys()), list(COUNTRY_VARIATIONS.values()), conn=conn,
+            )
             if count > 0:
                 logger.info(f"  Country variations: {count} hotels")
             total += count
 
-            # Pass 3: Garbage — single batch UPDATE
-            async with get_transaction() as conn:
-                result = await queries.batch_null_country_values(conn, old_values=garbage_list)
-            count = int(result.split()[-1]) if result else 0
+            count = await repo.batch_null_country_values(garbage_list, conn=conn)
             if count > 0:
                 logger.info(f"  Garbage -> NULL: {count} hotels")
             total += count
@@ -2742,7 +2724,7 @@ class Service(IService):
 
         return {"total_fixed": total}
 
-    async def normalize_states_bulk(self, dry_run: bool = False) -> dict:
+    async def normalize_states_bulk(self, dry_run: bool = False, conn=None) -> dict:
         """Normalize state abbreviations to full names in database.
 
         Processes each supported country separately with its own state map.
@@ -2751,8 +2733,6 @@ class Service(IService):
         Returns:
             dict with 'fixes' (list of tuples) and 'total_fixed' count
         """
-        from db.client import queries, get_conn, get_transaction
-
         # Global junk values that are never valid states in any country
         GLOBAL_JUNK = [
             '*', '-', '--', '.', '...', '/', 'N/A', 'n/a', 'NA', 'na',
@@ -2770,43 +2750,42 @@ class Service(IService):
         fixes_by_country = {}   # country -> {old_states: [], new_states: []}
         nulls_by_country = {}   # country -> [junk_states]
 
-        # Phase 1: Read (short transaction, then release)
-        async with get_transaction() as conn:
-            for country_name, state_map in COUNTRY_STATE_MAPS.items():
-                rows = await queries.get_state_counts_for_country(conn, country=country_name)
-                if not rows:
+        # Phase 1: Read
+        for country_name, state_map in COUNTRY_STATE_MAPS.items():
+            rows = await repo.get_state_counts_for_country(country_name, conn=conn)
+            if not rows:
+                continue
+
+            valid_full_names = set(state_map.values())
+            logger.info(f"{country_name}: {len(rows)} unique state values")
+
+            old_states = []
+            new_states = []
+            junk_states = []
+
+            for row in rows:
+                state = row['state']
+                count = row['cnt']
+
+                if state in valid_full_names:
                     continue
 
-                valid_full_names = set(state_map.values())
-                logger.info(f"{country_name}: {len(rows)} unique state values")
+                state_upper = state.strip().upper()
+                if state_upper in state_map:
+                    new_state = state_map[state_upper]
+                    old_states.append(state)
+                    new_states.append(new_state)
+                    all_fixes.append((state, new_state, country_name, count))
+                    logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
+                elif not state_utils.is_valid_state(state, country_name):
+                    junk_states.append(state)
+                    all_fixes.append((state, None, country_name, count))
+                    logger.info(f"  Junk \"{state}\" in {country_name} ({count} hotels) -> NULL")
 
-                old_states = []
-                new_states = []
-                junk_states = []
-
-                for row in rows:
-                    state = row['state']
-                    count = row['cnt']
-
-                    if state in valid_full_names:
-                        continue
-
-                    state_upper = state.strip().upper()
-                    if state_upper in state_map:
-                        new_state = state_map[state_upper]
-                        old_states.append(state)
-                        new_states.append(new_state)
-                        all_fixes.append((state, new_state, country_name, count))
-                        logger.info(f"  \"{state}\" -> \"{new_state}\" ({count} hotels)")
-                    elif not state_utils.is_valid_state(state, country_name):
-                        junk_states.append(state)
-                        all_fixes.append((state, None, country_name, count))
-                        logger.info(f"  Junk \"{state}\" in {country_name} ({count} hotels) -> NULL")
-
-                if old_states:
-                    fixes_by_country[country_name] = {"old_states": old_states, "new_states": new_states}
-                if junk_states:
-                    nulls_by_country[country_name] = junk_states
+            if old_states:
+                fixes_by_country[country_name] = {"old_states": old_states, "new_states": new_states}
+            if junk_states:
+                nulls_by_country[country_name] = junk_states
 
         if not all_fixes:
             logger.info("No state normalization needed")
@@ -2817,46 +2796,36 @@ class Service(IService):
             logger.info(f"Dry run complete. Would fix {would_fix} hotels.")
             return {"fixes": all_fixes, "total_fixed": 0, "would_fix": would_fix}
 
-        # Phase 2: Write (separate short transaction)
+        # Phase 2: Write
         total_fixed = 0
         junk_nulled = 0
 
-        async with get_transaction() as conn:
-            # Global junk cleanup first (all countries)
-            result = await queries.batch_null_global_junk_states(
-                conn, junk_values=GLOBAL_JUNK,
+        # Global junk cleanup first (all countries)
+        global_junk_count = await repo.batch_null_global_junk_states(GLOBAL_JUNK, conn=conn)
+        if global_junk_count:
+            junk_nulled += global_junk_count
+            total_fixed += global_junk_count
+            logger.info(f"  Global junk states: {global_junk_count} -> NULL")
+
+        # Per-country abbreviation expansion
+        for country_name, fix_data in fixes_by_country.items():
+            count = await repo.batch_update_state_values(
+                country_name, fix_data["old_states"], fix_data["new_states"], conn=conn,
             )
-            global_junk_count = int(result.split()[-1]) if result else 0
-            if global_junk_count:
-                junk_nulled += global_junk_count
-                total_fixed += global_junk_count
-                logger.info(f"  Global junk states: {global_junk_count} -> NULL")
+            total_fixed += count
+            logger.info(f"  {country_name} abbreviations: {count} hotels")
 
-            # Per-country abbreviation expansion
-            for country_name, fix_data in fixes_by_country.items():
-                result = await queries.batch_update_state_values(
-                    conn, country=country_name,
-                    old_states=fix_data["old_states"],
-                    new_states=fix_data["new_states"],
-                )
-                count = int(result.split()[-1]) if result else 0
-                total_fixed += count
-                logger.info(f"  {country_name} abbreviations: {count} hotels")
-
-            # Per-country junk cleanup (country-specific invalid states)
-            for country_name, junk_list in nulls_by_country.items():
-                result = await queries.batch_null_state_values(
-                    conn, country=country_name, old_states=junk_list,
-                )
-                count = int(result.split()[-1]) if result else 0
-                junk_nulled += count
-                total_fixed += count
-                logger.info(f"  {country_name} junk states: {count} -> NULL")
+        # Per-country junk cleanup (country-specific invalid states)
+        for country_name, junk_list in nulls_by_country.items():
+            count = await repo.batch_null_state_values(country_name, junk_list, conn=conn)
+            junk_nulled += count
+            total_fixed += count
+            logger.info(f"  {country_name} junk states: {count} -> NULL")
 
         logger.success(f"Normalized {total_fixed} hotels ({junk_nulled} junk states NULLed).")
         return {"fixes": all_fixes, "total_fixed": total_fixed}
 
-    async def infer_locations_bulk(self, dry_run: bool = False) -> dict:
+    async def infer_locations_bulk(self, dry_run: bool = False, conn=None) -> dict:
         """Infer and fix country/state for misclassified or missing hotels.
 
         Uses TLD, phone prefix, and address patterns to infer the correct
@@ -2869,7 +2838,6 @@ class Service(IService):
         Returns:
             dict with 'country_fixes' count and 'state_fixes' count
         """
-        from db.client import queries, get_conn, get_transaction
         from services.enrichment.location_inference import infer_location
 
         details = {}  # country -> count
@@ -2879,12 +2847,9 @@ class Service(IService):
             include_null = source_country is None
             label = source_country or "NULL country"
 
-            async with get_transaction() as conn:
-                rows = await queries.get_hotels_for_location_inference(
-                    conn,
-                    country=source_country or "",
-                    include_null=include_null,
-                )
+            rows = await repo.get_hotels_for_location_inference(
+                country=source_country or "", include_null=include_null, conn=conn,
+            )
 
             if not rows:
                 continue
@@ -2936,25 +2901,19 @@ class Service(IService):
         state_fixes = sum(1 for f in all_fixes if f["new_state"])
 
         if not dry_run:
-            # Single batch UPDATE in one transaction
             ids = [f["id"] for f in all_fixes]
             countries = [f["new_country"] for f in all_fixes]
             states = [f["new_state"] for f in all_fixes]  # None keeps existing state
 
-            async with get_transaction() as conn:
-                result = await queries.batch_fix_hotel_locations(
-                    conn, ids=ids, countries=countries, states=states,
-                )
-                count = int(result.split()[-1]) if result else 0
-                logger.info(f"  Batch updated {count} hotels")
-
+            count = await repo.batch_fix_hotel_locations(ids, countries, states, conn=conn)
+            logger.info(f"  Batch updated {count} hotels")
             logger.success(f"Inferred {country_fixes} countries, {state_fixes} states")
         else:
             logger.info(f"[DRY-RUN] Would fix {country_fixes} countries, {state_fixes} states")
 
         return {"country_fixes": country_fixes, "state_fixes": state_fixes, "details": details}
 
-    async def enrich_state_city_from_address_bulk(self, dry_run: bool = False) -> dict:
+    async def enrich_state_city_from_address_bulk(self, dry_run: bool = False, conn=None) -> dict:
         """Enrich missing state/city by parsing address text.
 
         Extracts county/state and city from structured address fields
@@ -2966,7 +2925,6 @@ class Service(IService):
         Returns:
             dict with 'state_fixes' and 'city_fixes' counts
         """
-        from db.client import queries, get_conn, get_transaction
         from services.enrichment.location_inference import extract_state_city_from_address
 
         SUPPORTED_COUNTRIES = ['United Kingdom', 'Australia', 'United States']
@@ -2978,8 +2936,7 @@ class Service(IService):
         city_count = 0
 
         for country in SUPPORTED_COUNTRIES:
-            async with get_transaction() as conn:
-                rows = await queries.get_hotels_for_address_enrichment(conn, country=country)
+            rows = await repo.get_hotels_for_address_enrichment(country, conn=conn)
 
             if not rows:
                 continue
@@ -3014,13 +2971,8 @@ class Service(IService):
         if dry_run:
             logger.info(f"[DRY-RUN] Would enrich {state_count} states, {city_count} cities")
         else:
-            async with get_transaction() as conn:
-                result = await queries.batch_enrich_hotel_state_city(
-                    conn, ids=all_ids, states=all_states, cities=all_cities,
-                )
-                count = int(result.split()[-1]) if result else 0
-                logger.info(f"  Batch enriched {count} hotels")
-
+            count = await repo.batch_enrich_hotel_state_city(all_ids, all_states, all_cities, conn=conn)
+            logger.info(f"  Batch enriched {count} hotels")
             logger.success(f"Enriched {state_count} states, {city_count} cities from addresses")
 
         return {"state_fixes": state_count, "city_fixes": city_count}
@@ -3319,7 +3271,7 @@ class Service(IService):
         
         return {"total": len(hotels), "matched": len(updates), "updated": updated}
 
-    async def infer_state_from_city_bulk(self, dry_run: bool = False) -> dict:
+    async def infer_state_from_city_bulk(self, dry_run: bool = False, conn=None) -> dict:
         """Infer missing state from city using self-referencing data.
 
         Builds a lookup of (city, country) -> state from hotels that already
@@ -3329,12 +3281,8 @@ class Service(IService):
         Returns:
             dict with 'total_missing', 'matched', 'updated' counts
         """
-        from db.client import queries, get_conn, get_transaction
-
-        # Read from primary (get_transaction) to avoid read replica lag
         # Step 1: Build reference lookup
-        async with get_transaction() as conn:
-            ref_rows = await queries.get_city_state_reference_pairs(conn)
+        ref_rows = await repo.get_city_state_reference_pairs(conn=conn)
 
         if not ref_rows:
             logger.info("No city-state reference data found")
@@ -3352,8 +3300,7 @@ class Service(IService):
         logger.info(f"City-state lookup: {len(unambiguous)} unambiguous, {ambiguous_count} ambiguous (skipped)")
 
         # Step 2: Get hotels missing state with city
-        async with get_transaction() as conn:
-            missing_rows = await queries.get_hotels_missing_state_with_city(conn)
+        missing_rows = await repo.get_hotels_missing_state_with_city(conn=conn)
 
         if not missing_rows:
             logger.info("No hotels with city but missing state")
@@ -3384,13 +3331,8 @@ class Service(IService):
                 row = missing_rows[[r['id'] for r in missing_rows].index(ids[i])]
                 logger.info(f"  {ids[i]}: {row['city']} ({row['country']}) -> {states[i]}")
         else:
-            async with get_transaction() as conn:
-                result = await queries.batch_set_state_from_city(
-                    conn, ids=ids, states=states,
-                )
-                count = int(result.split()[-1]) if result else 0
-                logger.info(f"  Batch set state for {count} hotels")
-
+            count = await repo.batch_set_state_from_city(ids, states, conn=conn)
+            logger.info(f"  Batch set state for {count} hotels")
             logger.success(f"Inferred state from city for {len(ids)} hotels")
 
         return {"total_missing": len(missing_rows), "matched": len(ids), "updated": len(ids) if not dry_run else 0}
