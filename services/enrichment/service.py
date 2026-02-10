@@ -2709,31 +2709,34 @@ class Service(IService):
 
             logger.info(f"[DRY-RUN] Would fix {total} hotels")
         else:
+            # Separate short transactions per pass to avoid Supabase pooler killing long txns
+            # Pass 1: ISO codes — single batch UPDATE
             async with get_transaction() as conn:
-                # Pass 1: ISO codes — single batch UPDATE
                 result = await queries.batch_update_country_values(
                     conn, old_values=list(COUNTRY_CODES.keys()), new_values=list(COUNTRY_CODES.values())
                 )
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    logger.info(f"  ISO country codes: {count} hotels")
-                total += count
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(f"  ISO country codes: {count} hotels")
+            total += count
 
-                # Pass 2: Variations — single batch UPDATE
+            # Pass 2: Variations — single batch UPDATE
+            async with get_transaction() as conn:
                 result = await queries.batch_update_country_values(
                     conn, old_values=list(COUNTRY_VARIATIONS.keys()), new_values=list(COUNTRY_VARIATIONS.values())
                 )
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    logger.info(f"  Country variations: {count} hotels")
-                total += count
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(f"  Country variations: {count} hotels")
+            total += count
 
-                # Pass 3: Garbage — single batch UPDATE
+            # Pass 3: Garbage — single batch UPDATE
+            async with get_transaction() as conn:
                 result = await queries.batch_null_country_values(conn, old_values=garbage_list)
-                count = int(result.split()[-1]) if result else 0
-                if count > 0:
-                    logger.info(f"  Garbage -> NULL: {count} hotels")
-                total += count
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                logger.info(f"  Garbage -> NULL: {count} hotels")
+            total += count
 
             logger.success(f"Normalized {total} country values")
 
