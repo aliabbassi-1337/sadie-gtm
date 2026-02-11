@@ -1,7 +1,8 @@
-"""Archive slug discovery from Wayback Machine and Common Crawl."""
+"""Archive slug discovery from Wayback Machine, Common Crawl, AlienVault OTX, and URLScan.io."""
 
 import asyncio
 import json
+import os
 import re
 import logging
 from typing import Optional, Set
@@ -28,6 +29,8 @@ class BookingEnginePattern(BaseModel):
     commoncrawl_url_pattern: str
     # Whether slug is numeric, hex, or alphanumeric
     slug_type: str = "numeric"
+    # Domains to query for OSINT sources (AlienVault, URLScan)
+    domains: list[str] = Field(default_factory=list)
 
 
 class DiscoveredSlug(BaseModel):
@@ -49,6 +52,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/(?:Search|Rates)/Index/([A-Fa-f0-9]{16}|\d+(?:/\d+)?)",
         commoncrawl_url_pattern="*.rmscloud.com/Search/Index/*",
         slug_type="mixed",  # numeric or hex
+        domains=["rmscloud.com"],
     ),
     BookingEnginePattern(
         name="rms_rates",
@@ -56,6 +60,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/Rates/Index/([A-Fa-f0-9]{16}|\d+(?:/\d+)?)",
         commoncrawl_url_pattern="*.rmscloud.com/Rates/Index/*",
         slug_type="mixed",
+        domains=["rmscloud.com"],
     ),
     BookingEnginePattern(
         name="rms_ibe",
@@ -63,6 +68,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"ibe\d*\.rmscloud\.com/(\d+)",
         commoncrawl_url_pattern="ibe*.rmscloud.com/*",
         slug_type="numeric",
+        domains=["rmscloud.com"],
     ),
     BookingEnginePattern(
         name="cloudbeds",
@@ -70,6 +76,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/reservation/([A-Za-z0-9_-]+)",
         commoncrawl_url_pattern="hotels.cloudbeds.com/reservation/*",
         slug_type="alphanumeric",
+        domains=["cloudbeds.com"],
     ),
     BookingEnginePattern(
         name="mews",
@@ -77,6 +84,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/distributor/([a-f0-9-]{36})",
         commoncrawl_url_pattern="*.mews.com/distributor/*",
         slug_type="uuid",
+        domains=["mews.com"],
     ),
     BookingEnginePattern(
         name="siteminder",
@@ -84,6 +92,15 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/reservations/([A-Za-z0-9_-]+)",
         commoncrawl_url_pattern="*.siteminder.com/reservations/*",
         slug_type="alphanumeric",
+        domains=["siteminder.com"],
+    ),
+    BookingEnginePattern(
+        name="siteminder_directbook",
+        wayback_url_pattern="direct-book.com/properties/*",
+        slug_regex=r"/properties/([A-Za-z0-9_-]+)",
+        commoncrawl_url_pattern="*.direct-book.com/properties/*",
+        slug_type="alphanumeric",
+        domains=["direct-book.com"],
     ),
     # Additional booking engines
     BookingEnginePattern(
@@ -92,6 +109,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"([a-z0-9_-]+)\.book-onlinenow\.net",
         commoncrawl_url_pattern="*.book-onlinenow.net/*",
         slug_type="alphanumeric",
+        domains=["book-onlinenow.net"],
     ),
     BookingEnginePattern(
         name="resnexus",
@@ -99,6 +117,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"([a-z0-9_-]+)\.resnexus\.com",
         commoncrawl_url_pattern="*.resnexus.com/*",
         slug_type="alphanumeric",
+        domains=["resnexus.com"],
     ),
     BookingEnginePattern(
         name="webrez",
@@ -106,6 +125,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/hotel/(\d+)",
         commoncrawl_url_pattern="*.webrez.com/hotel/*",
         slug_type="numeric",
+        domains=["webrez.com"],
     ),
     BookingEnginePattern(
         name="thinkreservations",
@@ -113,6 +133,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"([a-z0-9_-]+)\.thinkreservations\.com",
         commoncrawl_url_pattern="*.thinkreservations.com/*",
         slug_type="alphanumeric",
+        domains=["thinkreservations.com"],
     ),
     BookingEnginePattern(
         name="innroad",
@@ -120,6 +141,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"([a-z0-9_-]+)\.innroad\.com",
         commoncrawl_url_pattern="*.innroad.com/*",
         slug_type="alphanumeric",
+        domains=["innroad.com"],
     ),
     BookingEnginePattern(
         name="lodgify",
@@ -127,6 +149,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/([A-Za-z0-9_-]+)/",
         commoncrawl_url_pattern="*.lodgify.com/*",
         slug_type="alphanumeric",
+        domains=["lodgify.com"],
     ),
     BookingEnginePattern(
         name="hostaway",
@@ -134,6 +157,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/listing/(\d+)",
         commoncrawl_url_pattern="*.hostaway.com/listing/*",
         slug_type="numeric",
+        domains=["hostaway.com"],
     ),
     BookingEnginePattern(
         name="guesty",
@@ -141,6 +165,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/properties/([A-Za-z0-9_-]+)",
         commoncrawl_url_pattern="*.guesty.com/properties/*",
         slug_type="alphanumeric",
+        domains=["guesty.com"],
     ),
     BookingEnginePattern(
         name="streamline",
@@ -148,6 +173,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"([a-z0-9_-]+)\.streamlinevrs\.com",
         commoncrawl_url_pattern="*.streamlinevrs.com/*",
         slug_type="alphanumeric",
+        domains=["streamlinevrs.com"],
     ),
     BookingEnginePattern(
         name="escapia",
@@ -155,6 +181,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/property/(\d+)",
         commoncrawl_url_pattern="*.escapia.com/property/*",
         slug_type="numeric",
+        domains=["escapia.com"],
     ),
     # ipms247 / Yanolja Cloud Solution (formerly eZee)
     # URL format: live.ipms247.com/booking/book-rooms-{slug}
@@ -164,6 +191,7 @@ BOOKING_ENGINE_PATTERNS = [
         slug_regex=r"/booking/book-rooms-([A-Za-z0-9_-]+)",
         commoncrawl_url_pattern="live.ipms247.com/booking/book-rooms-*",
         slug_type="alphanumeric",
+        domains=["ipms247.com"],
     ),
 ]
 
@@ -176,6 +204,10 @@ class ArchiveSlugDiscovery(BaseModel):
     discovered_slugs: dict = Field(default_factory=dict)
     cc_index_count: int = DEFAULT_CC_INDEX_COUNT
     existing_slugs: dict = Field(default_factory=dict)  # engine -> set of existing slugs
+    enable_wayback: bool = True
+    enable_commoncrawl: bool = True
+    enable_alienvault: bool = True
+    enable_urlscan: bool = True
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -198,14 +230,28 @@ class ArchiveSlugDiscovery(BaseModel):
             engine_existing = existing.get(pattern.name, set())
 
             # Query Wayback Machine
-            wayback_slugs = await self.query_wayback(pattern)
-            engine_slugs.extend(wayback_slugs)
-            logger.info(f"  Wayback: {len(wayback_slugs)} slugs")
+            if self.enable_wayback:
+                wayback_slugs = await self.query_wayback(pattern)
+                engine_slugs.extend(wayback_slugs)
+                logger.info(f"  Wayback: {len(wayback_slugs)} slugs")
 
             # Query Common Crawl (multiple historical indexes)
-            cc_slugs = await self.query_commoncrawl_historical(pattern)
-            engine_slugs.extend(cc_slugs)
-            logger.info(f"  Common Crawl ({self.cc_index_count} indexes): {len(cc_slugs)} slugs")
+            if self.enable_commoncrawl:
+                cc_slugs = await self.query_commoncrawl_historical(pattern)
+                engine_slugs.extend(cc_slugs)
+                logger.info(f"  Common Crawl ({self.cc_index_count} indexes): {len(cc_slugs)} slugs")
+
+            # Query AlienVault OTX
+            if self.enable_alienvault:
+                av_slugs = await self.query_alienvault(pattern)
+                engine_slugs.extend(av_slugs)
+                logger.info(f"  AlienVault: {len(av_slugs)} slugs")
+
+            # Query URLScan.io
+            if self.enable_urlscan:
+                us_slugs = await self.query_urlscan(pattern)
+                engine_slugs.extend(us_slugs)
+                logger.info(f"  URLScan: {len(us_slugs)} slugs")
 
             # Dedupe by slug (case-insensitive)
             unique_slugs = self._dedupe_slugs(engine_slugs)
@@ -268,6 +314,161 @@ class ArchiveSlugDiscovery(BaseModel):
             logger.warning(f"Wayback query failed for {pattern.name}: {e}")
         except Exception as e:
             logger.error(f"Wayback error for {pattern.name}: {e}")
+
+        return slugs
+
+    async def query_alienvault(
+        self, pattern: BookingEnginePattern
+    ) -> list[DiscoveredSlug]:
+        """Query AlienVault OTX passive DNS / URL list for matching URLs."""
+        if not pattern.domains:
+            return []
+
+        slugs = []
+        api_key = os.getenv("ALIENVAULT_OTX_KEY")
+        headers = {}
+        if api_key:
+            headers["X-OTX-API-KEY"] = api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                for domain in pattern.domains:
+                    page = 1
+                    while True:
+                        url = (
+                            f"https://otx.alienvault.com/api/v1/indicators/domain"
+                            f"/{domain}/url_list?limit=500&page={page}"
+                        )
+                        try:
+                            response = await client.get(url, headers=headers)
+
+                            if response.status_code == 429:
+                                logger.warning(f"AlienVault rate limited on {domain}, stopping pagination")
+                                break
+
+                            response.raise_for_status()
+                            data = response.json()
+
+                            url_list = data.get("url_list", [])
+                            if not url_list:
+                                break
+
+                            for entry in url_list:
+                                entry_url = entry.get("url", "")
+                                slug = self._extract_slug(entry_url, pattern.slug_regex)
+                                if slug:
+                                    slugs.append(
+                                        DiscoveredSlug(
+                                            engine=pattern.name,
+                                            slug=slug,
+                                            source_url=entry_url,
+                                            archive_source="alienvault",
+                                        )
+                                    )
+
+                            if not data.get("has_next", False):
+                                break
+
+                            page += 1
+                            await asyncio.sleep(1)
+
+                        except httpx.HTTPStatusError as e:
+                            logger.warning(f"AlienVault query failed for {domain} page {page}: {e}")
+                            break
+                        except httpx.HTTPError as e:
+                            logger.warning(f"AlienVault request error for {domain}: {e}")
+                            break
+
+        except Exception as e:
+            logger.error(f"AlienVault error for {pattern.name}: {e}")
+
+        return slugs
+
+    async def query_urlscan(
+        self, pattern: BookingEnginePattern
+    ) -> list[DiscoveredSlug]:
+        """Query URLScan.io search API for matching URLs."""
+        if not pattern.domains:
+            return []
+
+        slugs = []
+        api_key = os.getenv("URLSCAN_API_KEY")
+        headers = {}
+        if api_key:
+            headers["API-Key"] = api_key
+
+        max_results = 10000
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                for domain in pattern.domains:
+                    total_fetched = 0
+                    search_after = None
+
+                    while total_fetched < max_results:
+                        params = {"q": f"domain:{domain}", "size": 100}
+                        if search_after:
+                            params["search_after"] = search_after
+
+                        try:
+                            response = await client.get(
+                                "https://urlscan.io/api/v1/search/",
+                                params=params,
+                                headers=headers,
+                            )
+
+                            if response.status_code == 429:
+                                retry_after = response.headers.get("Retry-After", "5")
+                                try:
+                                    wait = int(retry_after)
+                                except ValueError:
+                                    wait = 5
+                                logger.warning(f"URLScan rate limited, waiting {wait}s")
+                                await asyncio.sleep(wait)
+                                continue
+
+                            response.raise_for_status()
+                            data = response.json()
+
+                            results = data.get("results", [])
+                            if not results:
+                                break
+
+                            for result in results:
+                                # Extract from both page.url and task.url
+                                for url_field in ("page", "task"):
+                                    entry_url = result.get(url_field, {}).get("url", "")
+                                    if entry_url:
+                                        slug = self._extract_slug(entry_url, pattern.slug_regex)
+                                        if slug:
+                                            slugs.append(
+                                                DiscoveredSlug(
+                                                    engine=pattern.name,
+                                                    slug=slug,
+                                                    source_url=entry_url,
+                                                    archive_source="urlscan",
+                                                )
+                                            )
+
+                            total_fetched += len(results)
+
+                            # Cursor-based pagination via sort field of last result
+                            last_sort = results[-1].get("sort")
+                            if not last_sort:
+                                break
+                            search_after = ",".join(str(s) for s in last_sort)
+
+                            await asyncio.sleep(1)
+
+                        except httpx.HTTPStatusError as e:
+                            logger.warning(f"URLScan query failed for {domain}: {e}")
+                            break
+                        except httpx.HTTPError as e:
+                            logger.warning(f"URLScan request error for {domain}: {e}")
+                            break
+
+        except Exception as e:
+            logger.error(f"URLScan error for {pattern.name}: {e}")
 
         return slugs
 
@@ -444,6 +645,10 @@ class ArchiveSlugDiscovery(BaseModel):
 async def discover_slugs_for_engine(
     engine_name: str,
     existing_slugs: Optional[Set[str]] = None,
+    enable_wayback: bool = True,
+    enable_commoncrawl: bool = True,
+    enable_alienvault: bool = True,
+    enable_urlscan: bool = True,
 ) -> list[DiscoveredSlug]:
     """
     Discover slugs for a specific engine.
@@ -451,15 +656,32 @@ async def discover_slugs_for_engine(
     Args:
         engine_name: Name of the booking engine
         existing_slugs: Optional set of existing slugs to exclude (lowercase)
+        enable_wayback: Query Wayback Machine
+        enable_commoncrawl: Query Common Crawl
+        enable_alienvault: Query AlienVault OTX
+        enable_urlscan: Query URLScan.io
     """
-    discovery = ArchiveSlugDiscovery()
+    discovery = ArchiveSlugDiscovery(
+        enable_wayback=enable_wayback,
+        enable_commoncrawl=enable_commoncrawl,
+        enable_alienvault=enable_alienvault,
+        enable_urlscan=enable_urlscan,
+    )
     pattern = next((p for p in BOOKING_ENGINE_PATTERNS if p.name == engine_name), None)
     if not pattern:
         raise ValueError(f"Unknown engine: {engine_name}")
 
-    wayback_slugs = await discovery.query_wayback(pattern)
-    cc_slugs = await discovery.query_commoncrawl_historical(pattern)
-    all_slugs = wayback_slugs + cc_slugs
+    all_slugs = []
+
+    if enable_wayback:
+        all_slugs.extend(await discovery.query_wayback(pattern))
+    if enable_commoncrawl:
+        all_slugs.extend(await discovery.query_commoncrawl_historical(pattern))
+    if enable_alienvault:
+        all_slugs.extend(await discovery.query_alienvault(pattern))
+    if enable_urlscan:
+        all_slugs.extend(await discovery.query_urlscan(pattern))
+
     unique_slugs = discovery._dedupe_slugs(all_slugs)
 
     # Filter out existing slugs

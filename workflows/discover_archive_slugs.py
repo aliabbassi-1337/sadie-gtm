@@ -65,6 +65,16 @@ async def main():
         action="store_true",
         help="Skip deduplication against database (not recommended)",
     )
+    parser.add_argument(
+        "--no-alienvault",
+        action="store_true",
+        help="Disable AlienVault OTX queries",
+    )
+    parser.add_argument(
+        "--no-urlscan",
+        action="store_true",
+        help="Disable URLScan.io queries",
+    )
     args = parser.parse_args()
 
     service = Service()
@@ -76,6 +86,8 @@ async def main():
         max_results=args.limit,
         cc_index_count=args.cc_indexes,
         dedupe_from_db=not args.skip_db_dedupe,
+        enable_alienvault=not args.no_alienvault,
+        enable_urlscan=not args.no_urlscan,
     )
 
     print(f"\n{'=' * 50}")
@@ -83,7 +95,13 @@ async def main():
     print(f"{'=' * 50}")
     total = 0
     for r in results:
-        print(f"{r.engine}: {r.total_slugs} new slugs")
+        parts = [f"wayback: {r.wayback_count}", f"cc: {r.commoncrawl_count}"]
+        if r.alienvault_count:
+            parts.append(f"alienvault: {r.alienvault_count}")
+        if r.urlscan_count:
+            parts.append(f"urlscan: {r.urlscan_count}")
+        breakdown = ", ".join(parts)
+        print(f"{r.engine}: {r.total_slugs} new slugs ({breakdown})")
         if r.s3_key:
             print(f"  -> s3://sadie-gtm/{r.s3_key}")
         total += r.total_slugs
