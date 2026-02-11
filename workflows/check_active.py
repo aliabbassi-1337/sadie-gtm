@@ -1,8 +1,10 @@
 """Check if hotel properties are still active/operating.
 
-Two-phase approach:
+Three-phase approach:
 1. Booking URL check (FREE) — if the booking page returns HTTP 200, hotel is active.
-2. LLM + web search (for dead/missing booking URLs only) — GPT-4o + Serper.
+2. Website check (FREE) — if the hotel website is alive and not parked, hotel is active.
+3. LLM + web search (for dead/missing URLs only) — GPT-4o + Serper.
+   If LLM says "closed", a confirmation search checks major OTAs before finalizing.
 
 Targets US hotels on Cloudbeds, Mews, RMS Cloud, and SiteMinder.
 
@@ -108,7 +110,53 @@ async def check_booking_url(client: httpx.AsyncClient, booking_url: str) -> Opti
 
 
 # ============================================================================
-# Phase 2: LLM + Serper search (for inconclusive cases)
+# Phase 2: Website check (FREE)
+# ============================================================================
+
+PARKED_SIGNALS = [
+    "domain is for sale", "buy this domain", "parked by", "parked free",
+    "this domain is available", "acquire this domain", "domain may be for sale",
+    "hugedomains", "godaddy", "sedo.com", "afternic", "dan.com",
+    "sedoparking", "domainmarket", "is for sale on",
+]
+
+PARKED_REDIRECT_HOSTS = {
+    "hugedomains.com", "sedo.com", "afternic.com", "dan.com",
+    "godaddy.com", "domainmarket.com", "sedoparking.com",
+}
+
+
+async def check_website(client: httpx.AsyncClient, website: str) -> Optional[bool]:
+    """Check if hotel website is alive and not parked. Returns True=active, None=inconclusive."""
+    if not website:
+        return None
+
+    try:
+        resp = await client.get(website, follow_redirects=True, timeout=15.0)
+
+        # Redirected to a domain seller = dead
+        final_host = str(resp.url.host).lower()
+        for parked_host in PARKED_REDIRECT_HOSTS:
+            if parked_host in final_host:
+                return None
+
+        if resp.status_code != 200:
+            return None
+
+        # Check for parked domain content
+        body = resp.text[:5000].lower()
+        for signal in PARKED_SIGNALS:
+            if signal in body:
+                return None
+
+        # Website is alive with real content
+        return True
+    except Exception:
+        return None
+
+
+# ============================================================================
+# Phase 3: LLM + Serper search (for inconclusive cases)
 # ============================================================================
 
 async def serper_search(client: httpx.AsyncClient, query: str) -> str:
@@ -274,6 +322,61 @@ def _parse_response(text: str) -> dict:
 
 
 # ============================================================================
+# Phase 3b: OTA confirmation (catches LLM false positives)
+# ============================================================================
+
+OTA_DOMAINS = ("booking.com", "expedia.com", "hotels.com", "tripadvisor.com", "kayak.com")
+
+
+async def confirm_closed_via_ota(
+    client: httpx.AsyncClient,
+    hotel_name: str,
+    city: Optional[str],
+    state: Optional[str],
+) -> bool:
+    """Search OTAs to confirm a hotel is actually closed.
+
+    Returns True if the hotel appears bookable on major OTAs (i.e. NOT closed).
+    Returns False if no OTA presence found (confirms closure).
+    """
+    location_parts = [p for p in [city, state] if p]
+    location = ", ".join(location_parts) if location_parts else ""
+    query = f'"{hotel_name}" {location} hotel book room'
+
+    try:
+        resp = await client.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+            json={"q": query, "num": 10},
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            return False
+
+        data = resp.json()
+
+        # Check organic results for OTA listings
+        for r in data.get("organic", []):
+            url = r.get("link", "").lower()
+            title = r.get("title", "").lower()
+            snippet = r.get("snippet", "").lower()
+
+            # Skip results that mention "closed"
+            if "closed" in title or "permanently closed" in snippet:
+                continue
+
+            for ota in OTA_DOMAINS:
+                if ota in url:
+                    # Found on a booking platform — likely still active
+                    logger.info(f"  OTA override: {hotel_name} found on {ota}")
+                    return True
+
+        return False
+    except Exception:
+        return False
+
+
+# ============================================================================
 # Orchestrator
 # ============================================================================
 
@@ -284,15 +387,16 @@ async def check_hotel(
     rate_limiter: asyncio.Semaphore,
     stats: dict,
 ) -> dict:
-    """Check a single hotel: booking URL first, then LLM if needed."""
+    """Check a single hotel: booking URL → website → LLM → OTA confirmation."""
     async with semaphore:
         hotel_id = hotel["id"]
         name = hotel["name"]
         city = hotel.get("city")
         state = hotel.get("state")
         booking_url = hotel.get("booking_url")
+        website = hotel.get("website")
 
-        # Phase 1: Check booking URL (no rate limit needed)
+        # Phase 1: Check booking URL (FREE)
         url_result = await check_booking_url(client, booking_url)
         if url_result is True:
             stats["url_active"] += 1
@@ -304,10 +408,37 @@ async def check_hotel(
                 "reason": "booking page alive",
             }
 
-        # Phase 2: LLM + Serper (needs rate limiting)
+        # Phase 2: Check hotel website (FREE)
+        web_result = await check_website(client, website)
+        if web_result is True:
+            stats["website_active"] += 1
+            return {
+                "hotel_id": hotel_id,
+                "hotel_name": name,
+                "is_active": True,
+                "status": "active",
+                "reason": "website alive",
+            }
+
+        # Phase 3: LLM + Serper (needs rate limiting)
         async with rate_limiter:
             stats["llm_checked"] += 1
             result = await check_hotel_llm(client, name, city, state)
+
+        # Phase 3b: If LLM says closed, double-check against OTAs
+        if result["status"] == "closed":
+            async with rate_limiter:
+                stats["ota_checked"] += 1
+                on_ota = await confirm_closed_via_ota(client, name, city, state)
+            if on_ota:
+                stats["ota_override"] += 1
+                return {
+                    "hotel_id": hotel_id,
+                    "hotel_name": name,
+                    "is_active": True,
+                    "status": "active",
+                    "reason": f"LLM said closed but found on OTA",
+                }
 
         is_active = None
         if result["status"] == "active":
@@ -350,7 +481,7 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
         hotels = await conn.fetch("""
             SELECT DISTINCT ON (h.id)
                 h.id, h.name, h.city, h.state, h.active_checked_at,
-                hbe.booking_url
+                h.website, hbe.booking_url
             FROM sadie_gtm.hotels h
             JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
             JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -375,7 +506,7 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
     stop_event = asyncio.Event()
     refiller = asyncio.create_task(_refill_rate_limiter(rate_limiter, rpm, stop_event))
 
-    stats = {"url_active": 0, "llm_checked": 0}
+    stats = {"url_active": 0, "website_active": 0, "llm_checked": 0, "ota_checked": 0, "ota_override": 0}
     all_results = []
     batch_size = 200
 
@@ -440,7 +571,10 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
     total_unknown = sum(1 for r in all_results if r["status"] == "unknown")
     logger.info(f"TOTAL: {total_active} active, {total_closed} closed, {total_unknown} unknown")
     logger.info(f"  Booking URL alive (skipped LLM): {stats['url_active']}")
+    logger.info(f"  Website alive (skipped LLM): {stats['website_active']}")
     logger.info(f"  Needed LLM check: {stats['llm_checked']}")
+    logger.info(f"  OTA confirmation checks: {stats['ota_checked']}")
+    logger.info(f"  OTA overrides (LLM said closed, OTA says active): {stats['ota_override']}")
 
     if dry_run:
         logger.info("Dry run - no database updates were made")
