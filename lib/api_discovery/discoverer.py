@@ -211,12 +211,23 @@ SKIP_DOMAINS = {
     "edge.sdk.awswaf.com",
     # Logging / monitoring / telemetry
     "rum.browser-intake-datadoghq.com", "logs.browser-intake-datadoghq.com",
-    "browser-intake-datadoghq.eu",
+    "browser-intake-datadoghq.eu", "browser-intake-us3-datadoghq.com",
+    "browser-intake-us5-datadoghq.com",
     "dc.services.visualstudio.com", "dc.applicationinsights.azure.com",
     "js.monitor.azure.com",
     # Cookie consent
     "consent.cookiefirst.com", "edge.cookiefirst.com",
     "cookiefirst.com",
+    "cookie-cdn.cookiepro.com", "cdn.cookielaw.org",
+    # Payment fingerprinting (not booking APIs)
+    "m.stripe.com", "r.stripe.com", "js.stripe.com",
+    # Ad tracking / retargeting
+    "ct.pinterest.com", "tr.snapchat.com", "px.ads.linkedin.com",
+    "insight.adsrvr.org", "dpm.demdex.net", "cm.teads.tv",
+    "api2.branch.io", "ara.paa-reporting-advertising.amazon",
+    "siteintercept.qualtrics.com", "s.yimg.com",
+    "click.prod.mplat-ppcprotect.com",
+    "talkative-cdn.com",
 }
 
 SKIP_PATH_PATTERNS = {
