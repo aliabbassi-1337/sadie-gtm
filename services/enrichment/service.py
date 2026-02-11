@@ -2735,9 +2735,10 @@ class Service(IService):
         """
         # Global junk values that are never valid states in any country
         GLOBAL_JUNK = [
-            '*', '-', '--', '.', '...', '/', 'N/A', 'n/a', 'NA', 'na',
+            '*', '-', '--', '---', '.', '...', '/', 'N/A', 'n/a', 'NA', 'na',
             'none', 'None', 'null', 'NULL', 'TBD', 'tbd',
             'unknown', 'Unknown', 'UNKNOWN', 'test', 'Test', 'TEST',
+            '-- Select --', '--Select--', '- Select -', 'Select',
         ]
 
         COUNTRY_STATE_MAPS = {
