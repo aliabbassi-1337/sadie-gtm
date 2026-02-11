@@ -57,6 +57,7 @@ class DiscoveryResult(BaseModel):
     commoncrawl_count: int
     alienvault_count: int = 0
     urlscan_count: int = 0
+    virustotal_count: int = 0
     s3_key: Optional[str] = None
 
 
@@ -253,14 +254,15 @@ class Service(IService):
         db_connection=None,
         enable_alienvault: bool = True,
         enable_urlscan: bool = True,
+        enable_virustotal: bool = True,
         proxy_url: Optional[str] = None,
     ) -> List[DiscoveryResult]:
         """
         Discover booking engine slugs from web archives.
 
-        Queries Wayback Machine, Common Crawl, AlienVault OTX, and URLScan.io
-        for historical booking URLs, then deduplicates against existing slugs
-        in the database.
+        Queries Wayback Machine, Common Crawl, AlienVault OTX, URLScan.io,
+        and VirusTotal for historical booking URLs, then deduplicates against
+        existing slugs in the database.
 
         Args:
             engine: Specific engine to query (rms, cloudbeds, etc.), or None for all
@@ -273,6 +275,7 @@ class Service(IService):
             db_connection: Optional database connection (for testing)
             enable_alienvault: Whether to query AlienVault OTX
             enable_urlscan: Whether to query URLScan.io
+            enable_virustotal: Whether to query VirusTotal
 
         Returns:
             List of DiscoveryResult for each engine
@@ -290,6 +293,7 @@ class Service(IService):
             cc_index_count=cc_index_count,
             enable_alienvault=enable_alienvault,
             enable_urlscan=enable_urlscan,
+            enable_virustotal=enable_virustotal,
             proxy_url=proxy_url,
         )
 
@@ -300,6 +304,7 @@ class Service(IService):
                 engine_existing.get(engine),
                 enable_alienvault=enable_alienvault,
                 enable_urlscan=enable_urlscan,
+                enable_virustotal=enable_virustotal,
                 proxy_url=proxy_url,
             )
             results = {engine: slugs}
@@ -315,11 +320,13 @@ class Service(IService):
             cc_count = sum(1 for s in slugs if s.archive_source == "commoncrawl")
             av_count = sum(1 for s in slugs if s.archive_source == "alienvault")
             us_count = sum(1 for s in slugs if s.archive_source == "urlscan")
+            vt_count = sum(1 for s in slugs if s.archive_source == "virustotal")
 
             logger.info(
                 f"{eng.upper()}: {len(slugs)} NEW slugs "
                 f"(wayback: {wayback_count}, cc: {cc_count}, "
-                f"alienvault: {av_count}, urlscan: {us_count})"
+                f"alienvault: {av_count}, urlscan: {us_count}, "
+                f"virustotal: {vt_count})"
             )
 
             # Prepare output data
@@ -347,6 +354,7 @@ class Service(IService):
                     commoncrawl_count=cc_count,
                     alienvault_count=av_count,
                     urlscan_count=us_count,
+                    virustotal_count=vt_count,
                     s3_key=s3_key,
                 )
             )

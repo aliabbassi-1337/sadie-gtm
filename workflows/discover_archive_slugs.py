@@ -76,6 +76,11 @@ async def main():
         help="Disable URLScan.io queries",
     )
     parser.add_argument(
+        "--no-virustotal",
+        action="store_true",
+        help="Disable VirusTotal queries",
+    )
+    parser.add_argument(
         "--no-proxy",
         action="store_true",
         help="Disable Brightdata proxy (auto-detected from env vars)",
@@ -102,6 +107,7 @@ async def main():
         dedupe_from_db=not args.skip_db_dedupe,
         enable_alienvault=not args.no_alienvault,
         enable_urlscan=not args.no_urlscan,
+        enable_virustotal=not args.no_virustotal,
         proxy_url=proxy_url,
     )
 
@@ -115,6 +121,8 @@ async def main():
             parts.append(f"alienvault: {r.alienvault_count}")
         if r.urlscan_count:
             parts.append(f"urlscan: {r.urlscan_count}")
+        if r.virustotal_count:
+            parts.append(f"virustotal: {r.virustotal_count}")
         breakdown = ", ".join(parts)
         print(f"{r.engine}: {r.total_slugs} new slugs ({breakdown})")
         if r.s3_key:

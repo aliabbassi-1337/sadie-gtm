@@ -1,4 +1,4 @@
-"""Archive slug discovery from Wayback Machine, Common Crawl, AlienVault OTX, and URLScan.io."""
+"""Archive slug discovery from Wayback Machine, Common Crawl, AlienVault OTX, URLScan.io, and VirusTotal."""
 
 import asyncio
 import json
@@ -232,6 +232,7 @@ class ArchiveSlugDiscovery(BaseModel):
     enable_commoncrawl: bool = True
     enable_alienvault: bool = True
     enable_urlscan: bool = True
+    enable_virustotal: bool = True
     proxy_url: Optional[str] = None  # Brightdata proxy URL for OSINT sources
 
     model_config = {"arbitrary_types_allowed": True}
@@ -285,6 +286,12 @@ class ArchiveSlugDiscovery(BaseModel):
                 us_slugs = await self.query_urlscan(pattern)
                 engine_slugs.extend(us_slugs)
                 logger.info(f"  URLScan: {len(us_slugs)} slugs")
+
+            # Query VirusTotal
+            if self.enable_virustotal:
+                vt_slugs = await self.query_virustotal(pattern)
+                engine_slugs.extend(vt_slugs)
+                logger.info(f"  VirusTotal: {len(vt_slugs)} slugs")
 
             # Dedupe by slug (case-insensitive)
             unique_slugs = self._dedupe_slugs(engine_slugs)
@@ -505,6 +512,98 @@ class ArchiveSlugDiscovery(BaseModel):
 
         return slugs
 
+    async def query_virustotal(
+        self, pattern: BookingEnginePattern
+    ) -> list[DiscoveredSlug]:
+        """Query VirusTotal domain URLs for matching booking engine URLs.
+
+        Free tier: 4 requests/minute, no API key required but recommended.
+        Uses: GET /api/v3/domains/{domain}/urls
+        """
+        if not pattern.domains:
+            return []
+
+        slugs = []
+        api_key = os.getenv("VIRUSTOTAL_API_KEY")
+        if not api_key:
+            logger.debug(f"No VIRUSTOTAL_API_KEY set, skipping VirusTotal for {pattern.name}")
+            return []
+
+        headers = {"x-apikey": api_key}
+        max_results = 10000
+
+        try:
+            async with self._make_client(use_proxy=True) as client:
+                for domain in pattern.domains:
+                    cursor = None
+                    total_fetched = 0
+
+                    while total_fetched < max_results:
+                        url = f"https://www.virustotal.com/api/v3/domains/{domain}/urls"
+                        params = {"limit": 40}
+                        if cursor:
+                            params["cursor"] = cursor
+
+                        try:
+                            response = await client.get(url, params=params, headers=headers)
+
+                            if response.status_code == 429:
+                                logger.warning(f"VirusTotal rate limited on {domain}, waiting 60s")
+                                await asyncio.sleep(60)
+                                continue
+
+                            if response.status_code == 401:
+                                logger.warning("VirusTotal API key invalid, skipping")
+                                return slugs
+
+                            response.raise_for_status()
+                            data = response.json()
+
+                            items = data.get("data", [])
+                            if not items:
+                                break
+
+                            for item in items:
+                                attrs = item.get("attributes", {})
+                                entry_url = attrs.get("url", "")
+                                if entry_url:
+                                    slug = self._extract_slug(entry_url, pattern.slug_regex)
+                                    if slug:
+                                        slugs.append(
+                                            DiscoveredSlug(
+                                                engine=pattern.name,
+                                                slug=slug,
+                                                source_url=entry_url,
+                                                archive_source="virustotal",
+                                            )
+                                        )
+
+                            total_fetched += len(items)
+
+                            # Cursor-based pagination
+                            cursor = data.get("links", {}).get("next")
+                            if not cursor:
+                                # Extract cursor from the next link URL if present
+                                next_link = data.get("links", {}).get("next")
+                                if not next_link:
+                                    break
+                                cursor = next_link
+
+                            # VirusTotal free tier: 4 req/min = 15s between requests
+                            await asyncio.sleep(15)
+
+                        except httpx.HTTPStatusError as e:
+                            logger.warning(f"VirusTotal query failed for {domain}: {e}")
+                            break
+                        except httpx.HTTPError as e:
+                            logger.warning(f"VirusTotal request error for {domain}: {e}")
+                            break
+
+        except Exception as e:
+            logger.error(f"VirusTotal error for {pattern.name}: {e}")
+
+        return slugs
+
     async def query_commoncrawl(
         self, pattern: BookingEnginePattern
     ) -> list[DiscoveredSlug]:
@@ -545,9 +644,16 @@ class ArchiveSlugDiscovery(BaseModel):
                         "output": "json",
                         "limit": self.max_results_per_query,
                     }
-                    response = await client.get(cdx_api, params=params)
 
-                    if response.status_code != 200:
+                    # Retry up to 3 times on 503
+                    response = None
+                    for attempt in range(3):
+                        response = await client.get(cdx_api, params=params)
+                        if response.status_code != 503:
+                            break
+                        await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
+
+                    if response is None or response.status_code != 200:
                         continue
 
                     count = 0
@@ -682,6 +788,7 @@ async def discover_slugs_for_engine(
     enable_commoncrawl: bool = True,
     enable_alienvault: bool = True,
     enable_urlscan: bool = True,
+    enable_virustotal: bool = True,
     proxy_url: Optional[str] = None,
 ) -> list[DiscoveredSlug]:
     """
@@ -694,6 +801,7 @@ async def discover_slugs_for_engine(
         enable_commoncrawl: Query Common Crawl
         enable_alienvault: Query AlienVault OTX
         enable_urlscan: Query URLScan.io
+        enable_virustotal: Query VirusTotal
         proxy_url: Optional proxy URL for all requests
     """
     discovery = ArchiveSlugDiscovery(
@@ -701,6 +809,7 @@ async def discover_slugs_for_engine(
         enable_commoncrawl=enable_commoncrawl,
         enable_alienvault=enable_alienvault,
         enable_urlscan=enable_urlscan,
+        enable_virustotal=enable_virustotal,
         proxy_url=proxy_url,
     )
     pattern = next((p for p in BOOKING_ENGINE_PATTERNS if p.name == engine_name), None)
@@ -717,6 +826,8 @@ async def discover_slugs_for_engine(
         all_slugs.extend(await discovery.query_alienvault(pattern))
     if enable_urlscan:
         all_slugs.extend(await discovery.query_urlscan(pattern))
+    if enable_virustotal:
+        all_slugs.extend(await discovery.query_virustotal(pattern))
 
     unique_slugs = discovery._dedupe_slugs(all_slugs)
 

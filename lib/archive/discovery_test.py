@@ -418,6 +418,113 @@ class TestQueryUrlscan:
 
 
 @pytest.mark.no_db
+class TestQueryVirustotal:
+    """Tests for VirusTotal query method."""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_no_domains(self):
+        """Should return empty list when pattern has no domains."""
+        discovery = ArchiveSlugDiscovery()
+        pattern = BookingEnginePattern(
+            name="test",
+            wayback_url_pattern="*.example.com/*",
+            slug_regex=r"/(\d+)",
+            commoncrawl_url_pattern="*.example.com/*",
+            domains=[],
+        )
+        result = await discovery.query_virustotal(pattern)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_without_api_key(self):
+        """Should return empty list when VIRUSTOTAL_API_KEY is not set."""
+        discovery = ArchiveSlugDiscovery()
+        pattern = BookingEnginePattern(
+            name="rms",
+            wayback_url_pattern="bookings*.rmscloud.com/Search/Index/*",
+            slug_regex=r"/(?:Search|Rates)/Index/([A-Fa-f0-9]{16}|\d+(?:/\d+)?)",
+            commoncrawl_url_pattern="*.rmscloud.com/Search/Index/*",
+            domains=["rmscloud.com"],
+        )
+        with patch.dict("os.environ", {}, clear=True):
+            result = await discovery.query_virustotal(pattern)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_extracts_slugs_from_response(self):
+        """Should extract slugs from VirusTotal API response."""
+        discovery = ArchiveSlugDiscovery()
+        pattern = BookingEnginePattern(
+            name="cloudbeds",
+            wayback_url_pattern="hotels.cloudbeds.com/reservation/*",
+            slug_regex=r"/reservation/([A-Za-z0-9_-]+)",
+            commoncrawl_url_pattern="hotels.cloudbeds.com/reservation/*",
+            domains=["cloudbeds.com"],
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {"attributes": {"url": "https://hotels.cloudbeds.com/reservation/hotel-abc"}},
+                {"attributes": {"url": "https://hotels.cloudbeds.com/reservation/hotel-xyz"}},
+                {"attributes": {"url": "https://cloudbeds.com/blog/something"}},
+            ],
+            "links": {},
+        }
+
+        with patch.dict("os.environ", {"VIRUSTOTAL_API_KEY": "test-key"}):
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.get = AsyncMock(return_value=mock_response)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+
+                slugs = await discovery.query_virustotal(pattern)
+
+        assert len(slugs) == 2
+        assert slugs[0].slug == "hotel-abc"
+        assert slugs[0].archive_source == "virustotal"
+        assert slugs[1].slug == "hotel-xyz"
+
+    @pytest.mark.asyncio
+    async def test_handles_rate_limit(self):
+        """Should wait on 429 rate limit."""
+        discovery = ArchiveSlugDiscovery()
+        pattern = BookingEnginePattern(
+            name="test",
+            wayback_url_pattern="*.example.com/*",
+            slug_regex=r"/(\d+)",
+            commoncrawl_url_pattern="*.example.com/*",
+            domains=["example.com"],
+        )
+
+        mock_429 = MagicMock()
+        mock_429.status_code = 429
+
+        mock_empty = MagicMock()
+        mock_empty.status_code = 200
+        mock_empty.raise_for_status = MagicMock()
+        mock_empty.json.return_value = {"data": [], "links": {}}
+
+        with patch.dict("os.environ", {"VIRUSTOTAL_API_KEY": "test-key"}):
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.get = AsyncMock(side_effect=[mock_429, mock_empty])
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+
+                with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                    slugs = await discovery.query_virustotal(pattern)
+                    mock_sleep.assert_any_call(60)
+
+        assert slugs == []
+
+
+@pytest.mark.no_db
 class TestSourceToggles:
     """Tests for source enable/disable flags."""
 
@@ -428,15 +535,18 @@ class TestSourceToggles:
         assert discovery.enable_commoncrawl is True
         assert discovery.enable_alienvault is True
         assert discovery.enable_urlscan is True
+        assert discovery.enable_virustotal is True
 
     def test_can_disable_sources(self):
         """Should be able to disable individual sources."""
         discovery = ArchiveSlugDiscovery(
             enable_alienvault=False,
             enable_urlscan=False,
+            enable_virustotal=False,
         )
         assert discovery.enable_alienvault is False
         assert discovery.enable_urlscan is False
+        assert discovery.enable_virustotal is False
         assert discovery.enable_wayback is True
         assert discovery.enable_commoncrawl is True
 
