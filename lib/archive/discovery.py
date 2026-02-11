@@ -13,6 +13,17 @@ from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
+
+def _get_brightdata_proxy_url() -> Optional[str]:
+    """Build Brightdata datacenter proxy URL from env vars if available."""
+    customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
+    zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
+    password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
+    if customer_id and zone and password:
+        username = f"brd-customer-{customer_id}-zone-{zone}"
+        return f"http://{username}:{password}@brd.superproxy.io:33335"
+    return None
+
 # Number of historical Common Crawl indexes to query
 DEFAULT_CC_INDEX_COUNT = 40  # Query last 40 indexes (~2 years of crawls)
 
@@ -208,8 +219,17 @@ class ArchiveSlugDiscovery(BaseModel):
     enable_commoncrawl: bool = True
     enable_alienvault: bool = True
     enable_urlscan: bool = True
+    proxy_url: Optional[str] = None  # Brightdata proxy URL for OSINT sources
 
     model_config = {"arbitrary_types_allowed": True}
+
+    def _make_client(self, use_proxy: bool = False) -> httpx.AsyncClient:
+        """Create an httpx client, optionally with proxy."""
+        kwargs = {"timeout": self.timeout}
+        if use_proxy and self.proxy_url:
+            kwargs["proxy"] = self.proxy_url
+            kwargs["verify"] = False  # Brightdata uses its own SSL cert
+        return httpx.AsyncClient(**kwargs)
 
     async def discover_all(
         self,
@@ -289,7 +309,7 @@ class ArchiveSlugDiscovery(BaseModel):
         }
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with self._make_client(use_proxy=True) as client:
                 response = await client.get(cdx_url, params=params)
                 response.raise_for_status()
                 data = response.json()
@@ -331,7 +351,7 @@ class ArchiveSlugDiscovery(BaseModel):
             headers["X-OTX-API-KEY"] = api_key
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with self._make_client(use_proxy=True) as client:
                 for domain in pattern.domains:
                     page = 1
                     while True:
@@ -370,7 +390,7 @@ class ArchiveSlugDiscovery(BaseModel):
                                 break
 
                             page += 1
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(0.3 if self.proxy_url else 1)
 
                         except httpx.HTTPStatusError as e:
                             logger.warning(f"AlienVault query failed for {domain} page {page}: {e}")
@@ -400,7 +420,7 @@ class ArchiveSlugDiscovery(BaseModel):
         max_results = 10000
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with self._make_client(use_proxy=True) as client:
                 for domain in pattern.domains:
                     total_fetched = 0
                     search_after = None
@@ -458,7 +478,7 @@ class ArchiveSlugDiscovery(BaseModel):
                                 break
                             search_after = ",".join(str(s) for s in last_sort)
 
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(0.3 if self.proxy_url else 1)
 
                         except httpx.HTTPStatusError as e:
                             logger.warning(f"URLScan query failed for {domain}: {e}")
@@ -499,7 +519,7 @@ class ArchiveSlugDiscovery(BaseModel):
         indexes_to_query = indexes[: self.cc_index_count]
         logger.info(f"  Querying {len(indexes_to_query)} CC indexes...")
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._make_client(use_proxy=True) as client:
             for idx in indexes_to_query:
                 index_name = idx.get("id", "unknown")
                 cdx_api = idx.get("cdx-api")
@@ -567,7 +587,7 @@ class ArchiveSlugDiscovery(BaseModel):
         }
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with self._make_client(use_proxy=True) as client:
                 response = await client.get(index_url, params=params)
                 response.raise_for_status()
 
@@ -601,7 +621,7 @@ class ArchiveSlugDiscovery(BaseModel):
     async def _get_cc_indexes(self) -> list[dict]:
         """Get list of all Common Crawl indexes."""
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with self._make_client(use_proxy=True) as client:
                 response = await client.get(
                     "https://index.commoncrawl.org/collinfo.json"
                 )
@@ -649,6 +669,7 @@ async def discover_slugs_for_engine(
     enable_commoncrawl: bool = True,
     enable_alienvault: bool = True,
     enable_urlscan: bool = True,
+    proxy_url: Optional[str] = None,
 ) -> list[DiscoveredSlug]:
     """
     Discover slugs for a specific engine.
@@ -660,12 +681,14 @@ async def discover_slugs_for_engine(
         enable_commoncrawl: Query Common Crawl
         enable_alienvault: Query AlienVault OTX
         enable_urlscan: Query URLScan.io
+        proxy_url: Optional proxy URL for all requests
     """
     discovery = ArchiveSlugDiscovery(
         enable_wayback=enable_wayback,
         enable_commoncrawl=enable_commoncrawl,
         enable_alienvault=enable_alienvault,
         enable_urlscan=enable_urlscan,
+        proxy_url=proxy_url,
     )
     pattern = next((p for p in BOOKING_ENGINE_PATTERNS if p.name == engine_name), None)
     if not pattern:

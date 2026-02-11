@@ -253,6 +253,7 @@ class Service(IService):
         db_connection=None,
         enable_alienvault: bool = True,
         enable_urlscan: bool = True,
+        proxy_url: Optional[str] = None,
     ) -> List[DiscoveryResult]:
         """
         Discover booking engine slugs from web archives.
@@ -289,6 +290,7 @@ class Service(IService):
             cc_index_count=cc_index_count,
             enable_alienvault=enable_alienvault,
             enable_urlscan=enable_urlscan,
+            proxy_url=proxy_url,
         )
 
         if engine and engine != "all":
@@ -298,6 +300,7 @@ class Service(IService):
                 engine_existing.get(engine),
                 enable_alienvault=enable_alienvault,
                 enable_urlscan=enable_urlscan,
+                proxy_url=proxy_url,
             )
             results = {engine: slugs}
         else:

@@ -24,7 +24,7 @@ import logging
 
 from dotenv import load_dotenv
 
-from lib.archive.discovery import BOOKING_ENGINE_PATTERNS
+from lib.archive.discovery import BOOKING_ENGINE_PATTERNS, _get_brightdata_proxy_url
 from services.ingestor.service import Service
 
 # Load environment variables
@@ -75,7 +75,21 @@ async def main():
         action="store_true",
         help="Disable URLScan.io queries",
     )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Disable Brightdata proxy (auto-detected from env vars)",
+    )
     args = parser.parse_args()
+
+    # Auto-detect Brightdata proxy unless disabled
+    proxy_url = None
+    if not args.no_proxy:
+        proxy_url = _get_brightdata_proxy_url()
+        if proxy_url:
+            logging.getLogger(__name__).info("Using Brightdata datacenter proxy")
+        else:
+            logging.getLogger(__name__).info("No Brightdata proxy configured, using direct connections")
 
     service = Service()
     results = await service.discover_archive_slugs(
@@ -88,6 +102,7 @@ async def main():
         dedupe_from_db=not args.skip_db_dedupe,
         enable_alienvault=not args.no_alienvault,
         enable_urlscan=not args.no_urlscan,
+        proxy_url=proxy_url,
     )
 
     print(f"\n{'=' * 50}")
