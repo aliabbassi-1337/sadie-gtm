@@ -1768,6 +1768,136 @@ resource "aws_ecs_task_definition" "normalize_states" {
 # Note: normalize_states is run on-demand, not scheduled
 # To run manually: aws ecs run-task --cluster sadie-gtm-cluster --task-definition sadie-gtm-normalize-states ...
 
+# =============================================================================
+# NORMALIZE LOCATIONS (country codes, state abbreviations, special chars)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "normalize_locations" {
+  family                   = "${var.app_name}-normalize-locations"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "normalize"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["sh", "-c", "uv run python -m workflows.normalize_data && uv run python -m workflows.normalize"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "normalize-locations"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "normalize_locations" {
+  name                = "${var.app_name}-normalize-locations"
+  description         = "Normalize country codes, state abbreviations, and special chars every 6 hours"
+  schedule_expression = "rate(6 hours)"
+}
+
+resource "aws_cloudwatch_event_target" "normalize_locations" {
+  rule      = aws_cloudwatch_event_rule.normalize_locations.name
+  target_id = "normalize-locations"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.normalize_locations.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# =============================================================================
+# CHECK ACTIVE (property active status detection)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "check_active" {
+  family                   = "${var.app_name}-check-active"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "check-active"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["uv", "run", "python", "-m", "workflows.check_active", "--limit", "500", "--concurrency", "10"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "AZURE_OPENAI_API_KEY", valueFrom = "/${var.app_name}/azure-openai-api-key" },
+      { name = "AZURE_OPENAI_ENDPOINT", valueFrom = "/${var.app_name}/azure-openai-endpoint" },
+      { name = "AZURE_OPENAI_DEPLOYMENT", valueFrom = "/${var.app_name}/azure-openai-deployment" },
+      { name = "SERPER_API_KEY", valueFrom = "/${var.app_name}/serper-api-key" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "check-active"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "check_active" {
+  name                = "${var.app_name}-check-active"
+  description         = "Check hotel active status every 12 hours"
+  schedule_expression = "rate(12 hours)"
+}
+
+resource "aws_cloudwatch_event_target" "check_active" {
+  rule      = aws_cloudwatch_event_rule.check_active.name
+  target_id = "check-active"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.check_active.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
 # Outputs
 output "cluster_name" {
   value = aws_ecs_cluster.main.name
@@ -1817,6 +1947,12 @@ output "scheduled_tasks" {
     # Exports
     export_states = aws_cloudwatch_event_rule.export_states.name
     export_crawl  = aws_cloudwatch_event_rule.export_crawl.name
+
+    # Normalization
+    normalize_locations = aws_cloudwatch_event_rule.normalize_locations.name
+
+    # Active status
+    check_active = aws_cloudwatch_event_rule.check_active.name
   }
 }
 

@@ -170,6 +170,30 @@ async def get_launched_count() -> int:
         return result["count"] if result else 0
 
 
+async def get_takedown_count() -> int:
+    """Count launched hotels without an active booking engine."""
+    async with get_conn() as conn:
+        result = await queries.get_takedown_count(conn)
+        return result["count"] if result else 0
+
+
+async def get_takedown_candidates(limit: int = 100) -> list:
+    """Get launched hotels without an active booking engine."""
+    async with get_conn() as conn:
+        results = await queries.get_takedown_candidates(conn, limit=limit)
+        return [dict(row) for row in results]
+
+
+async def takedown_hotels_without_engine(limit: int = 10000) -> List[int]:
+    """Take down launched hotels without an active booking engine.
+
+    Sets status back to 0 (pending). Returns list of taken-down hotel IDs.
+    """
+    async with get_conn() as conn:
+        results = await queries.takedown_hotels_without_engine(conn, limit=limit)
+        return [row["id"] for row in results]
+
+
 # ============================================================================
 # PIPELINE STATUS FUNCTIONS
 # ============================================================================

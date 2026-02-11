@@ -237,7 +237,8 @@ SELECT
     hrc.source AS room_count_source,
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
-    hcp.distance_km AS nearest_customer_distance_km
+    hcp.distance_km AS nearest_customer_distance_km,
+    h.is_active
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -273,7 +274,8 @@ SELECT
     hrc.source AS room_count_source,
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
-    hcp.distance_km AS nearest_customer_distance_km
+    hcp.distance_km AS nearest_customer_distance_km,
+    h.is_active
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -309,7 +311,8 @@ SELECT
     hrc.source AS room_count_source,
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
-    hcp.distance_km AS nearest_customer_distance_km
+    hcp.distance_km AS nearest_customer_distance_km,
+    h.is_active
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -345,7 +348,8 @@ SELECT
     hrc.source AS room_count_source,
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
-    hcp.distance_km AS nearest_customer_distance_km
+    hcp.distance_km AS nearest_customer_distance_km,
+    h.is_active
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -382,7 +386,8 @@ SELECT
     hrc.source AS room_count_source,
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
-    hcp.distance_km AS nearest_customer_distance_km
+    hcp.distance_km AS nearest_customer_distance_km,
+    h.is_active
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -418,7 +423,8 @@ SELECT
     NULL::text AS room_count_source,
     NULL::numeric AS room_count_confidence,
     NULL::text AS nearest_customer_name,
-    NULL::numeric AS nearest_customer_distance_km
+    NULL::numeric AS nearest_customer_distance_km,
+    h.is_active
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -815,6 +821,53 @@ RETURNING id;
 SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels
 WHERE status = 1;
+
+-- name: get_takedown_candidates
+-- Get launched hotels that have no booking engine record at all
+SELECT
+    h.id,
+    h.name AS hotel_name,
+    h.city,
+    h.state,
+    h.country,
+    h.source
+FROM sadie_gtm.hotels h
+WHERE h.status = 1
+  AND NOT EXISTS (
+      SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe
+      WHERE hbe.hotel_id = h.id
+  )
+ORDER BY h.country, h.state, h.name
+LIMIT :limit;
+
+-- name: get_takedown_count^
+-- Count launched hotels that have no booking engine record at all
+SELECT COUNT(*) AS count
+FROM sadie_gtm.hotels h
+WHERE h.status = 1
+  AND NOT EXISTS (
+      SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe
+      WHERE hbe.hotel_id = h.id
+  );
+
+-- name: takedown_hotels_without_engine
+-- Take down launched hotels that have no booking engine record at all
+-- Sets status back to 0 (pending). Returns taken-down hotel IDs.
+WITH to_takedown AS (
+    SELECT h.id
+    FROM sadie_gtm.hotels h
+    WHERE h.status = 1
+      AND NOT EXISTS (
+          SELECT 1 FROM sadie_gtm.hotel_booking_engines hbe
+          WHERE hbe.hotel_id = h.id
+      )
+    FOR UPDATE OF h SKIP LOCKED
+    LIMIT :limit
+)
+UPDATE sadie_gtm.hotels
+SET status = 0, updated_at = CURRENT_TIMESTAMP
+WHERE id IN (SELECT id FROM to_takedown)
+RETURNING id;
 
 -- ============================================================================
 -- LOCATION ENRICHMENT QUERIES
