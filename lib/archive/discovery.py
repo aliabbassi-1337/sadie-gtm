@@ -15,13 +15,26 @@ logger = logging.getLogger(__name__)
 
 
 def _get_brightdata_proxy_url() -> Optional[str]:
-    """Build Brightdata datacenter proxy URL from env vars if available."""
+    """Build Brightdata proxy URL from env vars if available.
+
+    Tries zones in cost order: datacenter → datacenter_alt → unlocker.
+    """
     customer_id = os.getenv("BRIGHTDATA_CUSTOMER_ID", "")
-    zone = os.getenv("BRIGHTDATA_DC_ZONE", "")
-    password = os.getenv("BRIGHTDATA_DC_PASSWORD", "")
-    if customer_id and zone and password:
-        username = f"brd-customer-{customer_id}-zone-{zone}"
-        return f"http://{username}:{password}@brd.superproxy.io:33335"
+    if not customer_id:
+        return None
+
+    # Try zones in cost order (cheapest first)
+    zone_configs = [
+        (os.getenv("BRIGHTDATA_DC_ZONE", ""), os.getenv("BRIGHTDATA_DC_PASSWORD", "")),
+        (os.getenv("BRIGHTDATA_DATACENTER_ZONE", ""), os.getenv("BRIGHTDATA_DATACENTER_PASSWORD", "")),
+        (os.getenv("BRIGHTDATA_ZONE", ""), os.getenv("BRIGHTDATA_ZONE_PASSWORD", "")),
+    ]
+
+    for zone, password in zone_configs:
+        if zone and password:
+            username = f"brd-customer-{customer_id}-zone-{zone}"
+            return f"http://{username}:{password}@brd.superproxy.io:33335"
+
     return None
 
 # Number of historical Common Crawl indexes to query
