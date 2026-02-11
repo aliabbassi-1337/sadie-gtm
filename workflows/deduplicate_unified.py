@@ -67,6 +67,41 @@ def normalize(text: str) -> str:
     return text.strip().lower()
 
 
+# Common street abbreviations → full forms for address comparison
+# Uses regex word-boundary matching to avoid replacing inside full words
+# (e.g., "Street" should NOT become "Streetreet")
+_STREET_ABBREVS = [
+    (r'\bst\b\.?', 'street'),
+    (r'\brd\b\.?', 'road'),
+    (r'\bave\b\.?', 'avenue'),
+    (r'\bdr\b\.?', 'drive'),
+    (r'\bblvd\b\.?', 'boulevard'),
+    (r'\bln\b\.?', 'lane'),
+    (r'\bct\b\.?', 'court'),
+    (r'\bpl\b\.?', 'place'),
+    (r'\bcres\b\.?', 'crescent'),
+    (r'\btce\b\.?', 'terrace'),
+    (r'\bhwy\b\.?', 'highway'),
+    (r'\bpde\b\.?', 'parade'),
+]
+
+
+def normalize_address(text: str) -> str:
+    """Normalize address for comparison — expand abbreviations, strip extra info."""
+    if not text:
+        return ""
+    addr = text.strip().lower()
+    # Take only the street part (before first comma) to strip city/state/zip
+    parts = addr.split(",")
+    addr = parts[0].strip()
+    # Expand street abbreviations (word-boundary safe)
+    for pattern, replacement in _STREET_ABBREVS:
+        addr = re.sub(pattern, replacement, addr)
+    # Collapse whitespace
+    addr = re.sub(r'\s+', ' ', addr).strip()
+    return addr
+
+
 def is_garbage_name(name: Optional[str]) -> bool:
     if not name:
         return True
@@ -94,39 +129,51 @@ RMS_ENGINE_NAMES = {"rms cloud", "rms"}
 
 
 def extract_rms_client_id(external_id: Optional[str]) -> Optional[str]:
-    """Extract the numeric RMS client ID from a booking URL or plain ID.
+    """Extract the RMS client ID (numeric or hex) from a booking URL or plain ID.
 
     Tries multiple URL patterns used by RMS Cloud, returns the first match.
+    IDs can be numeric (e.g. 18039) or hex (e.g. 29c9ae76f9bd6297).
+    All returned IDs are lowercased for consistent grouping.
     """
     if not external_id:
         return None
 
     url = external_id.strip()
 
-    # Pattern 1: /search/index/<ID>
-    m = re.search(r'/search/index/(\d+)(?:/|$)', url, re.IGNORECASE)
+    # Pattern 1: /search/index/<ID> (numeric or hex)
+    m = re.search(r'/search/index/([a-f0-9]+)(?:/|$)', url, re.IGNORECASE)
     if m:
-        return m.group(1)
+        return m.group(1).lower()
 
-    # Pattern 2: /rates/index/<ID>
-    m = re.search(r'/rates/index/(\d+)(?:/|$)', url, re.IGNORECASE)
+    # Pattern 2: /rates/index/<ID> (numeric or hex)
+    m = re.search(r'/rates/index/([a-f0-9]+)(?:/|$)', url, re.IGNORECASE)
     if m:
-        return m.group(1)
+        return m.group(1).lower()
 
-    # Pattern 3: rmscloud.com/<ID>
-    m = re.search(r'rmscloud\.com/(\d+)(?:/|$)', url, re.IGNORECASE)
+    # Pattern 3: rmscloud.com/<ID> (numeric or hex)
+    m = re.search(r'rmscloud\.com/([a-f0-9]+)(?:/|$)', url, re.IGNORECASE)
     if m:
-        return m.group(1)
+        return m.group(1).lower()
 
     # Pattern 4: ibe*.rmscloud.com/<ID>
-    m = re.search(r'ibe\d*\.rmscloud\.com/(\d+)', url, re.IGNORECASE)
+    m = re.search(r'ibe\d*\.rmscloud\.com/([a-f0-9]+)', url, re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
+
+    # Pattern 5: rms_<ID> prefix (from rms_scan source)
+    m = re.match(r'^rms_(\d+)$', url, re.IGNORECASE)
     if m:
         return m.group(1)
 
-    # Pattern 5: plain numeric ID (4+ digits)
+    # Pattern 6: plain numeric ID (4+ digits)
     m = re.match(r'^(\d{4,})$', url)
     if m:
         return m.group(1)
+
+    # Pattern 7: plain hex ID (8+ hex chars, not all digits)
+    m = re.match(r'^([a-f0-9]{8,})$', url, re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
 
     return None
 
@@ -543,9 +590,11 @@ async def run_dedup(
 
                     # Safety 2: skip groups where multiple records have DIFFERENT
                     # non-empty addresses -- likely chain hotels at different locations
+                    # Uses normalize_address() to expand abbreviations (St→Street)
+                    # and strip extra info after comma (city/state/zip)
                     addrs = set()
                     for r in recs:
-                        a = normalize(r.get("address", ""))
+                        a = normalize_address(r.get("address", ""))
                         if a:
                             addrs.add(a)
                     if len(addrs) > 1:
