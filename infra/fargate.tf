@@ -1848,7 +1848,7 @@ resource "aws_ecs_task_definition" "check_active" {
     name  = "check-active"
     image = "${var.ecr_repo_url}:latest"
 
-    command = ["uv", "run", "python", "-m", "workflows.check_active", "--limit", "500", "--concurrency", "10"]
+    command = ["uv", "run", "python", "-m", "workflows.check_active", "--limit", "500", "--concurrency", "50", "--rpm", "200"]
 
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" }

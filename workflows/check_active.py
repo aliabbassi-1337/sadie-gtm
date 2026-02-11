@@ -1,14 +1,15 @@
 """Check if hotel properties are still active/operating.
 
-Uses Azure OpenAI (gpt-35-turbo) with Serper web search as a custom tool
-to verify each hotel's operational status.
+Two-phase approach:
+1. Booking URL check (FREE) — if the booking page returns HTTP 200, hotel is active.
+2. LLM + web search (for dead/missing booking URLs only) — GPT-4o + Serper.
 
 Targets US hotels on Cloudbeds, Mews, RMS Cloud, and SiteMinder.
 
 Usage:
     uv run python -m workflows.check_active --limit 100
     uv run python -m workflows.check_active --limit 50 --dry-run
-    uv run python -m workflows.check_active --limit 4200 --concurrency 10
+    uv run python -m workflows.check_active --limit 4200 --concurrency 50
 """
 
 import asyncio
@@ -28,7 +29,7 @@ from db.client import init_db, close_db, get_conn
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 
 # Serper config
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
@@ -48,9 +49,12 @@ Rules:
 - "active" = hotel is currently operating and accepting guests
 - "closed" = hotel has permanently closed, been demolished, converted to other use, or rebranded under a completely different name
 - "unknown" = cannot determine with confidence
+- Default to "active" unless you find STRONG evidence of permanent closure
 - A hotel that was rebranded but still operates as a hotel at the same location is "active"
 - A hotel temporarily closed for renovation is "active"
 - If the hotel website is down but it's listed on booking sites, it's "active"
+- RV parks, campgrounds, retreats, marinas, and other non-traditional lodging that accept bookings are "active"
+- Recovery centers, colleges, or other non-hotel businesses that use booking software are "active"
 """
 
 SEARCH_TOOL = {
@@ -71,6 +75,41 @@ SEARCH_TOOL = {
     },
 }
 
+
+# ============================================================================
+# Phase 1: Booking URL check (FREE)
+# ============================================================================
+
+async def check_booking_url(client: httpx.AsyncClient, booking_url: str) -> Optional[bool]:
+    """Check if booking URL is alive. Returns True=active, None=inconclusive."""
+    if not booking_url:
+        return None
+
+    # Skip generic URLs that aren't property-specific
+    skip_patterns = [
+        "cloudbeds.com/hotel-management-software",
+        "cloudbeds.com/pms",
+        "mews.com/en",
+    ]
+    for pattern in skip_patterns:
+        if pattern in booking_url:
+            return None
+
+    try:
+        resp = await client.get(booking_url, follow_redirects=True, timeout=15.0)
+        if resp.status_code == 200:
+            return True
+        # 404 = booking page removed, likely closed
+        return None
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.ConnectTimeout):
+        return None
+    except Exception:
+        return None
+
+
+# ============================================================================
+# Phase 2: LLM + Serper search (for inconclusive cases)
+# ============================================================================
 
 async def serper_search(client: httpx.AsyncClient, query: str) -> str:
     """Execute a search via Serper API and return formatted results."""
@@ -104,19 +143,19 @@ async def serper_search(client: httpx.AsyncClient, query: str) -> str:
         return f"Search error: {e}"
 
 
-async def check_hotel_status(
+async def check_hotel_llm(
     client: httpx.AsyncClient,
     hotel_name: str,
     city: Optional[str],
     state: Optional[str],
 ) -> dict:
-    """Check a single hotel's status using Azure GPT + Serper search.
+    """Check a single hotel's status using Azure GPT-4o + Serper search.
 
     Returns {"status": "active"|"closed"|"unknown", "reason": "..."}.
     """
     location_parts = [p for p in [city, state] if p]
     location = ", ".join(location_parts) if location_parts else ""
-    user_msg = f"Is \"{hotel_name}\" in {location} still operating as a hotel?" if location else f"Is \"{hotel_name}\" still operating as a hotel?"
+    user_msg = f'Is "{hotel_name}" in {location} still operating?' if location else f'Is "{hotel_name}" still operating?'
 
     url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
     headers = {"api-key": AZURE_OPENAI_API_KEY, "Content-Type": "application/json"}
@@ -126,7 +165,6 @@ async def check_hotel_status(
         {"role": "user", "content": user_msg},
     ]
 
-    # Step 1: Ask GPT (it will call the search tool)
     for attempt in range(3):
         try:
             resp = await client.post(
@@ -159,7 +197,6 @@ async def check_hotel_status(
             if msg.get("tool_calls"):
                 messages.append(msg)
 
-                # Handle all tool calls (GPT sometimes makes multiple)
                 for tool_call in msg["tool_calls"]:
                     search_args = json.loads(tool_call["function"]["arguments"])
                     search_query = search_args.get("query", f"{hotel_name} {location}")
@@ -216,7 +253,6 @@ def _parse_response(text: str) -> dict:
     """Parse the LLM response into a status dict."""
     text = text.strip()
 
-    # Try to extract JSON from the response
     json_match = re.search(r'\{[^}]+\}', text)
     if json_match:
         try:
@@ -228,7 +264,6 @@ def _parse_response(text: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    # Fallback: look for keywords
     lower = text.lower()
     if "permanently closed" in lower or "no longer operat" in lower or "has closed" in lower:
         return {"status": "closed", "reason": text[:100]}
@@ -238,22 +273,41 @@ def _parse_response(text: str) -> dict:
     return {"status": "unknown", "reason": text[:100]}
 
 
+# ============================================================================
+# Orchestrator
+# ============================================================================
+
 async def check_hotel(
     client: httpx.AsyncClient,
     hotel: dict,
     semaphore: asyncio.Semaphore,
     rate_limiter: asyncio.Semaphore,
+    stats: dict,
 ) -> dict:
-    """Check a single hotel with concurrency and rate limit control."""
+    """Check a single hotel: booking URL first, then LLM if needed."""
     async with semaphore:
-        # Rate limit: acquire and release after delay to pace requests
-        async with rate_limiter:
-            hotel_id = hotel["id"]
-            name = hotel["name"]
-            city = hotel.get("city")
-            state = hotel.get("state")
+        hotel_id = hotel["id"]
+        name = hotel["name"]
+        city = hotel.get("city")
+        state = hotel.get("state")
+        booking_url = hotel.get("booking_url")
 
-            result = await check_hotel_status(client, name, city, state)
+        # Phase 1: Check booking URL (no rate limit needed)
+        url_result = await check_booking_url(client, booking_url)
+        if url_result is True:
+            stats["url_active"] += 1
+            return {
+                "hotel_id": hotel_id,
+                "hotel_name": name,
+                "is_active": True,
+                "status": "active",
+                "reason": "booking page alive",
+            }
+
+        # Phase 2: LLM + Serper (needs rate limiting)
+        async with rate_limiter:
+            stats["llm_checked"] += 1
+            result = await check_hotel_llm(client, name, city, state)
 
         is_active = None
         if result["status"] == "active":
@@ -278,7 +332,7 @@ async def _refill_rate_limiter(rate_limiter: asyncio.Semaphore, rpm: int, stop_e
         try:
             rate_limiter.release()
         except ValueError:
-            pass  # Already at max
+            pass
 
 
 async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: bool = False):
@@ -294,7 +348,9 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
 
     async with get_conn() as conn:
         hotels = await conn.fetch("""
-            SELECT DISTINCT h.id, h.name, h.city, h.state, h.active_checked_at
+            SELECT DISTINCT ON (h.id)
+                h.id, h.name, h.city, h.state, h.active_checked_at,
+                hbe.booking_url
             FROM sadie_gtm.hotels h
             JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
             JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -302,7 +358,7 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
               AND h.status >= 1
               AND LOWER(be.name) IN ('cloudbeds', 'mews', 'rms cloud', 'siteminder')
               AND (h.is_active IS NULL OR h.active_checked_at < NOW() - INTERVAL '30 days')
-            ORDER BY h.active_checked_at NULLS FIRST
+            ORDER BY h.id, h.active_checked_at NULLS FIRST
             LIMIT $1
         """, limit)
 
@@ -315,18 +371,17 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
     logger.info(f"Checking {total} US hotels (concurrency={concurrency}, rpm={rpm}, dry_run={dry_run})")
 
     semaphore = asyncio.Semaphore(concurrency)
-    # Token bucket rate limiter — start with a burst of `concurrency` tokens
     rate_limiter = asyncio.Semaphore(concurrency)
     stop_event = asyncio.Event()
     refiller = asyncio.create_task(_refill_rate_limiter(rate_limiter, rpm, stop_event))
 
+    stats = {"url_active": 0, "llm_checked": 0}
     all_results = []
     batch_size = 200
 
     async with httpx.AsyncClient(
         limits=httpx.Limits(max_connections=concurrency + 10, max_keepalive_connections=concurrency + 10),
     ) as client:
-        # Process in batches, commit each batch to DB
         for batch_start in range(0, total, batch_size):
             batch = hotels[batch_start:batch_start + batch_size]
             batch_num = batch_start // batch_size + 1
@@ -334,12 +389,11 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
             logger.info(f"Batch {batch_num}/{total_batches} ({len(batch)} hotels)")
 
             tasks = [
-                check_hotel(client, dict(h), semaphore, rate_limiter)
+                check_hotel(client, dict(h), semaphore, rate_limiter, stats)
                 for h in batch
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Filter out exceptions
             valid_results = []
             errors = 0
             for r in results:
@@ -358,7 +412,6 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
                 if r["status"] == "closed":
                     logger.info(f"  CLOSED: {r['hotel_name']} (id={r['hotel_id']}) reason={r['reason']}")
 
-            # Commit batch to DB immediately
             if not dry_run:
                 update_results = [r for r in valid_results if r["is_active"] is not None]
                 if update_results:
@@ -382,11 +435,12 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
     stop_event.set()
     refiller.cancel()
 
-    # Final summary
     total_active = sum(1 for r in all_results if r["status"] == "active")
     total_closed = sum(1 for r in all_results if r["status"] == "closed")
     total_unknown = sum(1 for r in all_results if r["status"] == "unknown")
     logger.info(f"TOTAL: {total_active} active, {total_closed} closed, {total_unknown} unknown")
+    logger.info(f"  Booking URL alive (skipped LLM): {stats['url_active']}")
+    logger.info(f"  Needed LLM check: {stats['llm_checked']}")
 
     if dry_run:
         logger.info("Dry run - no database updates were made")
