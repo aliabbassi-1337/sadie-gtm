@@ -67,6 +67,19 @@ def normalize(text: str) -> str:
     return text.strip().lower()
 
 
+def extract_website_domain(url: Optional[str]) -> str:
+    """Extract normalized domain from a website URL for comparison."""
+    if not url:
+        return ""
+    u = url.strip().lower()
+    u = re.sub(r'^https?://(www\.)?', '', u)
+    u = u.rstrip('/').split('/')[0]
+    # Ignore chain/corporate domains that many properties share
+    if not u or '.' not in u:
+        return ""
+    return u
+
+
 # Common street abbreviations → full forms for address comparison
 # Uses regex word-boundary matching to avoid replacing inside full words
 # (e.g., "Street" should NOT become "Streetreet")
@@ -298,7 +311,7 @@ async def fetch_hotels(
 
     where = " AND ".join(filters)
 
-    # Use a subquery to get engine name without multiplying rows
+    # Use a subquery to get engine name + booking_url without multiplying rows
     rows = await conn.fetch(f"""
         SELECT
             h.id as hotel_id,
@@ -318,7 +331,12 @@ async def fetch_hotels(
                 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
                 WHERE hbe.hotel_id = h.id AND hbe.status = 1
                 LIMIT 1
-            ) as engine_name
+            ) as engine_name,
+            (
+                SELECT hbe.booking_url FROM sadie_gtm.hotel_booking_engines hbe
+                WHERE hbe.hotel_id = h.id AND hbe.status = 1
+                LIMIT 1
+            ) as booking_url
         FROM sadie_gtm.hotels h
         WHERE {where}
         ORDER BY h.id
@@ -494,7 +512,8 @@ async def run_dedup(
             rms_no_client_id: List[Dict] = []
 
             for r in rms_records:
-                cid = extract_rms_client_id(r.get("external_id"))
+                # Try booking_url first (most reliable), fall back to external_id
+                cid = extract_rms_client_id(r.get("booking_url")) or extract_rms_client_id(r.get("external_id"))
                 if cid:
                     by_client_id[cid].append(r)
                 else:
@@ -604,12 +623,28 @@ async def run_dedup(
                         continue
 
                     # Safety 3: if city is empty AND no addresses to verify,
-                    # we only have name+engine to go on -- too risky
+                    # check if website or email domains match as an extra signal.
+                    # Matching website/email = safe to dedup even without location.
                     if not city_key and len(addrs) == 0:
-                        skipped_no_signal += 1
+                        websites = set()
+                        email_domains = set()
                         for r in recs:
-                            final_keepers.append(r)
-                        continue
+                            w = normalize(r.get("website") or "")
+                            if w:
+                                # Strip scheme and www for comparison
+                                w = re.sub(r'^https?://(www\.)?', '', w).rstrip('/')
+                                websites.add(w)
+                            e = (r.get("email") or "").strip().lower()
+                            if e and '@' in e:
+                                email_domains.add(e.split('@')[1])
+                        # Need at least one shared signal: same website or same email domain
+                        has_shared_website = len(websites) == 1 and len(websites) > 0
+                        has_shared_email = len(email_domains) == 1 and len(email_domains) > 0
+                        if not has_shared_website and not has_shared_email:
+                            skipped_no_signal += 1
+                            for r in recs:
+                                final_keepers.append(r)
+                            continue
 
                 keeper, dupe_ids = merge_group(recs)
                 final_keepers.append(keeper)
@@ -621,12 +656,129 @@ async def run_dedup(
             logger.info(f"Skipped {skipped_no_signal} groups (empty city + no address = no signal)")
             logger.info(f"Actual duplicate groups: {raw_dup_groups - total_skipped}")
 
-            logger.info(f"Stage 2 keepers: {len(final_keepers)}, dupes: {len(stage2_dupes)}")
+            logger.info(f"Stage 2a keepers: {len(final_keepers)}, dupes: {len(stage2_dupes)}")
+
+            # ==============================================================
+            # STAGE 2b: Deduplicate by Name + Website Domain + Engine
+            # Catches dupes with different city strings but same website
+            # (e.g. "Mollymook Beach" vs "Mollymook")
+            # ==============================================================
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("STAGE 2b: DEDUPLICATE BY NAME + WEBSITE + ENGINE")
+            logger.info("(Catches dupes with different city strings but same website)")
+            logger.info("=" * 70)
+
+            # Build groups from Stage 2a survivors (final_keepers)
+            by_name_web: Dict[Tuple[str, str, str], List[Dict]] = defaultdict(list)
+            for r in final_keepers:
+                domain = extract_website_domain(r.get("website"))
+                if not domain:
+                    continue
+                engine = normalize(r.get("engine_name") or "unknown")
+                name_key = normalize(r.get("name", ""))
+                if name_key:
+                    by_name_web[(name_key, domain, engine)].append(r)
+
+            raw_dup_groups_2b = sum(1 for recs in by_name_web.values() if len(recs) > 1)
+            logger.info(f"Raw name+website groups with duplicates: {raw_dup_groups_2b}")
+
+            stage2b_keepers = []
+            stage2b_dupes = []
+            skipped_2b_country = 0
+            skipped_2b_chain = 0
+
+            # Records NOT in any name+web group stay as-is
+            in_name_web = set()
+            for recs in by_name_web.values():
+                for r in recs:
+                    in_name_web.add(r["hotel_id"])
+            stage2b_passthrough = [r for r in final_keepers if r["hotel_id"] not in in_name_web]
+
+            for key, recs in by_name_web.items():
+                if len(recs) == 1:
+                    stage2b_keepers.append(recs[0])
+                    continue
+
+                name_key, domain, eng_key = key
+
+                # Safety: skip groups spanning multiple countries
+                countries = set()
+                for r in recs:
+                    c = normalize(r.get("country") or "")
+                    if c:
+                        countries.add(c)
+                if len(countries) > 1:
+                    skipped_2b_country += 1
+                    stage2b_keepers.extend(recs)
+                    continue
+
+                # Safety: skip groups with different non-empty cities
+                cities = set()
+                for r in recs:
+                    c = normalize(r.get("city") or "")
+                    if c and c not in GARBAGE_CITIES:
+                        cities.add(c)
+                if len(cities) > 1:
+                    skipped_2b_chain += 1
+                    stage2b_keepers.extend(recs)
+                    continue
+
+                # Safety: skip groups with different non-empty addresses
+                addrs = set()
+                for r in recs:
+                    a = normalize_address(r.get("address", ""))
+                    if a:
+                        addrs.add(a)
+                if len(addrs) > 1:
+                    skipped_2b_chain += 1
+                    stage2b_keepers.extend(recs)
+                    continue
+
+                keeper, dupe_ids = merge_group(recs)
+                stage2b_keepers.append(keeper)
+                stage2b_dupes.extend(dupe_ids)
+
+            final_keepers = stage2b_passthrough + stage2b_keepers
+
+            logger.info(f"Skipped {skipped_2b_country} groups (multi-country)")
+            logger.info(f"Skipped {skipped_2b_chain} groups (different city/address / chain)")
+            logger.info(f"Actual Stage 2b merges: {raw_dup_groups_2b - skipped_2b_country - skipped_2b_chain}")
+            logger.info(f"Stage 2b dupes: {len(stage2b_dupes)}")
+
+            # Filter by_name_web to only merged groups for sample display
+            merged_2b_keys = set()
+            for key, recs in by_name_web.items():
+                if len(recs) > 1:
+                    name_key, domain, eng_key = key
+                    cities = set()
+                    for r in recs:
+                        c = normalize(r.get("city") or "")
+                        if c and c not in GARBAGE_CITIES:
+                            cities.add(c)
+                    if len(cities) > 1:
+                        continue
+                    addrs = set()
+                    for r in recs:
+                        a = normalize_address(r.get("address", ""))
+                        if a:
+                            addrs.add(a)
+                    if len(addrs) > 1:
+                        continue
+                    countries = set()
+                    for r in recs:
+                        c2 = normalize(r.get("country") or "")
+                        if c2:
+                            countries.add(c2)
+                    if len(countries) > 1:
+                        continue
+                    merged_2b_keys.add(key)
+            by_name_web_merged = {k: v for k, v in by_name_web.items() if k in merged_2b_keys}
 
             # ==============================================================
             # SUMMARY
             # ==============================================================
-            all_dupes = stage1_all_dupes + stage2_dupes
+            all_dupes = stage1_all_dupes + stage2_dupes + stage2b_dupes
             logger.info("")
             logger.info("=" * 70)
             logger.info("SUMMARY")
@@ -634,7 +786,8 @@ async def run_dedup(
             logger.info(f"Original records:                    {len(records):>8,}")
             logger.info(f"Stage 1a duplicates (external_id):   {len(stage1a_dupes):>8,}")
             logger.info(f"Stage 1b duplicates (RMS client ID): {len(stage1b_dupes):>8,}")
-            logger.info(f"Stage 2  duplicates (name+city):     {len(stage2_dupes):>8,}")
+            logger.info(f"Stage 2a duplicates (name+city):     {len(stage2_dupes):>8,}")
+            logger.info(f"Stage 2b duplicates (name+website):  {len(stage2b_dupes):>8,}")
             logger.info(f"Total duplicates:                    {len(all_dupes):>8,}")
             logger.info(f"Final unique hotels:                 {len(final_keepers):>8,}")
             if records:
@@ -643,7 +796,7 @@ async def run_dedup(
                 )
 
             if dry_run:
-                _print_samples(by_ext_id, by_name_city, stage1a_dupes, stage2_dupes)
+                _print_samples(by_ext_id, by_name_city, by_name_web_merged, stage1a_dupes, stage2_dupes, stage2b_dupes)
                 logger.info("")
                 logger.info("Run with --execute to apply changes")
             else:
@@ -664,7 +817,7 @@ async def run_dedup(
         await close_db()
 
 
-def _print_samples(by_ext_id, by_name_city, stage1_dupes, stage2_dupes):
+def _print_samples(by_ext_id, by_name_city, by_name_web, stage1_dupes, stage2_dupes, stage2b_dupes):
     """Print sample merges for dry-run output."""
     if stage1_dupes:
         logger.info("")
@@ -692,7 +845,7 @@ def _print_samples(by_ext_id, by_name_city, stage1_dupes, stage2_dupes):
 
     if stage2_dupes:
         logger.info("")
-        logger.info("Sample Stage 2 merges (name+city+engine):")
+        logger.info("Sample Stage 2a merges (name+city+engine):")
         shown = 0
         for (n, c, eng), recs in by_name_city.items():
             if len(recs) > 1 and shown < 5:
@@ -711,6 +864,26 @@ def _print_samples(by_ext_id, by_name_city, stage1_dupes, stage2_dupes):
                     )
                 if len(recs) > 2:
                     logger.info(f"    ... and {len(recs) - 2} more")
+                shown += 1
+
+    if stage2b_dupes:
+        logger.info("")
+        logger.info("Sample Stage 2b merges (name+website+engine):")
+        shown = 0
+        for (n, dom, eng), recs in by_name_web.items():
+            if len(recs) > 1 and shown < 5:
+                recs_s = sorted(recs, key=score_record, reverse=True)
+                logger.info(
+                    f"  \"{n[:35]}\" + \"{dom}\" + [{eng}] ({len(recs)} records)"
+                )
+                for r in recs_s[:3]:
+                    tag = "KEEP" if r is recs_s[0] else "DUPE"
+                    logger.info(
+                        f"    {tag} [{r['hotel_id']}]: {(r.get('city') or '-')[:20]} | "
+                        f"score={score_record(r)}"
+                    )
+                if len(recs) > 3:
+                    logger.info(f"    ... and {len(recs) - 3} more")
                 shown += 1
 
 
