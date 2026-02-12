@@ -62,6 +62,14 @@ local:
     description: Check pipeline status (pending, processing, launched counts)
     command: uv run python workflows/launcher.py status
 
+  # RMS Australia availability check
+  rms_availability:
+    description: Check Australia RMS hotels for future availability
+    command: uv run python -m workflows.rms_availability --limit 100
+    # Use --status to see current statistics
+    # Use --force to re-check all hotels
+    # Use --dry-run to preview without updating database
+
 # =============================================================================
 # EC2 WORKFLOWS (auto-start on instance boot via systemd/cron)
 # =============================================================================
@@ -191,6 +199,14 @@ ec2:
     description: Enrich RMS hotels via API (location, contact, website)
     command: uv run python workflows/enrich_booking_engines.py rms --limit 200 --concurrency 10
     schedule: "*/15 * * * *"  # Every 15 min
+    type: cron
+    host: primary
+
+  # RMS Australia availability enrichment (check if hotels have future availability)
+  rms_availability:
+    description: Check Australia RMS hotels for availability 30 days ahead
+    command: uv run python -m workflows.rms_availability --limit 200 --concurrency 20
+    schedule: "0 */6 * * *"  # Every 6 hours
     type: cron
     host: primary
 
