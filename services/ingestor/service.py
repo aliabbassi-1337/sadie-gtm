@@ -58,9 +58,7 @@ class DiscoveryResult(BaseModel):
     alienvault_count: int = 0
     urlscan_count: int = 0
     virustotal_count: int = 0
-    crtsh_count: int = 0
     arquivo_count: int = 0
-    github_count: int = 0
     s3_key: Optional[str] = None
 
 
@@ -258,9 +256,7 @@ class Service(IService):
         enable_alienvault: bool = True,
         enable_urlscan: bool = True,
         enable_virustotal: bool = True,
-        enable_crtsh: bool = True,
         enable_arquivo: bool = True,
-        enable_github: bool = True,
         proxy_url: Optional[str] = None,
     ) -> List[DiscoveryResult]:
         """
@@ -300,9 +296,7 @@ class Service(IService):
             enable_alienvault=enable_alienvault,
             enable_urlscan=enable_urlscan,
             enable_virustotal=enable_virustotal,
-            enable_crtsh=enable_crtsh,
             enable_arquivo=enable_arquivo,
-            enable_github=enable_github,
             proxy_url=proxy_url,
         )
 
@@ -314,9 +308,7 @@ class Service(IService):
                 enable_alienvault=enable_alienvault,
                 enable_urlscan=enable_urlscan,
                 enable_virustotal=enable_virustotal,
-                enable_crtsh=enable_crtsh,
                 enable_arquivo=enable_arquivo,
-                enable_github=enable_github,
                 proxy_url=proxy_url,
             )
             results = {engine: slugs}
@@ -333,16 +325,13 @@ class Service(IService):
             av_count = sum(1 for s in slugs if s.archive_source == "alienvault")
             us_count = sum(1 for s in slugs if s.archive_source == "urlscan")
             vt_count = sum(1 for s in slugs if s.archive_source == "virustotal")
-            ct_count = sum(1 for s in slugs if s.archive_source == "crtsh")
             arq_count = sum(1 for s in slugs if s.archive_source == "arquivo")
-            gh_count = sum(1 for s in slugs if s.archive_source == "github")
 
             logger.info(
                 f"{eng.upper()}: {len(slugs)} NEW slugs "
                 f"(wayback: {wayback_count}, cc: {cc_count}, "
                 f"alienvault: {av_count}, urlscan: {us_count}, "
-                f"virustotal: {vt_count}, crtsh: {ct_count}, "
-                f"arquivo: {arq_count}, github: {gh_count})"
+                f"virustotal: {vt_count}, arquivo: {arq_count})"
             )
 
             # Prepare output data
@@ -371,9 +360,7 @@ class Service(IService):
                     alienvault_count=av_count,
                     urlscan_count=us_count,
                     virustotal_count=vt_count,
-                    crtsh_count=ct_count,
                     arquivo_count=arq_count,
-                    github_count=gh_count,
                     s3_key=s3_key,
                 )
             )

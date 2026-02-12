@@ -1,4 +1,4 @@
-"""Archive slug discovery from Wayback Machine, Common Crawl, AlienVault OTX, URLScan.io, VirusTotal, crt.sh, Arquivo.pt, and GitHub Code Search."""
+"""Archive slug discovery from Wayback Machine, Common Crawl, AlienVault OTX, URLScan.io, VirusTotal, crt.sh, and Arquivo.pt."""
 
 import asyncio
 import json
@@ -55,9 +55,6 @@ class BookingEnginePattern(BaseModel):
     slug_type: str = "numeric"
     # Domains to query for OSINT sources (AlienVault, URLScan)
     domains: list[str] = Field(default_factory=list)
-    # Regex to extract slug from crt.sh subdomain (None = skip crt.sh for this engine)
-    # Applied against the full certificate name_value (e.g. "bookings1234.rmscloud.com")
-    crtsh_subdomain_regex: Optional[str] = None
 
 
 class DiscoveredSlug(BaseModel):
@@ -80,8 +77,6 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.rmscloud.com/Search/Index/*",
         slug_type="mixed",  # numeric or hex
         domains=["rmscloud.com"],
-        # crt.sh: bookingsNNNN.rmscloud.com — extract the server number
-        crtsh_subdomain_regex=r"bookings(\d+)\.rmscloud\.com",
     ),
     BookingEnginePattern(
         name="rms_rates",
@@ -90,7 +85,6 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.rmscloud.com/Rates/Index/*",
         slug_type="mixed",
         domains=["rmscloud.com"],
-        # rms_rates shares the same subdomains as rms — skip to avoid duplicates
     ),
     BookingEnginePattern(
         name="rms_ibe",
@@ -99,8 +93,6 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="ibe*.rmscloud.com/*",
         slug_type="numeric",
         domains=["rmscloud.com"],
-        # crt.sh: ibeNNNN.rmscloud.com — extract the IBE number
-        crtsh_subdomain_regex=r"ibe(\d+)\.rmscloud\.com",
     ),
     BookingEnginePattern(
         name="cloudbeds",
@@ -158,8 +150,6 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.book-onlinenow.net/*",
         slug_type="alphanumeric",
         domains=["book-onlinenow.net"],
-        # crt.sh: {slug}.book-onlinenow.net — subdomain IS the slug
-        crtsh_subdomain_regex=r"([a-z0-9_-]+)\.book-onlinenow\.net",
     ),
     BookingEnginePattern(
         name="resnexus",
@@ -168,8 +158,6 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.resnexus.com/*",
         slug_type="alphanumeric",
         domains=["resnexus.com"],
-        # crt.sh: {slug}.resnexus.com — subdomain IS the slug
-        crtsh_subdomain_regex=r"([a-z0-9_-]+)\.resnexus\.com",
     ),
     BookingEnginePattern(
         name="webrez",
@@ -186,7 +174,6 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.thinkreservations.com/*",
         slug_type="alphanumeric",
         domains=["thinkreservations.com"],
-        crtsh_subdomain_regex=r"([a-z0-9_-]+)\.thinkreservations\.com",
     ),
     BookingEnginePattern(
         name="innroad",
@@ -195,7 +182,6 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.innroad.com/*",
         slug_type="alphanumeric",
         domains=["innroad.com"],
-        crtsh_subdomain_regex=r"([a-z0-9_-]+)\.innroad\.com",
     ),
     BookingEnginePattern(
         name="lodgify",
@@ -228,7 +214,6 @@ BOOKING_ENGINE_PATTERNS = [
         commoncrawl_url_pattern="*.streamlinevrs.com/*",
         slug_type="alphanumeric",
         domains=["streamlinevrs.com"],
-        crtsh_subdomain_regex=r"([a-z0-9_-]+)\.streamlinevrs\.com",
     ),
     BookingEnginePattern(
         name="escapia",
@@ -264,9 +249,7 @@ class ArchiveSlugDiscovery(BaseModel):
     enable_alienvault: bool = True
     enable_urlscan: bool = True
     enable_virustotal: bool = True
-    enable_crtsh: bool = True
     enable_arquivo: bool = True
-    enable_github: bool = True
     proxy_url: Optional[str] = None  # Brightdata proxy URL for OSINT sources
 
     model_config = {"arbitrary_types_allowed": True}
@@ -327,23 +310,11 @@ class ArchiveSlugDiscovery(BaseModel):
                 engine_slugs.extend(vt_slugs)
                 logger.info(f"  VirusTotal: {len(vt_slugs)} slugs")
 
-            # Query crt.sh (Certificate Transparency)
-            if self.enable_crtsh:
-                ct_slugs = await self.query_crtsh(pattern)
-                engine_slugs.extend(ct_slugs)
-                logger.info(f"  crt.sh: {len(ct_slugs)} slugs")
-
             # Query Arquivo.pt
             if self.enable_arquivo:
                 arq_slugs = await self.query_arquivo(pattern)
                 engine_slugs.extend(arq_slugs)
                 logger.info(f"  Arquivo.pt: {len(arq_slugs)} slugs")
-
-            # Query GitHub Code Search
-            if self.enable_github:
-                gh_slugs = await self.query_github(pattern)
-                engine_slugs.extend(gh_slugs)
-                logger.info(f"  GitHub: {len(gh_slugs)} slugs")
 
             # Dedupe by slug (case-insensitive)
             unique_slugs = self._dedupe_slugs(engine_slugs)
@@ -656,140 +627,6 @@ class ArchiveSlugDiscovery(BaseModel):
 
         return slugs
 
-    async def query_crtsh(
-        self, pattern: BookingEnginePattern
-    ) -> list[DiscoveredSlug]:
-        """Query crt.sh Certificate Transparency logs for subdomains containing slugs.
-
-        crt.sh records every SSL certificate ever issued. For engines with
-        subdomain-based slugs (e.g. bookings1234.rmscloud.com), this gives us
-        a near-complete list of all instances that have ever existed.
-
-        Uses direct Postgres connection (asyncpg) for unlimited results,
-        with HTTP JSON API fallback.
-        """
-        if not pattern.crtsh_subdomain_regex or not pattern.domains:
-            return []
-
-        slugs = []
-        # Subdomains to skip (common infra subdomains, not hotel slugs)
-        skip_prefixes = {"www", "mail", "ftp", "ns1", "ns2", "cpanel", "webmail",
-                         "autodiscover", "api", "staging", "dev", "test", "demo",
-                         "admin", "app", "cdn", "static", "img", "images", "docs"}
-
-        for domain in pattern.domains:
-            # Try Postgres first (no rate limit, full results)
-            ct_names = await self._query_crtsh_postgres(domain)
-
-            # Fall back to HTTP JSON API
-            if ct_names is None:
-                ct_names = await self._query_crtsh_http(domain)
-
-            if not ct_names:
-                continue
-
-            for name in ct_names:
-                name_lower = name.lower().strip()
-                # Skip wildcard certs and the bare domain
-                if name_lower.startswith("*.") or name_lower == domain:
-                    continue
-                # Skip common infra subdomains
-                sub = name_lower.split(".")[0]
-                if sub in skip_prefixes:
-                    continue
-
-                slug = self._extract_slug(name_lower, pattern.crtsh_subdomain_regex)
-                if slug:
-                    slugs.append(
-                        DiscoveredSlug(
-                            engine=pattern.name,
-                            slug=slug,
-                            source_url=f"https://{name_lower}",
-                            archive_source="crtsh",
-                        )
-                    )
-
-        return slugs
-
-    async def _query_crtsh_postgres(self, domain: str) -> Optional[list[str]]:
-        """Query crt.sh via direct Postgres connection. Returns list of name_values or None on failure."""
-        try:
-            import asyncpg
-        except ImportError:
-            logger.debug("asyncpg not available for crt.sh Postgres query")
-            return None
-
-        try:
-            conn = await asyncio.wait_for(
-                asyncpg.connect(
-                    host="crt.sh",
-                    port=5432,
-                    user="guest",
-                    database="certwatch",
-                    statement_cache_size=0,
-                ),
-                timeout=30,
-            )
-            try:
-                rows = await asyncio.wait_for(
-                    conn.fetch(
-                        """
-                        SELECT DISTINCT ci.NAME_VALUE
-                        FROM certificate_identity ci
-                        WHERE ci.NAME_TYPE = 'dNSName'
-                          AND lower(ci.NAME_VALUE) LIKE $1
-                          AND ci.NAME_VALUE NOT LIKE '*.%'
-                        """,
-                        f"%.{domain}",
-                    ),
-                    timeout=120,
-                )
-                names = [row["name_value"] for row in rows]
-                logger.info(f"  crt.sh Postgres: {len(names)} cert names for {domain}")
-                return names
-            finally:
-                await conn.close()
-        except asyncio.TimeoutError:
-            logger.warning(f"crt.sh Postgres timeout for {domain}, falling back to HTTP")
-            return None
-        except Exception as e:
-            logger.warning(f"crt.sh Postgres error for {domain}: {e}, falling back to HTTP")
-            return None
-
-    async def _query_crtsh_http(self, domain: str) -> Optional[list[str]]:
-        """Query crt.sh via HTTP JSON API. Fallback for when Postgres is unavailable."""
-        try:
-            async with self._make_client(use_proxy=False) as client:
-                response = await client.get(
-                    "https://crt.sh/",
-                    params={"q": f"%.{domain}", "output": "json"},
-                )
-
-                if response.status_code == 429:
-                    logger.warning(f"crt.sh HTTP rate limited for {domain}")
-                    return []
-
-                response.raise_for_status()
-                data = response.json()
-
-                names = set()
-                for entry in data:
-                    name = entry.get("name_value", "")
-                    # name_value can contain multiple names separated by newlines
-                    for n in name.split("\n"):
-                        n = n.strip()
-                        if n and not n.startswith("*."):
-                            names.add(n)
-
-                logger.info(f"  crt.sh HTTP: {len(names)} cert names for {domain}")
-                return list(names)
-        except httpx.HTTPError as e:
-            logger.warning(f"crt.sh HTTP query failed for {domain}: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"crt.sh HTTP error for {domain}: {e}")
-            return []
-
     async def query_arquivo(
         self, pattern: BookingEnginePattern
     ) -> list[DiscoveredSlug]:
@@ -849,110 +686,6 @@ class ArchiveSlugDiscovery(BaseModel):
                 logger.error(f"Arquivo.pt error for {pattern.name}/{domain}: {e}")
 
             await asyncio.sleep(0.25)  # Rate limit courtesy
-
-        return slugs
-
-    async def query_github(
-        self, pattern: BookingEnginePattern
-    ) -> list[DiscoveredSlug]:
-        """Query GitHub Code Search API for booking engine URLs in public repos.
-
-        Finds hotel developers who commit booking widget URLs, iframe embeds,
-        config files, or integration tests to public repositories.
-
-        Requires GITHUB_TOKEN env var for higher rate limits (30 req/min with auth,
-        10 req/min without).
-        """
-        if not pattern.domains:
-            return []
-
-        slugs = []
-        token = os.getenv("GITHUB_TOKEN")
-        headers = {"Accept": "application/vnd.github.text-match+json"}
-        if token:
-            headers["Authorization"] = f"token {token}"
-        else:
-            logger.debug(f"No GITHUB_TOKEN set, GitHub search will be rate-limited for {pattern.name}")
-
-        try:
-            async with self._make_client(use_proxy=False) as client:
-                for domain in pattern.domains:
-                    page = 1
-                    total_fetched = 0
-                    max_pages = 10  # GitHub caps at 1000 results (100/page * 10)
-
-                    while page <= max_pages:
-                        params = {
-                            "q": domain,
-                            "per_page": 100,
-                            "page": page,
-                        }
-
-                        try:
-                            response = await client.get(
-                                "https://api.github.com/search/code",
-                                params=params,
-                                headers=headers,
-                            )
-
-                            if response.status_code == 403:
-                                # Rate limit exceeded
-                                reset = response.headers.get("X-RateLimit-Reset")
-                                logger.warning(f"GitHub rate limited on {domain}, page {page}")
-                                break
-
-                            if response.status_code == 422:
-                                # Validation error (e.g., query too broad)
-                                logger.warning(f"GitHub search validation error for {domain}")
-                                break
-
-                            response.raise_for_status()
-                            data = response.json()
-
-                            items = data.get("items", [])
-                            if not items:
-                                break
-
-                            for item in items:
-                                # Extract from text_matches (includes surrounding context)
-                                for match in item.get("text_matches", []):
-                                    fragment = match.get("fragment", "")
-                                    # Find all URLs in the fragment
-                                    for url_match in re.finditer(
-                                        rf"https?://[^\s\"'<>]*{re.escape(domain)}[^\s\"'<>]*",
-                                        fragment,
-                                    ):
-                                        url = url_match.group(0)
-                                        slug = self._extract_slug(url, pattern.slug_regex)
-                                        if slug:
-                                            slugs.append(
-                                                DiscoveredSlug(
-                                                    engine=pattern.name,
-                                                    slug=slug,
-                                                    source_url=url,
-                                                    archive_source="github",
-                                                )
-                                            )
-
-                            total_fetched += len(items)
-                            total_count = data.get("total_count", 0)
-
-                            if total_fetched >= total_count:
-                                break
-
-                            page += 1
-                            # GitHub search: 10 req/min unauthenticated, 30 req/min authenticated
-                            await asyncio.sleep(6 if not token else 2)
-
-                        except httpx.HTTPStatusError as e:
-                            logger.warning(f"GitHub search failed for {domain} page {page}: {e}")
-                            break
-                        except httpx.HTTPError as e:
-                            logger.warning(f"GitHub request error for {domain}: {e}")
-                            break
-
-        except Exception as e:
-            logger.error(f"GitHub error for {pattern.name}: {e}")
 
         return slugs
 
@@ -1146,9 +879,7 @@ async def discover_slugs_for_engine(
     enable_alienvault: bool = True,
     enable_urlscan: bool = True,
     enable_virustotal: bool = True,
-    enable_crtsh: bool = True,
     enable_arquivo: bool = True,
-    enable_github: bool = True,
     proxy_url: Optional[str] = None,
 ) -> list[DiscoveredSlug]:
     """
@@ -1162,9 +893,7 @@ async def discover_slugs_for_engine(
         enable_alienvault: Query AlienVault OTX
         enable_urlscan: Query URLScan.io
         enable_virustotal: Query VirusTotal
-        enable_crtsh: Query crt.sh Certificate Transparency logs
         enable_arquivo: Query Arquivo.pt
-        enable_github: Query GitHub Code Search
         proxy_url: Optional proxy URL for all requests
     """
     discovery = ArchiveSlugDiscovery(
@@ -1173,9 +902,7 @@ async def discover_slugs_for_engine(
         enable_alienvault=enable_alienvault,
         enable_urlscan=enable_urlscan,
         enable_virustotal=enable_virustotal,
-        enable_crtsh=enable_crtsh,
         enable_arquivo=enable_arquivo,
-        enable_github=enable_github,
         proxy_url=proxy_url,
     )
     pattern = next((p for p in BOOKING_ENGINE_PATTERNS if p.name == engine_name), None)
@@ -1194,12 +921,8 @@ async def discover_slugs_for_engine(
         all_slugs.extend(await discovery.query_urlscan(pattern))
     if enable_virustotal:
         all_slugs.extend(await discovery.query_virustotal(pattern))
-    if enable_crtsh:
-        all_slugs.extend(await discovery.query_crtsh(pattern))
     if enable_arquivo:
         all_slugs.extend(await discovery.query_arquivo(pattern))
-    if enable_github:
-        all_slugs.extend(await discovery.query_github(pattern))
 
     unique_slugs = discovery._dedupe_slugs(all_slugs)
 

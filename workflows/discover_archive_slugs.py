@@ -81,19 +81,9 @@ async def main():
         help="Disable VirusTotal queries",
     )
     parser.add_argument(
-        "--no-crtsh",
-        action="store_true",
-        help="Disable crt.sh Certificate Transparency queries",
-    )
-    parser.add_argument(
         "--no-arquivo",
         action="store_true",
         help="Disable Arquivo.pt queries",
-    )
-    parser.add_argument(
-        "--no-github",
-        action="store_true",
-        help="Disable GitHub Code Search queries",
     )
     parser.add_argument(
         "--no-proxy",
@@ -123,9 +113,7 @@ async def main():
         enable_alienvault=not args.no_alienvault,
         enable_urlscan=not args.no_urlscan,
         enable_virustotal=not args.no_virustotal,
-        enable_crtsh=not args.no_crtsh,
         enable_arquivo=not args.no_arquivo,
-        enable_github=not args.no_github,
         proxy_url=proxy_url,
     )
 
@@ -141,12 +129,8 @@ async def main():
             parts.append(f"urlscan: {r.urlscan_count}")
         if r.virustotal_count:
             parts.append(f"virustotal: {r.virustotal_count}")
-        if r.crtsh_count:
-            parts.append(f"crtsh: {r.crtsh_count}")
         if r.arquivo_count:
             parts.append(f"arquivo: {r.arquivo_count}")
-        if r.github_count:
-            parts.append(f"github: {r.github_count}")
         breakdown = ", ".join(parts)
         print(f"{r.engine}: {r.total_slugs} new slugs ({breakdown})")
         if r.s3_key:
