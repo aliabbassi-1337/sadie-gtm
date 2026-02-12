@@ -131,17 +131,18 @@ class TestSiteMinderBuild:
 
 
 class TestCloudbedseBuild:
-    def test_checkout_url(self):
+    def test_search_page_with_hash_params(self):
         req = _make_request("https://hotels.cloudbeds.com/reservation/kypwgi")
         result = generate_deeplink(req)
         assert result.engine_name == "Cloudbeds"
         assert result.confidence == DeepLinkConfidence.HIGH
         assert result.dates_prefilled is True
-        # Tier 1 Cloudbeds goes to /guests checkout page with query params
-        assert "/reservation/kypwgi/guests" in result.url
+        # Hash params auto-trigger room search with dates pre-filled
+        assert "/reservation/kypwgi#" in result.url
         assert "checkin=2026-03-01" in result.url
         assert "checkout=2026-03-03" in result.url
         assert "adults=2" in result.url
+        assert "submit=1" in result.url
 
 
 class TestMewsBuild:

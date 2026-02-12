@@ -1,12 +1,13 @@
 """Cloudbeds deep-link URL builder.
 
-Checkout URL (query params, goes straight to guest details):
-  https://hotels.cloudbeds.com/en/reservation/{slug}/guests?checkin=2026-07-01&checkout=2026-07-05&adults=2&kids=0&currency=usd
+With room_type_id: skips room selection, goes to checkout:
+  https://hotels.cloudbeds.com/reservation/{slug}#checkin=...&checkout=...&adults=2&room_type_id=560388&submit=1
+
+Without room_type_id: lands on search page with dates pre-filled.
 """
 
 import re
 from typing import Optional
-from urllib.parse import urlencode
 
 from lib.deeplink.engines.base import EngineBuilder
 from lib.deeplink.models import DeepLinkConfidence, DeepLinkRequest, DeepLinkResult
@@ -48,16 +49,17 @@ class CloudbedsBuilder(EngineBuilder):
                 original_url=request.booking_url,
             )
 
-        params = {
-            "checkin": request.checkin.isoformat(),
-            "checkout": request.checkout.isoformat(),
-            "adults": request.adults,
-            "kids": request.children,
-            "currency": "usd",
-        }
-
-        base = f"https://hotels.cloudbeds.com/en/reservation/{slug}/guests"
-        url = f"{base}?{urlencode(params)}"
+        # Hash params auto-trigger room search with dates pre-filled
+        # If rate_id is provided, use it as room_type_id to skip room selection
+        parts = [
+            f"checkin={request.checkin.isoformat()}",
+            f"checkout={request.checkout.isoformat()}",
+            f"adults={request.adults}",
+        ]
+        if request.rate_id:
+            parts.append(f"room_type_id={request.rate_id}")
+        parts.append("submit=1")
+        url = f"https://hotels.cloudbeds.com/reservation/{slug}#{'&'.join(parts)}"
 
         return DeepLinkResult(
             url=url,
