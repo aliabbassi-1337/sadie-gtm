@@ -1,11 +1,14 @@
 """Check if hotel properties are still active/operating.
 
 Multi-phase approach (cheapest signals first):
-1. Booking URL check (FREE) — if the booking page returns HTTP 200, hotel is active.
-2. Website check (FREE) — if the hotel website is alive and not parked, hotel is active.
-3. Serper search ($0.001) — parse Knowledge Graph / Yelp for "Permanently closed".
-4. LLM fallback ($) — GPT-4o interprets search results (only for ambiguous cases).
-5. OTA confirmation — if marked closed, verify it's not bookable on major OTAs.
+1. Booking URL + Website check (FREE, parallel) — combined signal determines next step.
+   - Both alive → Active (high confidence, skip paid checks)
+   - Booking alive + website dead/missing → Needs Serper verification
+   - Booking dead + website alive → Active (switched engines)
+   - Both dead/missing → Needs Serper verification
+2. Serper search ($0.001) — parse Knowledge Graph / Yelp for "Permanently closed".
+3. LLM fallback ($) — GPT-4o interprets search results (only for ambiguous cases).
+4. OTA confirmation — if marked closed, verify it's not bookable on major OTAs.
 
 Usage:
     uv run python -m workflows.check_active --limit 100
@@ -400,7 +403,7 @@ async def check_hotel(
     rate_limiter: asyncio.Semaphore,
     stats: dict,
 ) -> dict:
-    """Check a single hotel: booking URL → website → LLM → OTA confirmation."""
+    """Check a single hotel using combined booking URL + website signals."""
     async with semaphore:
         hotel_id = hotel["id"]
         name = hotel["name"]
@@ -409,35 +412,47 @@ async def check_hotel(
         booking_url = hotel.get("booking_url")
         website = hotel.get("website")
 
-        # Phase 1: Check booking URL (FREE)
-        url_result = await check_booking_url(client, booking_url)
-        if url_result is True:
+        # Phase 1: Check booking URL AND website in parallel (FREE)
+        url_result, web_result = await asyncio.gather(
+            check_booking_url(client, booking_url),
+            check_website(client, website),
+        )
+
+        booking_alive = url_result is True
+        website_alive = web_result is True
+
+        # Decision matrix
+        if booking_alive and website_alive:
+            # Both alive → high confidence active, skip paid checks
             stats["url_active"] += 1
             return {
                 "hotel_id": hotel_id,
                 "hotel_name": name,
                 "is_active": True,
                 "status": "active",
-                "reason": "booking page alive",
+                "reason": "booking page + website both alive",
             }
 
-        # Phase 2: Check hotel website (FREE)
-        web_result = await check_website(client, website)
-        if web_result is True:
+        if not booking_alive and website_alive:
+            # Booking dead but website alive → switched engines, still active
             stats["website_active"] += 1
             return {
                 "hotel_id": hotel_id,
                 "hotel_name": name,
                 "is_active": True,
                 "status": "active",
-                "reason": "website alive",
+                "reason": "website alive (booking URL dead/missing)",
             }
 
-        # Phase 3: Serper → Knowledge Graph → LLM fallback (rate limited)
+        # Booking alive + website dead/missing → needs verification
+        # Both dead/missing → needs verification
+        # Either way, fall through to Serper
+
+        # Phase 2: Serper → Knowledge Graph → Yelp → LLM fallback (rate limited)
         async with rate_limiter:
             result = await check_hotel_serper(client, name, city, state, stats)
 
-        # Phase 3b: If marked closed, double-check against OTAs
+        # Phase 3: If marked closed, double-check against OTAs
         if result["status"] == "closed":
             async with rate_limiter:
                 stats["ota_checked"] += 1
@@ -478,7 +493,7 @@ async def _refill_rate_limiter(rate_limiter: asyncio.Semaphore, rpm: int, stop_e
             pass
 
 
-async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: bool = False, country: str = "United States", engine: Optional[str] = None):
+async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run: bool = False, country: str = "United States", engine: Optional[str] = None):
     """Run active status check on hotels by country and optionally by booking engine."""
     if not AZURE_OPENAI_API_KEY:
         logger.error("AZURE_OPENAI_API_KEY not set")
@@ -585,8 +600,8 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
     total_closed = sum(1 for r in all_results if r["status"] == "closed")
     total_unknown = sum(1 for r in all_results if r["status"] == "unknown")
     logger.info(f"TOTAL: {total_active} active, {total_closed} closed, {total_unknown} unknown")
-    logger.info(f"  Booking URL alive (FREE): {stats['url_active']}")
-    logger.info(f"  Website alive (FREE): {stats['website_active']}")
+    logger.info(f"  Both alive (FREE): {stats['url_active']}")
+    logger.info(f"  Website only (FREE): {stats['website_active']}")
     logger.info(f"  Knowledge Graph closed: {stats['kg_closed']}")
     logger.info(f"  Yelp closed: {stats['yelp_closed']}")
     logger.info(f"  LLM fallback: {stats['llm_checked']}")
@@ -603,7 +618,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Check hotel active status")
     parser.add_argument("--limit", type=int, default=500, help="Max hotels to check")
     parser.add_argument("--concurrency", type=int, default=50, help="Concurrent checks")
-    parser.add_argument("--rpm", type=int, default=200, help="Azure OpenAI requests per minute limit")
+    parser.add_argument("--rpm", type=int, default=1000, help="Azure OpenAI requests per minute limit")
     parser.add_argument("--dry-run", action="store_true", help="Don't update database")
     parser.add_argument("--country", type=str, default="United States", help="Country to check (default: United States)")
     parser.add_argument("--engine", type=str, default=None, help="Single booking engine to filter by (e.g. 'rms cloud')")
