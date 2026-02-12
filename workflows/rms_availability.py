@@ -49,6 +49,42 @@ CHECK_DATE_RANGES = [
     (90, 92),  # 90 days ahead (90-day range)
 ]
 
+# Rate limiting configuration
+_host_semaphores: dict[str, asyncio.Semaphore] = {}
+_host_last_request: dict[str, datetime] = {}
+_min_delay_between_requests = 2.0  # Minimum seconds between requests to same host
+_max_retries = 3  # Max retries for 429 errors
+_base_retry_delay = 5.0  # Base delay for exponential backoff
+
+
+def _get_host_semaphore(url: str) -> asyncio.Semaphore:
+    """Get or create a per-host semaphore to limit concurrent requests."""
+    try:
+        host = urlparse(url).hostname or "unknown"
+    except Exception:
+        host = "unknown"
+    if host not in _host_semaphores:
+        _host_semaphores[host] = asyncio.Semaphore(3)  # Max 3 concurrent per host
+    return _host_semaphores[host]
+
+
+async def _respect_rate_limit(url: str):
+    """Ensure we wait enough time between requests to the same host."""
+    try:
+        host = urlparse(url).hostname or "unknown"
+    except Exception:
+        host = "unknown"
+
+    now = datetime.now()
+    if host in _host_last_request:
+        elapsed = (now - _host_last_request[host]).total_seconds()
+        if elapsed < _min_delay_between_requests:
+            wait_time = _min_delay_between_requests - elapsed
+            logger.debug(f"Rate limit: waiting {wait_time:.2f}s for {host}")
+            await asyncio.sleep(wait_time)
+
+    _host_last_request[host] = datetime.now()
+
 
 async def check_rms_availability_single_date(
     client: httpx.AsyncClient,
@@ -111,31 +147,65 @@ async def check_rms_availability_single_date(
 
     availability_url = f"{RMS_BASE_URL}/{client_id}/{prop_id}?{urlencode(params)}"
 
-    try:
-        resp = await client.get(
-            availability_url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-            follow_redirects=True,
-            timeout=30.0,
+    # Use per-host semaphore and rate limiting
+    host_semaphore = _get_host_semaphore(availability_url)
+
+    async with host_semaphore:
+        # Respect rate limit between requests
+        await _respect_rate_limit(availability_url)
+
+        # Try with retries for 429 errors
+        for attempt in range(_max_retries):
+            try:
+                resp = await client.get(
+                    availability_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept-Encoding": "gzip, deflate, br",
+                        "DNT": "1",
+                        "Connection": "keep-alive",
+                        "Upgrade-Insecure-Requests": "1",
+                        "Sec-Fetch-Dest": "document",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Site": "none",
+                        "Sec-Fetch-User": "?1",
+                        "Cache-Control": "max-age=0",
+                    },
+                    follow_redirects=True,
+                    timeout=30.0,
+                )
+
+                if resp.status_code == 429:
+                    # Rate limited - exponential backoff
+                    retry_delay = _base_retry_delay * (2**attempt)
+                    logger.warning(
+                        f"429 rate limit for {booking_url}, retrying in {retry_delay}s (attempt {attempt + 1}/{_max_retries})"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    continue
+
+                if resp.status_code != 200:
+                    logger.debug(f"Non-200 status {resp.status_code} for {booking_url}")
+                    return None
+
+                html_content = resp.text
+
+                # Parse HTML for availability indicators
+                return _parse_availability_from_html(html_content, booking_url)
+
+            except httpx.TimeoutException:
+                logger.debug(f"Timeout checking availability for {booking_url}")
+                return None
+            except Exception as e:
+                logger.debug(f"Error checking availability for {booking_url}: {e}")
+                return None
+
+        # All retries exhausted
+        logger.warning(
+            f"All {_max_retries} retries exhausted for {booking_url} (429 rate limit)"
         )
-
-        if resp.status_code != 200:
-            logger.debug(f"Non-200 status {resp.status_code} for {booking_url}")
-            return None
-
-        html_content = resp.text
-
-        # Parse HTML for availability indicators
-        return _parse_availability_from_html(html_content, booking_url)
-
-    except httpx.TimeoutException:
-        logger.debug(f"Timeout checking availability for {booking_url}")
-        return None
-    except Exception as e:
-        logger.debug(f"Error checking availability for {booking_url}: {e}")
         return None
 
 
@@ -495,10 +565,25 @@ async def run(
             return
 
         mode = "FORCE RECHECK" if force else "pending only"
+
+        # Estimate ETA
+        total_requests = len(hotels) * len(CHECK_DATE_RANGES)
+        requests_per_second = concurrency / (
+            _min_delay_between_requests + 1.5
+        )  # 1.5s avg response time
+        estimated_seconds = total_requests / requests_per_second
+        eta_minutes = int(estimated_seconds / 60)
+        eta_seconds = int(estimated_seconds % 60)
+
         logger.info(
             f"Processing {len(hotels)} Australia RMS leads ({mode}, concurrency={concurrency})"
         )
-        logger.info(f"Checking {len(CHECK_DATE_RANGES)} date ranges per hotel")
+        logger.info(
+            f"Checking {len(CHECK_DATE_RANGES)} date ranges per hotel ({total_requests} total requests)"
+        )
+        logger.info(
+            f"Estimated time: ~{eta_minutes}m {eta_seconds}s (with rate limiting)"
+        )
 
         # Process hotels concurrently
         semaphore = asyncio.Semaphore(concurrency)
@@ -589,8 +674,8 @@ Examples:
         "--concurrency",
         "-c",
         type=int,
-        default=20,
-        help="Concurrent requests (default: 20)",
+        default=10,
+        help="Concurrent requests (default: 10, lower = more respectful to servers)",
     )
     parser.add_argument(
         "--force",
