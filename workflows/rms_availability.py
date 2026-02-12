@@ -485,7 +485,7 @@ async def run(
                 max_connections=concurrency * 2,
                 max_keepalive_connections=concurrency * 2,
             ),
-            http2=True,  # Enable HTTP/2 for better performance
+            http2=False,
         ) as client:
             tasks = [
                 process_hotel_optimized(client, hotel, semaphore) for hotel in hotels
