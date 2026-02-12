@@ -1,32 +1,21 @@
 #!/usr/bin/env python3
-"""RMS Availability Enrichment Workflow
+"""RMS Availability Enrichment Workflow (Optimized)
 
-Checks if Australia RMS hotels have availability by calling their booking API
-with future dates and scraping the HTML response.
-
-Tries multiple date ranges (30, 60, 90 days ahead) to ensure we don't miss
-availability due to seasonal closures or specific date restrictions.
-
-The RMS booking API URL format:
-https://bookings12.rmscloud.com/Rates/Index/{client_id}/{prop_id}?A={arrival}&D={departure}&Ad=2
+Checks if Australia RMS hotels have availability with optimized performance.
+Uses adaptive rate limiting, host-aware parallelism, and smart early exits.
 
 Usage:
     # Check availability for 100 hotels
     uv run python -m workflows.rms_availability --limit 100
 
-    # Force re-check all hotels (even if already checked)
-    uv run python -m workflows.rms_availability --limit 100 --force
-
-    # Dry run (don't update database)
-    uv run python -m workflows.rms_availability --limit 100 --dry-run
-
-    # Check status
-    uv run python -m workflows.rms_availability --status
+    # Check 3.7k hotels with optimized settings
+    uv run python -m workflows.rms_availability --limit 3700 --concurrency 30
 """
 
 import asyncio
 import argparse
 import re
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlparse, urlencode
@@ -36,285 +25,252 @@ from loguru import logger
 
 from db.client import init_db, close_db, get_conn
 
-
 # RMS API configuration
 RMS_BASE_URL = "https://bookings12.rmscloud.com/Rates/Index"
 
 # Multiple date ranges to check (days ahead)
-# Strategy: 1 check in 30-day range, 2 checks in 60-day range, 1 check in 90-day range
 CHECK_DATE_RANGES = [
-    (30, 32),  # 30 days ahead (30-day range)
-    (60, 62),  # 60 days ahead (60-day range - first check)
-    (75, 77),  # 75 days ahead (60-day range - second check, different interval)
-    (90, 92),  # 90 days ahead (90-day range)
+    (30, 32),  # 30 days ahead
+    (60, 62),  # 60 days ahead
+    (75, 77),  # 75 days ahead (different interval)
+    (90, 92),  # 90 days ahead
 ]
 
-# Rate limiting configuration
+# OPTIMIZED Rate limiting - adaptive approach
+_host_stats: dict[str, dict] = defaultdict(
+    lambda: {
+        "last_request": datetime.min,
+        "consecutive_429s": 0,
+        "current_delay": 0.5,  # Start aggressive at 0.5s
+    }
+)
+
+# Per-host semaphores - different RMS hosts can be hit in parallel
 _host_semaphores: dict[str, asyncio.Semaphore] = {}
-_host_last_request: dict[str, datetime] = {}
-_min_delay_between_requests = 2.0  # Minimum seconds between requests to same host
-_max_retries = 3  # Max retries for 429 errors
-_base_retry_delay = 5.0  # Base delay for exponential backoff
+_host_lock = asyncio.Lock()
+
+# Global adaptive delay
+_adaptive_delay = 0.5
+_adaptive_lock = asyncio.Lock()
+
+# Optimized retry config
+_max_retries = 3
+_base_retry_delay = 2.0  # Faster retries
 
 
-def _get_host_semaphore(url: str) -> asyncio.Semaphore:
-    """Get or create a per-host semaphore to limit concurrent requests."""
-    try:
-        host = urlparse(url).hostname or "unknown"
-    except Exception:
-        host = "unknown"
-    if host not in _host_semaphores:
-        _host_semaphores[host] = asyncio.Semaphore(3)  # Max 3 concurrent per host
-    return _host_semaphores[host]
+async def _get_or_create_host_semaphore(
+    host: str, max_concurrent: int = 5
+) -> asyncio.Semaphore:
+    """Get or create a semaphore for a specific host with proper locking."""
+    async with _host_lock:
+        if host not in _host_semaphores:
+            _host_semaphores[host] = asyncio.Semaphore(max_concurrent)
+        return _host_semaphores[host]
 
 
-async def _respect_rate_limit(url: str):
-    """Ensure we wait enough time between requests to the same host."""
-    try:
-        host = urlparse(url).hostname or "unknown"
-    except Exception:
-        host = "unknown"
+async def _adapt_rate_limit(host: str, got_429: bool = False):
+    """Adaptively adjust rate limiting based on server response.
 
+    If we get 429s, increase delay. If successful, gradually decrease.
+    """
+    global _adaptive_delay
+
+    async with _adaptive_lock:
+        stats = _host_stats[host]
+
+        if got_429:
+            stats["consecutive_429s"] += 1
+            # Exponential backoff for this host
+            stats["current_delay"] = min(5.0, stats["current_delay"] * 1.5)
+            _adaptive_delay = max(_adaptive_delay, stats["current_delay"])
+            logger.debug(
+                f"Rate limit hit on {host}, increased delay to {stats['current_delay']:.2f}s"
+            )
+        else:
+            if stats["consecutive_429s"] > 0:
+                stats["consecutive_429s"] = 0
+                # Gradually decrease delay on success
+                stats["current_delay"] = max(0.3, stats["current_delay"] * 0.9)
+
+
+async def _respect_rate_limit(host: str):
+    """Wait appropriate time before making request to host."""
+    stats = _host_stats[host]
     now = datetime.now()
-    if host in _host_last_request:
-        elapsed = (now - _host_last_request[host]).total_seconds()
-        if elapsed < _min_delay_between_requests:
-            wait_time = _min_delay_between_requests - elapsed
-            logger.debug(f"Rate limit: waiting {wait_time:.2f}s for {host}")
-            await asyncio.sleep(wait_time)
 
-    _host_last_request[host] = datetime.now()
+    elapsed = (now - stats["last_request"]).total_seconds()
+    delay_needed = stats["current_delay"] - elapsed
+
+    if delay_needed > 0:
+        await asyncio.sleep(delay_needed)
+
+    stats["last_request"] = datetime.now()
+
+
+def _extract_rms_host_and_ids(
+    booking_url: str,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extract RMS host, client_id, and prop_id from booking URL.
+
+    Returns (host, client_id, prop_id) or (None, None, None) if invalid.
+    """
+    if not booking_url or "rmscloud.com" not in booking_url:
+        return None, None, None
+
+    try:
+        parsed = urlparse(booking_url)
+        host = parsed.hostname
+        path_parts = parsed.path.split("/")
+
+        # Extract client_id and prop_id from URL like /Rates/Index/317/1 or /Search/Index/317/1
+        if len(path_parts) >= 5:
+            client_id = path_parts[3]
+            prop_id = path_parts[4] if len(path_parts) > 4 else "1"
+            return host, client_id, prop_id
+        else:
+            # Fallback - try to use the path
+            return host, "317", "1"
+    except Exception:
+        return None, None, None
 
 
 async def check_rms_availability_single_date(
     client: httpx.AsyncClient,
-    booking_url: str,
+    host: str,
+    client_id: str,
+    prop_id: str,
     arrival_days_ahead: int,
     departure_days_ahead: int,
 ) -> Optional[bool]:
-    """Check availability for a specific date range.
+    """Check availability for a specific date range with optimized rate limiting."""
 
-    Uses httpx to fetch the HTML and parses it for availability indicators.
-
-    Args:
-        client: HTTP client for making requests
-        booking_url: The hotel's RMS booking URL
-        arrival_days_ahead: Days from now for arrival date
-        departure_days_ahead: Days from now for departure date
-
-    Returns:
-        True if hotel has availability, False if no availability, None if inconclusive
-    """
-    if not booking_url or "rmscloud.com" not in booking_url:
-        return None
-
-    # Parse the existing URL to extract client_id and prop_id
-    try:
-        parsed = urlparse(booking_url)
-        path_parts = parsed.path.split("/")
-
-        # Extract client_id and prop_id from URL like /Rates/Index/317/1
-        if len(path_parts) >= 4:
-            client_id = path_parts[3]
-            prop_id = path_parts[4] if len(path_parts) > 4 else "1"
-        else:
-            # Try to extract from query params or use defaults
-            client_id = "317"
-            prop_id = "1"
-    except Exception:
-        logger.warning(f"Could not parse booking URL: {booking_url}")
-        return None
-
-    # Calculate future dates for availability check
+    # Calculate dates
     arrival_date = datetime.now() + timedelta(days=arrival_days_ahead)
     departure_date = datetime.now() + timedelta(days=departure_days_ahead)
 
-    # Format dates as MM/DD/YYYY for RMS API
     arrival_str = arrival_date.strftime("%m/%d/%Y")
     departure_str = departure_date.strftime("%m/%d/%Y")
 
-    # Construct availability check URL
+    # Construct URL using the actual host
+    base_url = f"https://{host}/Rates/Index"
     params = {
         "A": arrival_str,
         "D": departure_str,
-        "Ad": "2",  # 2 adults
+        "Ad": "2",
         "Mp": "0",
         "M": "0",
         "Y": "0",
         "Z": "0",
         "Rv": "1",
     }
+    availability_url = f"{base_url}/{client_id}/{prop_id}?{urlencode(params)}"
 
-    availability_url = f"{RMS_BASE_URL}/{client_id}/{prop_id}?{urlencode(params)}"
+    # Get semaphore for this specific host
+    semaphore = await _get_or_create_host_semaphore(host)
 
-    # Use per-host semaphore and rate limiting
-    host_semaphore = _get_host_semaphore(availability_url)
+    async with semaphore:
+        await _respect_rate_limit(host)
 
-    async with host_semaphore:
-        # Respect rate limit between requests
-        await _respect_rate_limit(availability_url)
-
-        # Try with retries for 429 errors
         for attempt in range(_max_retries):
             try:
                 resp = await client.get(
                     availability_url,
                     headers={
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                         "Accept-Language": "en-US,en;q=0.9",
-                        "Accept-Encoding": "gzip, deflate, br",
+                        "Accept-Encoding": "gzip, deflate",
                         "DNT": "1",
                         "Connection": "keep-alive",
-                        "Upgrade-Insecure-Requests": "1",
-                        "Sec-Fetch-Dest": "document",
-                        "Sec-Fetch-Mode": "navigate",
-                        "Sec-Fetch-Site": "none",
-                        "Sec-Fetch-User": "?1",
-                        "Cache-Control": "max-age=0",
                     },
                     follow_redirects=True,
-                    timeout=30.0,
+                    timeout=15.0,  # Reduced timeout for faster failures
                 )
 
                 if resp.status_code == 429:
-                    # Rate limited - exponential backoff
+                    await _adapt_rate_limit(host, got_429=True)
                     retry_delay = _base_retry_delay * (2**attempt)
                     logger.warning(
-                        f"429 rate limit for {booking_url}, retrying in {retry_delay}s (attempt {attempt + 1}/{_max_retries})"
+                        f"429 on {host}, retrying in {retry_delay}s (attempt {attempt + 1}/{_max_retries})"
                     )
                     await asyncio.sleep(retry_delay)
                     continue
 
+                # Success - adapt rate limit positively
+                await _adapt_rate_limit(host, got_429=False)
+
                 if resp.status_code != 200:
-                    logger.debug(f"Non-200 status {resp.status_code} for {booking_url}")
                     return None
 
-                html_content = resp.text
-
-                # Parse HTML for availability indicators
-                return _parse_availability_from_html(html_content, booking_url)
+                return _parse_availability_from_html(resp.text)
 
             except httpx.TimeoutException:
-                logger.debug(f"Timeout checking availability for {booking_url}")
                 return None
-            except Exception as e:
-                logger.debug(f"Error checking availability for {booking_url}: {e}")
+            except Exception:
                 return None
 
-        # All retries exhausted
-        logger.warning(
-            f"All {_max_retries} retries exhausted for {booking_url} (429 rate limit)"
-        )
+        logger.warning(f"All retries exhausted for {host}")
         return None
 
 
-def _parse_availability_from_html(
-    html_content: str, booking_url: str
-) -> Optional[bool]:
-    """Parse RMS booking page HTML for availability indicators.
+def _parse_availability_from_html(html_content: str) -> Optional[bool]:
+    """Fast HTML parsing for availability indicators."""
+    html_lower = html_content.lower()
 
-    Looks for:
-    - LeadInRate value (positive rate = has availability)
-    - "No Available Rates" text or hidden fields
-    - Room/category data in the page
+    # Quick check for "No Available Rates" (fastest path)
+    if (
+        'value="No Available Rates"'.lower() in html_lower
+        or "lblNoAvailableRates".lower() in html_lower
+    ):
+        return False
 
-    Args:
-        html_content: The HTML response from the booking page
-        booking_url: URL for logging purposes
+    # Check for "no available rates" in text
+    if "no available rates" in html_lower:
+        return False
 
-    Returns:
-        True if has availability, False if no availability, None if inconclusive
-    """
-    # Check for "No Available Rates" signal in the HTML
-    # This is typically in a hidden input field or displayed text
-    no_avail_patterns = [
-        'value="No Available Rates"',
-        "lblNoAvailableRates",
-        "no available rates",
-        "no rates available",
-    ]
-
-    for pattern in no_avail_patterns:
-        if pattern.lower() in html_content.lower():
-            return False
-
-    # Check for actual rate/availability data in the page
-    # Look for room/category data in the VM (view model) JSON
-    has_data_indicators = [
-        '"DataCollection":',
-        '"LeadInRate"',
-        '"Category"',
-        '"RoomName"',
-    ]
-
-    has_data = any(indicator in html_content for indicator in has_data_indicators)
-
-    if has_data:
-        # Check if the LeadInRate has a valid value (positive rate)
-        leadin_match = re.search(r'id="LeadInRate"[^>]+value="(\d+)"', html_content)
-        if leadin_match:
-            rate = int(leadin_match.group(1))
-            if rate > 0:
-                return True
-
-        # Even without LeadInRate, if we have DataCollection, likely has availability
-        if '"DataCollection":' in html_content:
-            # Check if DataCollection is not empty
-            data_match = re.search(
-                r'"DataCollection":\s*(\[.*?\])', html_content, re.DOTALL
-            )
-            if data_match:
-                try:
-                    import json
-
-                    data = json.loads(data_match.group(1))
-                    if data and len(data) > 0:
-                        return True
-                except:
-                    pass
-
-    # Check for availability-related CSS classes or elements
-    avail_indicators = [
-        "room-available",
-        "rate-available",
-        "has-availability",
-        "availability-calendar",
-    ]
-
-    for indicator in avail_indicators:
-        if indicator in html_content.lower():
+    # Check for rate data (positive signals)
+    if '"LeadInRate"' in html_content:
+        match = re.search(r'id="LeadInRate"[^>]+value="(\d+)"', html_content)
+        if match and int(match.group(1)) > 0:
             return True
 
-    # Inconclusive - couldn't determine availability
-    logger.debug(f"Could not determine availability for {booking_url}")
+    # Check DataCollection for room data
+    if '"DataCollection":' in html_content:
+        # Quick regex check for non-empty array
+        if re.search(r'"DataCollection":\s*\[[^\]]', html_content):
+            return True
+
+    # Check for availability CSS classes
+    if any(
+        indicator in html_lower
+        for indicator in ["room-available", "rate-available", "has-availability"]
+    ):
+        return True
+
     return None
 
 
-async def check_rms_availability_multi_date(
+async def check_rms_availability_optimized(
     client: httpx.AsyncClient,
     booking_url: str,
-) -> tuple[Optional[bool], list[dict]]:
-    """Check availability across multiple date ranges.
+) -> tuple[Optional[bool], list[dict], int]:
+    """Check availability with optimized early exit strategy.
 
-    Tries each date range in sequence. Returns True immediately if any range
-    shows availability. Only returns False if ALL ranges show no availability.
-
-    Args:
-        client: HTTP client
-        booking_url: The hotel's RMS booking URL
-
-    Returns:
-        Tuple of (has_availability, check_details)
-        - has_availability: True/False/None
-        - check_details: List of dicts with results for each date range checked
+    Returns: (has_availability, check_details, checks_performed)
     """
-    check_details = []
+    host, client_id, prop_id = _extract_rms_host_and_ids(booking_url)
 
-    for arrival_days, departure_days in CHECK_DATE_RANGES:
+    if not host or not client_id or not prop_id:
+        return None, [], 0
+
+    check_details = []
+    checks_performed = 0
+
+    for i, (arrival_days, departure_days) in enumerate(CHECK_DATE_RANGES):
         result = await check_rms_availability_single_date(
-            client, booking_url, arrival_days, departure_days
+            client, host, client_id, prop_id, arrival_days, departure_days
         )
+        checks_performed += 1
 
         detail = {
             "arrival_days_ahead": arrival_days,
@@ -323,168 +279,121 @@ async def check_rms_availability_multi_date(
         }
         check_details.append(detail)
 
-        # If we found availability, return immediately (no need to check other dates)
+        # Early exit on availability found
         if result is True:
-            logger.debug(f"  Found availability at {arrival_days} days ahead")
-            return True, check_details
+            return True, check_details, checks_performed
 
-        # Small delay between checks to be nice to the server
-        await asyncio.sleep(0.5)
+        # Smart early exit: if first 2 checks are inconclusive,
+        # the hotel likely has parsing issues - skip remaining
+        if i == 1 and result is None:
+            logger.debug(f"  First 2 checks inconclusive, skipping remaining dates")
+            break
 
-    # If we get here, either all were False or all were inconclusive
-    # Return False only if at least one check was definitive False
+        # Small delay only if we're continuing
+        if i < len(CHECK_DATE_RANGES) - 1:
+            await asyncio.sleep(0.3)
+
+    # Determine final result
     has_definitive_false = any(d["has_availability"] is False for d in check_details)
     all_inconclusive = all(d["has_availability"] is None for d in check_details)
 
     if all_inconclusive:
-        return None, check_details
+        return None, check_details, checks_performed
     elif has_definitive_false:
-        return False, check_details
+        return False, check_details, checks_performed
     else:
-        return None, check_details
+        return None, check_details, checks_performed
 
 
-async def process_hotel(
+async def process_hotel_optimized(
     client: httpx.AsyncClient,
     hotel: dict,
     semaphore: asyncio.Semaphore,
 ) -> dict:
-    """Process a single hotel for availability check across multiple dates.
-
-    Args:
-        client: HTTP client
-        hotel: Hotel dict with id, name, booking_url
-        semaphore: Concurrency semaphore
-
-    Returns:
-        Dict with hotel_id, has_availability, check_details, and status
-    """
+    """Process a single hotel with optimized checking."""
     async with semaphore:
         hotel_id = hotel["hotel_id"]
         name = hotel.get("name", "Unknown")
         booking_url = hotel.get("booking_url")
 
-        logger.debug(f"Checking availability for {name} (id={hotel_id})")
-
-        # Handle missing booking_url
         if not booking_url:
             return {
                 "hotel_id": hotel_id,
                 "hotel_name": name,
                 "has_availability": None,
                 "check_details": [],
+                "checks_performed": 0,
                 "status": "inconclusive",
             }
 
-        has_availability, check_details = await check_rms_availability_multi_date(
-            client, booking_url
-        )
+        (
+            has_availability,
+            check_details,
+            checks_performed,
+        ) = await check_rms_availability_optimized(client, booking_url)
 
         result = {
             "hotel_id": hotel_id,
             "hotel_name": name,
             "has_availability": has_availability,
             "check_details": check_details,
+            "checks_performed": checks_performed,
             "status": "checked",
         }
 
         if has_availability is True:
             result["status"] = "has_availability"
-            logger.info(f"  ✓ {name}: HAS availability")
+            logger.info(f"  ✓ {name}: HAS availability ({checks_performed} checks)")
         elif has_availability is False:
-            # Log which date ranges were checked
-            checked_ranges = [
-                f"{d['arrival_days_ahead']}d"
-                for d in check_details
-                if d["has_availability"] is not None
-            ]
+            checked_ranges = [f"{d['arrival_days_ahead']}d" for d in check_details]
             result["status"] = "no_availability"
             logger.info(
                 f"  ✗ {name}: NO availability (checked: {', '.join(checked_ranges)})"
             )
         else:
             result["status"] = "inconclusive"
-            logger.debug(f"  ? {name}: Inconclusive (all date ranges failed)")
+            logger.debug(f"  ? {name}: Inconclusive ({checks_performed} checks)")
 
         return result
 
 
 async def get_pending_hotels(limit: int, force: bool = False) -> list:
-    """Get Australia RMS leads that need availability check.
-
-    Only fetches hotels that:
-    - Use RMS Cloud booking engine
-    - Are located in Australia
-    - Have not been checked yet (or force=True)
-
-    Args:
-        limit: Maximum number of hotels to return
-        force: If True, return all Australia RMS leads (for re-check)
-
-    Returns:
-        List of hotel dicts
-    """
+    """Get Australia RMS leads that need availability check."""
     async with get_conn() as conn:
-        if force:
-            rows = await conn.fetch(
-                """
-                SELECT 
-                    h.id AS hotel_id,
-                    h.name,
-                    h.city,
-                    h.state,
-                    hbe.booking_url
-                FROM sadie_gtm.hotels h
-                JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-                JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-                WHERE be.name = 'RMS Cloud'
-                  AND h.country IN ('AU', 'Australia')
-                ORDER BY h.id
-                LIMIT $1
-            """,
-                limit,
-            )
-        else:
-            rows = await conn.fetch(
-                """
-                SELECT 
-                    h.id AS hotel_id,
-                    h.name,
-                    h.city,
-                    h.state,
-                    hbe.booking_url
-                FROM sadie_gtm.hotels h
-                JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
-                JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-                WHERE be.name = 'RMS Cloud'
-                  AND hbe.has_availability IS NULL
-                  AND h.country IN ('AU', 'Australia')
-                ORDER BY h.id
-                LIMIT $1
-            """,
-                limit,
-            )
+        where_clause = """
+            be.name = 'RMS Cloud'
+            AND h.country IN ('AU', 'Australia')
+        """
+        if not force:
+            where_clause += " AND hbe.has_availability IS NULL"
 
+        rows = await conn.fetch(
+            f"""
+            SELECT 
+                h.id AS hotel_id,
+                h.name,
+                h.city,
+                h.state,
+                hbe.booking_url
+            FROM sadie_gtm.hotels h
+            JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+            JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
+            WHERE {where_clause}
+            ORDER BY h.id
+            LIMIT $1
+            """,
+            limit,
+        )
         return [dict(row) for row in rows]
 
 
 async def update_availability_results(results: list, dry_run: bool = False) -> int:
-    """Update database with availability check results.
-
-    Args:
-        results: List of result dicts from process_hotel
-        dry_run: If True, don't actually update database
-
-    Returns:
-        Number of hotels updated
-    """
+    """Update database with availability check results."""
     if dry_run:
         logger.info(f"[DRY RUN] Would update {len(results)} hotels")
         return 0
 
-    # Filter out inconclusive results
     valid_results = [r for r in results if r["has_availability"] is not None]
-
     if not valid_results:
         return 0
 
@@ -502,7 +411,7 @@ async def update_availability_results(results: list, dry_run: bool = False) -> i
                        unnest($2::boolean[]) AS has_availability
             ) AS m
             WHERE hbe.hotel_id = m.hotel_id
-        """,
+            """,
             hotel_ids,
             availability_values,
         )
@@ -538,26 +447,14 @@ async def show_status():
 
 async def run(
     limit: int = 100,
-    concurrency: int = 20,
+    concurrency: int = 30,  # Increased default for optimization
     force: bool = False,
     dry_run: bool = False,
 ):
-    """Run RMS availability enrichment for Australia hotels.
-
-    Checks multiple date ranges (30, 60, 90 days ahead) to ensure accurate
-    availability detection. Only marks a hotel as unavailable if ALL date
-    ranges show no availability.
-
-    Args:
-        limit: Maximum number of hotels to process
-        concurrency: Number of concurrent requests
-        force: If True, re-check all hotels regardless of previous checks
-        dry_run: If True, don't update database
-    """
+    """Run optimized RMS availability enrichment."""
     await init_db()
 
     try:
-        # Get hotels to process
         hotels = await get_pending_hotels(limit, force)
 
         if not hotels:
@@ -566,11 +463,9 @@ async def run(
 
         mode = "FORCE RECHECK" if force else "pending only"
 
-        # Estimate ETA
-        total_requests = len(hotels) * len(CHECK_DATE_RANGES)
-        requests_per_second = concurrency / (
-            _min_delay_between_requests + 1.5
-        )  # 1.5s avg response time
+        # Better ETA calculation with optimizations
+        total_requests = len(hotels) * 2.5  # Avg 2.5 checks per hotel with early exit
+        requests_per_second = concurrency * 1.5  # Optimized throughput
         estimated_seconds = total_requests / requests_per_second
         eta_minutes = int(estimated_seconds / 60)
         eta_seconds = int(estimated_seconds % 60)
@@ -579,25 +474,24 @@ async def run(
             f"Processing {len(hotels)} Australia RMS leads ({mode}, concurrency={concurrency})"
         )
         logger.info(
-            f"Checking {len(CHECK_DATE_RANGES)} date ranges per hotel ({total_requests} total requests)"
+            f"Optimized: adaptive rate limiting, host-aware parallelism, smart early exit"
         )
-        logger.info(
-            f"Estimated time: ~{eta_minutes}m {eta_seconds}s (with rate limiting)"
-        )
+        logger.info(f"Estimated time: ~{eta_minutes}m {eta_seconds}s")
 
-        # Process hotels concurrently
         semaphore = asyncio.Semaphore(concurrency)
 
         async with httpx.AsyncClient(
             limits=httpx.Limits(
-                max_connections=concurrency + 10,
-                max_keepalive_connections=concurrency + 10,
+                max_connections=concurrency * 2,
+                max_keepalive_connections=concurrency * 2,
             ),
+            http2=True,  # Enable HTTP/2 for better performance
         ) as client:
-            tasks = [process_hotel(client, hotel, semaphore) for hotel in hotels]
+            tasks = [
+                process_hotel_optimized(client, hotel, semaphore) for hotel in hotels
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Handle results
         valid_results = []
         errors = 0
         for r in results:
@@ -607,22 +501,15 @@ async def run(
             else:
                 valid_results.append(r)
 
-        # Update database
         updated = await update_availability_results(valid_results, dry_run)
 
-        # Summary
         has_avail = sum(1 for r in valid_results if r.get("has_availability") is True)
         no_avail = sum(1 for r in valid_results if r.get("has_availability") is False)
         inconclusive = sum(
             1 for r in valid_results if r.get("has_availability") is None
         )
-
-        # Count how many required multi-date checks
-        multi_date_checks = sum(
-            1
-            for r in valid_results
-            if r.get("check_details") and len(r["check_details"]) > 1
-        )
+        total_checks = sum(r.get("checks_performed", 0) for r in valid_results)
+        avg_checks = total_checks / len(valid_results) if valid_results else 0
 
         logger.info("=" * 60)
         logger.info("RMS AVAILABILITY ENRICHMENT COMPLETE")
@@ -632,7 +519,11 @@ async def run(
         logger.info(f"  No availability: {no_avail}")
         logger.info(f"  Inconclusive: {inconclusive}")
         logger.info(f"  Errors: {errors}")
-        logger.info(f"  Multi-date checks needed: {multi_date_checks}")
+        logger.info(f"  Total HTTP requests: {total_checks}")
+        logger.info(f"  Avg checks per hotel: {avg_checks:.1f}")
+        logger.info(
+            f"  Efficiency: {(1 - avg_checks / 4) * 100:.0f}% saved by early exit"
+        )
         if not dry_run:
             logger.info(f"Database updated: {updated} leads")
         else:
@@ -645,18 +536,18 @@ async def run(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Check RMS Australia hotel availability",
+        description="Check RMS Australia hotel availability (Optimized)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Check 100 leads
+  # Check 100 leads (fast)
   uv run python -m workflows.rms_availability --limit 100
   
-  # Force re-check all leads
-  uv run python -m workflows.rms_availability --limit 100 --force
+  # Check 3.7k leads with high concurrency
+  uv run python -m workflows.rms_availability --limit 3700 --concurrency 30
   
-  # Dry run (don't update database)
-  uv run python -m workflows.rms_availability --limit 100 --dry-run
+  # Force re-check all leads
+  uv run python -m workflows.rms_availability --limit 3700 --force
   
   # Check status
   uv run python -m workflows.rms_availability --status
@@ -674,8 +565,8 @@ Examples:
         "--concurrency",
         "-c",
         type=int,
-        default=10,
-        help="Concurrent requests (default: 10, lower = more respectful to servers)",
+        default=30,
+        help="Concurrent requests (default: 30, optimized for speed)",
     )
     parser.add_argument(
         "--force",
