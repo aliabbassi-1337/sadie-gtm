@@ -58,6 +58,9 @@ class DiscoveryResult(BaseModel):
     alienvault_count: int = 0
     urlscan_count: int = 0
     virustotal_count: int = 0
+    crtsh_count: int = 0
+    arquivo_count: int = 0
+    github_count: int = 0
     s3_key: Optional[str] = None
 
 
@@ -255,6 +258,9 @@ class Service(IService):
         enable_alienvault: bool = True,
         enable_urlscan: bool = True,
         enable_virustotal: bool = True,
+        enable_crtsh: bool = True,
+        enable_arquivo: bool = True,
+        enable_github: bool = True,
         proxy_url: Optional[str] = None,
     ) -> List[DiscoveryResult]:
         """
@@ -294,6 +300,9 @@ class Service(IService):
             enable_alienvault=enable_alienvault,
             enable_urlscan=enable_urlscan,
             enable_virustotal=enable_virustotal,
+            enable_crtsh=enable_crtsh,
+            enable_arquivo=enable_arquivo,
+            enable_github=enable_github,
             proxy_url=proxy_url,
         )
 
@@ -305,6 +314,9 @@ class Service(IService):
                 enable_alienvault=enable_alienvault,
                 enable_urlscan=enable_urlscan,
                 enable_virustotal=enable_virustotal,
+                enable_crtsh=enable_crtsh,
+                enable_arquivo=enable_arquivo,
+                enable_github=enable_github,
                 proxy_url=proxy_url,
             )
             results = {engine: slugs}
@@ -321,12 +333,16 @@ class Service(IService):
             av_count = sum(1 for s in slugs if s.archive_source == "alienvault")
             us_count = sum(1 for s in slugs if s.archive_source == "urlscan")
             vt_count = sum(1 for s in slugs if s.archive_source == "virustotal")
+            ct_count = sum(1 for s in slugs if s.archive_source == "crtsh")
+            arq_count = sum(1 for s in slugs if s.archive_source == "arquivo")
+            gh_count = sum(1 for s in slugs if s.archive_source == "github")
 
             logger.info(
                 f"{eng.upper()}: {len(slugs)} NEW slugs "
                 f"(wayback: {wayback_count}, cc: {cc_count}, "
                 f"alienvault: {av_count}, urlscan: {us_count}, "
-                f"virustotal: {vt_count})"
+                f"virustotal: {vt_count}, crtsh: {ct_count}, "
+                f"arquivo: {arq_count}, github: {gh_count})"
             )
 
             # Prepare output data
@@ -355,6 +371,9 @@ class Service(IService):
                     alienvault_count=av_count,
                     urlscan_count=us_count,
                     virustotal_count=vt_count,
+                    crtsh_count=ct_count,
+                    arquivo_count=arq_count,
+                    github_count=gh_count,
                     s3_key=s3_key,
                 )
             )
@@ -386,6 +405,8 @@ class Service(IService):
             "mews": 4,
             "siteminder": 14,
             "siteminder_directbook": 14,  # Same as siteminder
+            "siteminder_bookingbutton": 14,  # Same as siteminder
+            "siteminder_directonline": 14,  # Same as siteminder
             "ipms247": 22,  # JEHS / iPMS / Yanolja Cloud Solution
         }
 
@@ -444,7 +465,7 @@ class Service(IService):
 
         url = url.lower()
 
-        if engine in ("rms", "rms_ibe"):
+        if engine in ("rms", "rms_rates", "rms_ibe"):
             # RMS formats: /search/index/SLUG, /rates/index/SLUG, ibe*.rmscloud.com/SLUG
             if "/search/index/" in url:
                 return url.split("/search/index/")[-1].split("/")[0].split("?")[0]
@@ -460,7 +481,7 @@ class Service(IService):
             # Mews: /distributor/UUID
             if "/distributor/" in url:
                 return url.split("/distributor/")[-1].split("/")[0].split("?")[0]
-        elif engine in ("siteminder", "siteminder_directbook"):
+        elif engine in ("siteminder", "siteminder_directbook", "siteminder_bookingbutton", "siteminder_directonline"):
             # SiteMinder: /reservations/SLUG or /properties/SLUG
             if "/reservations/" in url:
                 return url.split("/reservations/")[-1].split("/")[0].split("?")[0]
