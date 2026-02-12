@@ -22,6 +22,7 @@ import json
 import os
 import re
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 from loguru import logger
@@ -61,40 +62,111 @@ Rules:
 """
 
 
+# ============================================================================
+# URL sanitization & per-host rate limiting
+# ============================================================================
+
+PLACEHOLDER_URLS = {"no.website", "nowebsite", "no-website"}
+
+_host_semaphores: dict[str, asyncio.Semaphore] = {}
+_HOST_CONCURRENCY = 10
+
+
+def _sanitize_url(url: str) -> Optional[str]:
+    """Sanitize and normalize a URL. Returns None if garbage."""
+    if not url:
+        return None
+
+    url = url.strip()
+    if not url:
+        return None
+
+    # Reject emails stored as URLs (e.g. "info@kmva.com.au")
+    if "@" in url and "//" not in url:
+        return None
+
+    # Remove spaces (e.g. "http:// www.gulfhaven.com.au")
+    url = url.replace(" ", "")
+
+    # Add scheme if missing
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
+    # Reject known placeholder domains
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if not host or "." not in host:
+            return None
+        for p in PLACEHOLDER_URLS:
+            if p in host:
+                return None
+    except Exception:
+        return None
+
+    return url
+
+
+def _get_host_semaphore(url: str) -> asyncio.Semaphore:
+    """Get or create a per-host semaphore to cap concurrent requests per host."""
+    try:
+        host = urlparse(url).hostname or "unknown"
+    except Exception:
+        host = "unknown"
+    if host not in _host_semaphores:
+        _host_semaphores[host] = asyncio.Semaphore(_HOST_CONCURRENCY)
+    return _host_semaphores[host]
+
 
 # ============================================================================
 # Phase 1: Booking URL check (FREE)
 # ============================================================================
 
+BOOKING_SKIP_PATTERNS = [
+    "cloudbeds.com/hotel-management-software",
+    "cloudbeds.com/pms",
+    "mews.com/en",
+]
+
+BOOKING_DEAD_BODY_SIGNALS = [
+    "property not found",
+    "page not found",
+    "no longer available",
+    "this property is no longer",
+    "is currently not available for online booking",
+]
+
+
 async def check_booking_url(client: httpx.AsyncClient, booking_url: str) -> Optional[bool]:
     """Check if booking URL is alive. Returns True=active, None=inconclusive."""
+    booking_url = _sanitize_url(booking_url)
     if not booking_url:
         return None
 
-    # Skip generic URLs that aren't property-specific
-    skip_patterns = [
-        "cloudbeds.com/hotel-management-software",
-        "cloudbeds.com/pms",
-        "mews.com/en",
-    ]
-    for pattern in skip_patterns:
+    for pattern in BOOKING_SKIP_PATTERNS:
         if pattern in booking_url:
             return None
 
     try:
-        resp = await client.get(booking_url, follow_redirects=True, timeout=15.0)
-        if resp.status_code == 200:
-            return True
-        # 404 = booking page removed, likely closed
-        return None
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.ConnectTimeout):
-        return None
+        async with _get_host_semaphore(booking_url):
+            resp = await client.get(booking_url, follow_redirects=True, timeout=15.0)
+
+        if resp.status_code != 200:
+            return None
+
+        # Check body for dead booking page signals (200 but empty/error)
+        body = resp.text[:5000].lower()
+        for signal in BOOKING_DEAD_BODY_SIGNALS:
+            if signal in body:
+                return None
+
+        return True
     except Exception:
         return None
 
 
 # ============================================================================
-# Phase 2: Website check (FREE)
+# Phase 1: Website check (FREE)
 # ============================================================================
 
 PARKED_SIGNALS = [
@@ -112,11 +184,13 @@ PARKED_REDIRECT_HOSTS = {
 
 async def check_website(client: httpx.AsyncClient, website: str) -> Optional[bool]:
     """Check if hotel website is alive and not parked. Returns True=active, None=inconclusive."""
+    website = _sanitize_url(website)
     if not website:
         return None
 
     try:
-        resp = await client.get(website, follow_redirects=True, timeout=15.0)
+        async with _get_host_semaphore(website):
+            resp = await client.get(website, follow_redirects=True, timeout=15.0)
 
         # Redirected to a domain seller = dead
         final_host = str(resp.url.host).lower()
@@ -140,7 +214,7 @@ async def check_website(client: httpx.AsyncClient, website: str) -> Optional[boo
 
 
 # ============================================================================
-# Phase 3: Serper search → Knowledge Graph parsing → LLM fallback
+# Phase 2: Serper search → Knowledge Graph parsing → LLM fallback
 # ============================================================================
 
 async def serper_search_raw(client: httpx.AsyncClient, query: str) -> Optional[dict]:
@@ -181,15 +255,12 @@ def _parse_knowledge_graph(data: dict) -> Optional[str]:
     if not kg:
         return None
 
-    # Check KG type/description for closure signals
     kg_type = (kg.get("type") or "").lower()
     kg_desc = (kg.get("description") or "").lower()
-    kg_title = (kg.get("title") or "").lower()
 
     if "permanently closed" in kg_type or "permanently closed" in kg_desc:
         return "closed"
 
-    # Check KG attributes
     for k, v in kg.get("attributes", {}).items():
         val = str(v).lower()
         if "permanently closed" in val:
@@ -224,11 +295,11 @@ async def check_hotel_serper(
     hotel_name: str,
     city: Optional[str],
     state: Optional[str],
-    stats: dict,
+    llm_limiter: asyncio.Semaphore,
 ) -> dict:
-    """Check hotel status: Serper Knowledge Graph first, LLM fallback for ambiguous cases.
+    """Check hotel status via Serper search + LLM fallback.
 
-    Returns {"status": "active"|"closed"|"unknown", "reason": "..."}.
+    Returns {"status": ..., "reason": ..., "source": "kg"|"yelp"|"llm"|"error"}.
     """
     location_parts = [p for p in [city, state] if p]
     location = ", ".join(location_parts) if location_parts else ""
@@ -237,24 +308,23 @@ async def check_hotel_serper(
     # Step 1: Serper search
     data = await serper_search_raw(client, query)
     if data is None:
-        return {"status": "unknown", "reason": "Search failed"}
+        return {"status": "unknown", "reason": "Search failed", "source": "error"}
 
     # Step 2: Check Knowledge Graph for "Permanently closed"
     kg_status = _parse_knowledge_graph(data)
     if kg_status == "closed":
-        stats["kg_closed"] += 1
-        return {"status": "closed", "reason": "Google Knowledge Graph: Permanently closed"}
+        return {"status": "closed", "reason": "Google Knowledge Graph: Permanently closed", "source": "kg"}
 
     # Step 3: Check Yelp organic results for "CLOSED" tag
     yelp_status = _check_organic_for_closure(data)
     if yelp_status == "closed":
-        stats["yelp_closed"] += 1
-        return {"status": "closed", "reason": "Yelp: marked as CLOSED"}
+        return {"status": "closed", "reason": "Yelp: marked as CLOSED", "source": "yelp"}
 
-    # Step 4: LLM fallback — pass search results we already have (no extra Serper call)
+    # Step 4: LLM fallback — rate limited separately from Serper
     search_text = _format_search_results(data)
-    llm_result = await _llm_interpret(client, hotel_name, location, search_text)
-    stats["llm_checked"] += 1
+    async with llm_limiter:
+        llm_result = await _llm_interpret(client, hotel_name, location, search_text)
+    llm_result["source"] = "llm"
     return llm_result
 
 
@@ -338,7 +408,7 @@ def _parse_response(text: str) -> dict:
 
 
 # ============================================================================
-# Phase 3b: OTA confirmation (catches LLM false positives)
+# OTA confirmation (catches false positives)
 # ============================================================================
 
 OTA_DOMAINS = ("booking.com", "expedia.com", "hotels.com", "tripadvisor.com", "kayak.com")
@@ -371,19 +441,16 @@ async def confirm_closed_via_ota(
 
         data = resp.json()
 
-        # Check organic results for OTA listings
         for r in data.get("organic", []):
             url = r.get("link", "").lower()
             title = r.get("title", "").lower()
             snippet = r.get("snippet", "").lower()
 
-            # Skip results that mention "closed"
             if "closed" in title or "permanently closed" in snippet:
                 continue
 
             for ota in OTA_DOMAINS:
                 if ota in url:
-                    # Found on a booking platform — likely still active
                     logger.info(f"  OTA override: {hotel_name} found on {ota}")
                     return True
 
@@ -400,7 +467,7 @@ async def check_hotel(
     client: httpx.AsyncClient,
     hotel: dict,
     semaphore: asyncio.Semaphore,
-    rate_limiter: asyncio.Semaphore,
+    llm_limiter: asyncio.Semaphore,
     stats: dict,
 ) -> dict:
     """Check a single hotel using combined booking URL + website signals."""
@@ -423,8 +490,7 @@ async def check_hotel(
 
         # Decision matrix
         if booking_alive and website_alive:
-            # Both alive → high confidence active, skip paid checks
-            stats["url_active"] += 1
+            stats["both_alive"] += 1
             return {
                 "hotel_id": hotel_id,
                 "hotel_name": name,
@@ -434,8 +500,7 @@ async def check_hotel(
             }
 
         if not booking_alive and website_alive:
-            # Booking dead but website alive → switched engines, still active
-            stats["website_active"] += 1
+            stats["website_only"] += 1
             return {
                 "hotel_id": hotel_id,
                 "hotel_name": name,
@@ -448,15 +513,23 @@ async def check_hotel(
         # Both dead/missing → needs verification
         # Either way, fall through to Serper
 
-        # Phase 2: Serper → Knowledge Graph → Yelp → LLM fallback (rate limited)
-        async with rate_limiter:
-            result = await check_hotel_serper(client, name, city, state, stats)
+        # Phase 2: Serper → KG → Yelp → LLM fallback
+        stats["serper_checked"] += 1
+        result = await check_hotel_serper(client, name, city, state, llm_limiter)
+        source = result.get("source", "")
+
+        # Track signal source
+        if source == "kg":
+            stats["kg_closed"] += 1
+        elif source == "yelp":
+            stats["yelp_closed"] += 1
+        elif source == "llm":
+            stats["llm_checked"] += 1
 
         # Phase 3: If marked closed, double-check against OTAs
         if result["status"] == "closed":
-            async with rate_limiter:
-                stats["ota_checked"] += 1
-                on_ota = await confirm_closed_via_ota(client, name, city, state)
+            stats["ota_checked"] += 1
+            on_ota = await confirm_closed_via_ota(client, name, city, state)
             if on_ota:
                 stats["ota_override"] += 1
                 return {
@@ -482,13 +555,13 @@ async def check_hotel(
         }
 
 
-async def _refill_rate_limiter(rate_limiter: asyncio.Semaphore, rpm: int, stop_event: asyncio.Event):
+async def _refill_rate_limiter(limiter: asyncio.Semaphore, rpm: int, stop_event: asyncio.Event):
     """Refill the rate limiter semaphore at a steady rate."""
     interval = 60.0 / rpm
     while not stop_event.is_set():
         await asyncio.sleep(interval)
         try:
-            rate_limiter.release()
+            limiter.release()
         except ValueError:
             pass
 
@@ -509,7 +582,7 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run:
     async with get_conn() as conn:
         hotels = await conn.fetch("""
             SELECT DISTINCT ON (h.id)
-                h.id, h.name, h.city, h.state, h.active_checked_at,
+                h.id, h.name, h.city, h.state,
                 h.website, hbe.booking_url
             FROM sadie_gtm.hotels h
             JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
@@ -517,8 +590,11 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run:
             WHERE h.country = $2
               AND h.status >= 1
               AND LOWER(be.name) = ANY($3)
-              AND (h.is_active IS NULL OR h.active_checked_at < NOW() - INTERVAL '30 days')
-            ORDER BY h.id, h.active_checked_at NULLS FIRST
+              AND (
+                (h.is_active IS NULL AND h.active_checked_at IS NULL)
+                OR h.active_checked_at < NOW() - INTERVAL '30 days'
+              )
+            ORDER BY h.id, hbe.booking_url IS NULL, be.name
             LIMIT $1
         """, limit, country, engines)
 
@@ -531,12 +607,27 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run:
     engine_label = engine or "all target engines"
     logger.info(f"Checking {total} {country} hotels [{engine_label}] (concurrency={concurrency}, rpm={rpm}, dry_run={dry_run})")
 
+    # Concurrency semaphore for total parallel hotel checks
     semaphore = asyncio.Semaphore(concurrency)
-    rate_limiter = asyncio.Semaphore(concurrency)
-    stop_event = asyncio.Event()
-    refiller = asyncio.create_task(_refill_rate_limiter(rate_limiter, rpm, stop_event))
 
-    stats = {"url_active": 0, "website_active": 0, "kg_closed": 0, "yelp_closed": 0, "llm_checked": 0, "ota_checked": 0, "ota_override": 0}
+    # LLM rate limiter — small initial burst, refilled at RPM rate
+    llm_limiter = asyncio.Semaphore(min(10, rpm // 60))
+    stop_event = asyncio.Event()
+    refiller = asyncio.create_task(_refill_rate_limiter(llm_limiter, rpm, stop_event))
+
+    # Reset per-host semaphores
+    _host_semaphores.clear()
+
+    stats = {
+        "both_alive": 0,
+        "website_only": 0,
+        "serper_checked": 0,
+        "kg_closed": 0,
+        "yelp_closed": 0,
+        "llm_checked": 0,
+        "ota_checked": 0,
+        "ota_override": 0,
+    }
     all_results = []
     batch_size = 200
 
@@ -550,7 +641,7 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run:
             logger.info(f"Batch {batch_num}/{total_batches} ({len(batch)} hotels)")
 
             tasks = [
-                check_hotel(client, dict(h), semaphore, rate_limiter, stats)
+                check_hotel(client, dict(h), semaphore, llm_limiter, stats)
                 for h in batch
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -573,23 +664,23 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run:
                 if r["status"] == "closed":
                     logger.info(f"  CLOSED: {r['hotel_name']} (id={r['hotel_id']}) reason={r['reason']}")
 
-            if not dry_run:
-                update_results = [r for r in valid_results if r["is_active"] is not None]
-                if update_results:
-                    ids = [r["hotel_id"] for r in update_results]
-                    statuses = [r["is_active"] for r in update_results]
-                    async with get_conn() as conn:
-                        await conn.execute("""
-                            UPDATE sadie_gtm.hotels AS h
-                            SET is_active = m.is_active,
-                                active_checked_at = NOW(),
-                                updated_at = NOW()
-                            FROM (
-                                SELECT unnest($1::int[]) AS id,
-                                       unnest($2::boolean[]) AS is_active
-                            ) AS m
-                            WHERE h.id = m.id
-                        """, ids, statuses)
+            # Update ALL results including unknowns (sets active_checked_at so
+            # they aren't rechecked until the 30-day window passes)
+            if not dry_run and valid_results:
+                ids = [r["hotel_id"] for r in valid_results]
+                statuses = [r["is_active"] for r in valid_results]
+                async with get_conn() as conn:
+                    await conn.execute("""
+                        UPDATE sadie_gtm.hotels AS h
+                        SET is_active = m.is_active,
+                            active_checked_at = NOW(),
+                            updated_at = NOW()
+                        FROM (
+                            SELECT unnest($1::int[]) AS id,
+                                   unnest($2::boolean[]) AS is_active
+                        ) AS m
+                        WHERE h.id = m.id
+                    """, ids, statuses)
 
             all_results.extend(valid_results)
 
@@ -600,13 +691,14 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run:
     total_closed = sum(1 for r in all_results if r["status"] == "closed")
     total_unknown = sum(1 for r in all_results if r["status"] == "unknown")
     logger.info(f"TOTAL: {total_active} active, {total_closed} closed, {total_unknown} unknown")
-    logger.info(f"  Both alive (FREE): {stats['url_active']}")
-    logger.info(f"  Website only (FREE): {stats['website_active']}")
-    logger.info(f"  Knowledge Graph closed: {stats['kg_closed']}")
-    logger.info(f"  Yelp closed: {stats['yelp_closed']}")
+    logger.info(f"  Both alive (FREE): {stats['both_alive']}")
+    logger.info(f"  Website only (FREE): {stats['website_only']}")
+    logger.info(f"  Serper searches: {stats['serper_checked']}")
+    logger.info(f"  KG closure signals: {stats['kg_closed']}")
+    logger.info(f"  Yelp closure signals: {stats['yelp_closed']}")
     logger.info(f"  LLM fallback: {stats['llm_checked']}")
     logger.info(f"  OTA confirmation checks: {stats['ota_checked']}")
-    logger.info(f"  OTA overrides (saved from false positive): {stats['ota_override']}")
+    logger.info(f"  OTA overrides: {stats['ota_override']}")
 
     if dry_run:
         logger.info("Dry run - no database updates were made")
