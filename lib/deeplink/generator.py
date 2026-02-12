@@ -1,7 +1,7 @@
 """Deep-link URL generator.
 
 generate_deeplink() — pure function, no network/DB/async. Tier 1 only.
-generate_deeplink_async() — async, handles Tier 1 (instant) + Tier 2 (browser).
+generate_deeplink_proxy() — sync, creates proxy session for Tier 2 engines.
 generate_deeplink_for_hotel() — async, looks up booking URL from DB.
 """
 
@@ -11,8 +11,8 @@ from urllib.parse import urlparse
 from lib.deeplink.engines import ENGINE_BUILDERS, ENGINE_DOMAIN_PATTERNS
 from lib.deeplink.models import DeepLinkConfidence, DeepLinkRequest, DeepLinkResult
 
-# Engines that need browser automation (Tier 2) instead of URL construction
-TIER2_ENGINES = {"Cloudbeds", "RMS Cloud"}
+# Engines that need reverse proxy + autobook (Tier 2)
+TIER2_ENGINES = {"Cloudbeds", "RMS Cloud", "ResNexus"}
 
 
 def detect_engine(url: str) -> Optional[str]:
@@ -51,23 +51,24 @@ def generate_deeplink(request: DeepLinkRequest) -> DeepLinkResult:
     )
 
 
-async def generate_deeplink_async(
-    request: DeepLinkRequest, headless: bool = True
+def generate_deeplink_proxy(
+    request: DeepLinkRequest,
+    proxy_host: Optional[str] = None,
 ) -> DeepLinkResult:
-    """Generate a deep-link URL, using browser automation for Tier 2 engines.
+    """Generate a proxy URL for Tier 2 engines (instant, no browser needed).
 
-    Tier 1 (SiteMinder, Mews): instant URL construction, no browser.
-    Tier 2 (Cloudbeds, RMS): Playwright automation to get session-based checkout URL.
+    Tier 1 (SiteMinder, Mews): instant URL construction, no proxy.
+    Tier 2 (Cloudbeds, RMS): reverse proxy with client-side autobook JS.
     """
     engine_name = detect_engine(request.booking_url)
 
     if engine_name in TIER2_ENGINES:
         if engine_name == "Cloudbeds":
             from lib.deeplink.engines.cloudbeds_browser import build_checkout_url
-            return await build_checkout_url(request, headless=headless)
-        elif engine_name == "RMS Cloud":
-            from lib.deeplink.engines.rms_browser import build_checkout_url
-            return await build_checkout_url(request, headless=headless)
+            return build_checkout_url(request, proxy_host=proxy_host)
+        if engine_name == "ResNexus":
+            from lib.deeplink.engines.resnexus_browser import build_checkout_url as rn_build
+            return rn_build(request, proxy_host=proxy_host)
 
     # Tier 1 or unknown — use sync builder
     return generate_deeplink(request)
