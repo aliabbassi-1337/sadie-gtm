@@ -1898,6 +1898,69 @@ resource "aws_cloudwatch_event_target" "check_active" {
   }
 }
 
+# =============================================================================
+# RMS AVAILABILITY (booking availability enrichment)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "rms_availability" {
+  family                   = "${var.app_name}-rms-availability"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "rms-availability"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["uv", "run", "python", "-m", "workflows.rms_availability", "--limit", "4000", "--concurrency", "30"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "rms-availability"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "rms_availability" {
+  name                = "${var.app_name}-rms-availability"
+  description         = "Check RMS hotel availability every 7 days"
+  schedule_expression = "rate(7 days)"
+}
+
+resource "aws_cloudwatch_event_target" "rms_availability" {
+  rule      = aws_cloudwatch_event_rule.rms_availability.name
+  target_id = "rms-availability"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.rms_availability.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
 # Outputs
 output "cluster_name" {
   value = aws_ecs_cluster.main.name
@@ -1953,6 +2016,9 @@ output "scheduled_tasks" {
 
     # Active status
     check_active = aws_cloudwatch_event_rule.check_active.name
+
+    # Availability
+    rms_availability = aws_cloudwatch_event_rule.rms_availability.name
   }
 }
 
