@@ -1,17 +1,16 @@
 """Check if hotel properties are still active/operating.
 
-Three-phase approach:
+Multi-phase approach (cheapest signals first):
 1. Booking URL check (FREE) — if the booking page returns HTTP 200, hotel is active.
 2. Website check (FREE) — if the hotel website is alive and not parked, hotel is active.
-3. LLM + web search (for dead/missing URLs only) — GPT-4o + Serper.
-   If LLM says "closed", a confirmation search checks major OTAs before finalizing.
-
-Targets US hotels on Cloudbeds, Mews, RMS Cloud, and SiteMinder.
+3. Serper search ($0.001) — parse Knowledge Graph / Yelp for "Permanently closed".
+4. LLM fallback ($) — GPT-4o interprets search results (only for ambiguous cases).
+5. OTA confirmation — if marked closed, verify it's not bookable on major OTAs.
 
 Usage:
     uv run python -m workflows.check_active --limit 100
+    uv run python -m workflows.check_active --country Australia --engine "rms cloud" --limit 50
     uv run python -m workflows.check_active --limit 50 --dry-run
-    uv run python -m workflows.check_active --limit 4200 --concurrency 50
 """
 
 import asyncio
@@ -38,9 +37,7 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 
 TARGET_ENGINES = ("cloudbeds", "mews", "rms cloud", "siteminder")
 
-SYSTEM_PROMPT = """You are a hotel status checker. You have a search tool to look up current information.
-
-Given a hotel name and location, search for it and determine if the hotel is still operating.
+SYSTEM_PROMPT = """You are a hotel status checker. Given a hotel name, location, and search results, determine if the hotel is still operating.
 
 Respond with EXACTLY one of these JSON objects (no other text):
 {"status": "active", "reason": "brief reason"}
@@ -49,9 +46,10 @@ Respond with EXACTLY one of these JSON objects (no other text):
 
 Rules:
 - "active" = hotel is currently operating and accepting guests
-- "closed" = hotel has permanently closed, been demolished, converted to other use, or rebranded under a completely different name
+- "closed" = hotel has permanently closed, been demolished, converted to other use
 - "unknown" = cannot determine with confidence
 - Default to "active" unless you find STRONG evidence of permanent closure
+- If listed on Booking.com, Expedia, Hotels.com, or any OTA = "active"
 - A hotel that was rebranded but still operates as a hotel at the same location is "active"
 - A hotel temporarily closed for renovation is "active"
 - If the hotel website is down but it's listed on booking sites, it's "active"
@@ -59,23 +57,6 @@ Rules:
 - Recovery centers, colleges, or other non-hotel businesses that use booking software are "active"
 """
 
-SEARCH_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "search",
-        "description": "Search Google for information about a hotel to determine if it is still operating",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query about the hotel",
-                }
-            },
-            "required": ["query"],
-        },
-    },
-}
 
 
 # ============================================================================
@@ -156,62 +137,135 @@ async def check_website(client: httpx.AsyncClient, website: str) -> Optional[boo
 
 
 # ============================================================================
-# Phase 3: LLM + Serper search (for inconclusive cases)
+# Phase 3: Serper search → Knowledge Graph parsing → LLM fallback
 # ============================================================================
 
-async def serper_search(client: httpx.AsyncClient, query: str) -> str:
-    """Execute a search via Serper API and return formatted results."""
+async def serper_search_raw(client: httpx.AsyncClient, query: str) -> Optional[dict]:
+    """Execute a Serper search and return raw JSON response."""
     try:
         resp = await client.post(
             "https://google.serper.dev/search",
             headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-            json={"q": query, "num": 5},
+            json={"q": query, "num": 10},
             timeout=15.0,
         )
         if resp.status_code != 200:
-            return f"Search failed: HTTP {resp.status_code}"
-
-        data = resp.json()
-        parts = []
-
-        # Knowledge graph (most useful)
-        kg = data.get("knowledgeGraph", {})
-        if kg:
-            parts.append(f"Knowledge Graph: {kg.get('title', '')} - {kg.get('type', '')} - {kg.get('description', '')}")
-            attrs = kg.get("attributes", {})
-            for k, v in attrs.items():
-                parts.append(f"  {k}: {v}")
-
-        # Top organic results
-        for r in data.get("organic", [])[:3]:
-            parts.append(f"Result: {r.get('title', '')} - {r.get('snippet', '')}")
-
-        return "\n".join(parts) if parts else "No results found"
-    except Exception as e:
-        return f"Search error: {e}"
+            return None
+        return resp.json()
+    except Exception:
+        return None
 
 
-async def check_hotel_llm(
+def _format_search_results(data: dict) -> str:
+    """Format Serper JSON into readable text for LLM consumption."""
+    parts = []
+    kg = data.get("knowledgeGraph", {})
+    if kg:
+        parts.append(f"Knowledge Graph: {kg.get('title', '')} - {kg.get('type', '')} - {kg.get('description', '')}")
+        for k, v in kg.get("attributes", {}).items():
+            parts.append(f"  {k}: {v}")
+    for r in data.get("organic", [])[:5]:
+        parts.append(f"Result: {r.get('title', '')} - {r.get('snippet', '')}")
+    return "\n".join(parts) if parts else "No results found"
+
+
+def _parse_knowledge_graph(data: dict) -> Optional[str]:
+    """Parse Serper Knowledge Graph for definitive business status.
+
+    Returns "closed" if Google says permanently closed, None otherwise.
+    """
+    kg = data.get("knowledgeGraph", {})
+    if not kg:
+        return None
+
+    # Check KG type/description for closure signals
+    kg_type = (kg.get("type") or "").lower()
+    kg_desc = (kg.get("description") or "").lower()
+    kg_title = (kg.get("title") or "").lower()
+
+    if "permanently closed" in kg_type or "permanently closed" in kg_desc:
+        return "closed"
+
+    # Check KG attributes
+    for k, v in kg.get("attributes", {}).items():
+        val = str(v).lower()
+        if "permanently closed" in val:
+            return "closed"
+
+    return None
+
+
+def _check_organic_for_closure(data: dict) -> Optional[str]:
+    """Check organic results for strong closure signals.
+
+    Returns "closed" only for very strong signals, None otherwise.
+    """
+    for r in data.get("organic", [])[:5]:
+        title = (r.get("title") or "").lower()
+        snippet = (r.get("snippet") or "").lower()
+        link = (r.get("link") or "").lower()
+
+        # Yelp uses "CLOSED" in the title like "HOTEL NAME - CLOSED - Updated..."
+        if "yelp.com" in link and " - closed - " in title:
+            return "closed"
+
+        # Google Maps / organic results with "permanently closed" in snippet
+        if "permanently closed" in snippet:
+            return "closed"
+
+    return None
+
+
+async def check_hotel_serper(
     client: httpx.AsyncClient,
     hotel_name: str,
     city: Optional[str],
     state: Optional[str],
+    stats: dict,
 ) -> dict:
-    """Check a single hotel's status using Azure GPT-4o + Serper search.
+    """Check hotel status: Serper Knowledge Graph first, LLM fallback for ambiguous cases.
 
     Returns {"status": "active"|"closed"|"unknown", "reason": "..."}.
     """
     location_parts = [p for p in [city, state] if p]
     location = ", ".join(location_parts) if location_parts else ""
-    user_msg = f'Is "{hotel_name}" in {location} still operating?' if location else f'Is "{hotel_name}" still operating?'
+    query = f"{hotel_name} {location} hotel"
+
+    # Step 1: Serper search
+    data = await serper_search_raw(client, query)
+    if data is None:
+        return {"status": "unknown", "reason": "Search failed"}
+
+    # Step 2: Check Knowledge Graph for "Permanently closed"
+    kg_status = _parse_knowledge_graph(data)
+    if kg_status == "closed":
+        stats["kg_closed"] += 1
+        return {"status": "closed", "reason": "Google Knowledge Graph: Permanently closed"}
+
+    # Step 3: Check Yelp organic results for "CLOSED" tag
+    yelp_status = _check_organic_for_closure(data)
+    if yelp_status == "closed":
+        stats["yelp_closed"] += 1
+        return {"status": "closed", "reason": "Yelp: marked as CLOSED"}
+
+    # Step 4: LLM fallback — pass search results we already have (no extra Serper call)
+    search_text = _format_search_results(data)
+    llm_result = await _llm_interpret(client, hotel_name, location, search_text)
+    stats["llm_checked"] += 1
+    return llm_result
+
+
+async def _llm_interpret(
+    client: httpx.AsyncClient,
+    hotel_name: str,
+    location: str,
+    search_results: str,
+) -> dict:
+    """Ask GPT-4o to interpret pre-fetched search results. No tool use needed."""
+    user_msg = f'Is "{hotel_name}" in {location} still operating?\n\nHere are search results:\n{search_results}' if location else f'Is "{hotel_name}" still operating?\n\nHere are search results:\n{search_results}'
 
     url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
     headers = {"api-key": AZURE_OPENAI_API_KEY, "Content-Type": "application/json"}
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
-    ]
 
     for attempt in range(3):
         try:
@@ -219,8 +273,10 @@ async def check_hotel_llm(
                 url,
                 headers=headers,
                 json={
-                    "messages": messages,
-                    "tools": [SEARCH_TOOL],
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
                     "max_tokens": 200,
                     "temperature": 0.1,
                 },
@@ -238,60 +294,17 @@ async def check_hotel_llm(
                 return {"status": "unknown", "reason": f"API error {resp.status_code}"}
 
             data = resp.json()
-            choice = data["choices"][0]
-            msg = choice["message"]
-
-            # If GPT wants to call the search tool
-            if msg.get("tool_calls"):
-                messages.append(msg)
-
-                for tool_call in msg["tool_calls"]:
-                    search_args = json.loads(tool_call["function"]["arguments"])
-                    search_query = search_args.get("query", f"{hotel_name} {location}")
-                    search_results = await serper_search(client, search_query)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": search_results,
-                    })
-
-                resp2 = await client.post(
-                    url,
-                    headers=headers,
-                    json={
-                        "messages": messages,
-                        "max_tokens": 200,
-                        "temperature": 0.1,
-                    },
-                    timeout=30.0,
-                )
-
-                if resp2.status_code == 429:
-                    wait = (attempt + 1) * 5
-                    logger.warning(f"Rate limited on follow-up, waiting {wait}s")
-                    await asyncio.sleep(wait)
-                    continue
-
-                if resp2.status_code != 200:
-                    logger.error(f"Azure OpenAI follow-up error {resp2.status_code}: {resp2.text[:200]}")
-                    return {"status": "unknown", "reason": f"API error {resp2.status_code}"}
-
-                data2 = resp2.json()
-                text = data2["choices"][0]["message"]["content"]
-                return _parse_response(text)
-
-            # GPT answered directly without searching
-            text = msg.get("content", "")
+            text = data["choices"][0]["message"].get("content", "")
             return _parse_response(text)
 
         except httpx.TimeoutException:
-            logger.warning(f"Timeout checking {hotel_name} (attempt {attempt + 1}/3)")
+            logger.warning(f"Timeout on LLM for {hotel_name} (attempt {attempt + 1}/3)")
             if attempt < 2:
                 await asyncio.sleep(5)
                 continue
             return {"status": "unknown", "reason": "Request timeout"}
         except Exception as e:
-            logger.error(f"Error checking {hotel_name}: {e}")
+            logger.error(f"LLM error for {hotel_name}: {e}")
             return {"status": "unknown", "reason": str(e)[:100]}
 
     return {"status": "unknown", "reason": "Max retries exceeded"}
@@ -420,12 +433,11 @@ async def check_hotel(
                 "reason": "website alive",
             }
 
-        # Phase 3: LLM + Serper (needs rate limiting)
+        # Phase 3: Serper → Knowledge Graph → LLM fallback (rate limited)
         async with rate_limiter:
-            stats["llm_checked"] += 1
-            result = await check_hotel_llm(client, name, city, state)
+            result = await check_hotel_serper(client, name, city, state, stats)
 
-        # Phase 3b: If LLM says closed, double-check against OTAs
+        # Phase 3b: If marked closed, double-check against OTAs
         if result["status"] == "closed":
             async with rate_limiter:
                 stats["ota_checked"] += 1
@@ -437,7 +449,7 @@ async def check_hotel(
                     "hotel_name": name,
                     "is_active": True,
                     "status": "active",
-                    "reason": f"LLM said closed but found on OTA",
+                    "reason": "marked closed but found on OTA",
                 }
 
         is_active = None
@@ -466,8 +478,8 @@ async def _refill_rate_limiter(rate_limiter: asyncio.Semaphore, rpm: int, stop_e
             pass
 
 
-async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: bool = False):
-    """Run active status check on US hotels (Cloudbeds, Mews, RMS Cloud, SiteMinder)."""
+async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: bool = False, country: str = "United States", engine: Optional[str] = None):
+    """Run active status check on hotels by country and optionally by booking engine."""
     if not AZURE_OPENAI_API_KEY:
         logger.error("AZURE_OPENAI_API_KEY not set")
         return
@@ -477,6 +489,8 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
 
     await init_db()
 
+    engines = [engine.lower()] if engine else [e for e in TARGET_ENGINES]
+
     async with get_conn() as conn:
         hotels = await conn.fetch("""
             SELECT DISTINCT ON (h.id)
@@ -485,13 +499,13 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
             FROM sadie_gtm.hotels h
             JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
             JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
-            WHERE h.country = 'United States'
+            WHERE h.country = $2
               AND h.status >= 1
-              AND LOWER(be.name) IN ('cloudbeds', 'mews', 'rms cloud', 'siteminder')
+              AND LOWER(be.name) = ANY($3)
               AND (h.is_active IS NULL OR h.active_checked_at < NOW() - INTERVAL '30 days')
             ORDER BY h.id, h.active_checked_at NULLS FIRST
             LIMIT $1
-        """, limit)
+        """, limit, country, engines)
 
     total = len(hotels)
     if total == 0:
@@ -499,14 +513,15 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
         await close_db()
         return
 
-    logger.info(f"Checking {total} US hotels (concurrency={concurrency}, rpm={rpm}, dry_run={dry_run})")
+    engine_label = engine or "all target engines"
+    logger.info(f"Checking {total} {country} hotels [{engine_label}] (concurrency={concurrency}, rpm={rpm}, dry_run={dry_run})")
 
     semaphore = asyncio.Semaphore(concurrency)
     rate_limiter = asyncio.Semaphore(concurrency)
     stop_event = asyncio.Event()
     refiller = asyncio.create_task(_refill_rate_limiter(rate_limiter, rpm, stop_event))
 
-    stats = {"url_active": 0, "website_active": 0, "llm_checked": 0, "ota_checked": 0, "ota_override": 0}
+    stats = {"url_active": 0, "website_active": 0, "kg_closed": 0, "yelp_closed": 0, "llm_checked": 0, "ota_checked": 0, "ota_override": 0}
     all_results = []
     batch_size = 200
 
@@ -570,11 +585,13 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
     total_closed = sum(1 for r in all_results if r["status"] == "closed")
     total_unknown = sum(1 for r in all_results if r["status"] == "unknown")
     logger.info(f"TOTAL: {total_active} active, {total_closed} closed, {total_unknown} unknown")
-    logger.info(f"  Booking URL alive (skipped LLM): {stats['url_active']}")
-    logger.info(f"  Website alive (skipped LLM): {stats['website_active']}")
-    logger.info(f"  Needed LLM check: {stats['llm_checked']}")
+    logger.info(f"  Booking URL alive (FREE): {stats['url_active']}")
+    logger.info(f"  Website alive (FREE): {stats['website_active']}")
+    logger.info(f"  Knowledge Graph closed: {stats['kg_closed']}")
+    logger.info(f"  Yelp closed: {stats['yelp_closed']}")
+    logger.info(f"  LLM fallback: {stats['llm_checked']}")
     logger.info(f"  OTA confirmation checks: {stats['ota_checked']}")
-    logger.info(f"  OTA overrides (LLM said closed, OTA says active): {stats['ota_override']}")
+    logger.info(f"  OTA overrides (saved from false positive): {stats['ota_override']}")
 
     if dry_run:
         logger.info("Dry run - no database updates were made")
@@ -583,11 +600,13 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 200, dry_run: 
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Check hotel active status (US - Cloudbeds/Mews/RMS Cloud/SiteMinder)")
+    parser = argparse.ArgumentParser(description="Check hotel active status")
     parser.add_argument("--limit", type=int, default=500, help="Max hotels to check")
     parser.add_argument("--concurrency", type=int, default=50, help="Concurrent checks")
     parser.add_argument("--rpm", type=int, default=200, help="Azure OpenAI requests per minute limit")
     parser.add_argument("--dry-run", action="store_true", help="Don't update database")
+    parser.add_argument("--country", type=str, default="United States", help="Country to check (default: United States)")
+    parser.add_argument("--engine", type=str, default=None, help="Single booking engine to filter by (e.g. 'rms cloud')")
 
     args = parser.parse_args()
-    asyncio.run(run(limit=args.limit, concurrency=args.concurrency, rpm=args.rpm, dry_run=args.dry_run))
+    asyncio.run(run(limit=args.limit, concurrency=args.concurrency, rpm=args.rpm, dry_run=args.dry_run, country=args.country, engine=args.engine))
