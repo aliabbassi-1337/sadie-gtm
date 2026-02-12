@@ -1,17 +1,15 @@
 """Cloudbeds Tier 2: Playwright-based checkout URL generation.
 
-Cloudbeds is session-based — you can't deep-link to checkout with URL params alone.
-This module automates the booking flow:
-  1. Open reservation page
-  2. Fill check-in/check-out dates
-  3. Click search
-  4. Select first available room
-  5. Capture the /guests checkout URL with session cookies
+Cloudbeds is session-based — to reach the /guests checkout page:
+  1. Load reservation page with hash params (dates auto-fill, rooms load)
+  2. Click "Select Accommodations" on the first room
+  3. Click "Add" to add room to cart
+  4. Close modal overlay
+  5. Click "Book Now" → navigates to /guests checkout URL
 """
 
 import asyncio
 import logging
-import re
 from typing import Optional
 
 from playwright.async_api import Page, async_playwright
@@ -21,16 +19,16 @@ from lib.deeplink.models import DeepLinkConfidence, DeepLinkRequest, DeepLinkRes
 
 log = logging.getLogger(__name__)
 
-# Reuse slug extraction from Tier 1 builder
 _tier1 = CloudbedsBuilder()
+
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 async def build_checkout_url(request: DeepLinkRequest, headless: bool = True) -> DeepLinkResult:
-    """Automate Cloudbeds booking flow to get a checkout URL.
-
-    Opens the booking page in Playwright, fills dates, searches for rooms,
-    selects the first available room, and captures the checkout URL.
-    """
+    """Automate Cloudbeds booking flow to get a /guests checkout URL."""
     slug = _tier1.extract_slug(request.booking_url)
     if not slug:
         return DeepLinkResult(
@@ -43,19 +41,17 @@ async def build_checkout_url(request: DeepLinkRequest, headless: bool = True) ->
 
     checkin_str = request.checkin.isoformat()
     checkout_str = request.checkout.isoformat()
-    base_url = f"https://hotels.cloudbeds.com/reservation/{slug}"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context()
+        context = await browser.new_context(user_agent=_UA)
         page = await context.new_page()
 
         try:
             checkout_url = await _automate_booking(
-                page, base_url, slug, checkin_str, checkout_str, request.adults
+                page, slug, checkin_str, checkout_str, request.adults
             )
-
-            if checkout_url:
+            if checkout_url and "/guests" in checkout_url:
                 return DeepLinkResult(
                     url=checkout_url,
                     engine_name="Cloudbeds",
@@ -64,16 +60,8 @@ async def build_checkout_url(request: DeepLinkRequest, headless: bool = True) ->
                     original_url=request.booking_url,
                 )
 
-            # Fallback: construct best-guess URL even if automation failed
-            log.warning("Cloudbeds automation failed, returning search page URL")
-            fallback = f"{base_url}#checkin={checkin_str}&checkout={checkout_str}&adults={request.adults}&submit=1"
-            return DeepLinkResult(
-                url=fallback,
-                engine_name="Cloudbeds",
-                confidence=DeepLinkConfidence.LOW,
-                dates_prefilled=True,
-                original_url=request.booking_url,
-            )
+            log.warning("Cloudbeds automation didn't reach /guests, returning Tier 1 URL")
+            return _tier1.build(request)
         finally:
             await page.close()
             await context.close()
@@ -82,73 +70,49 @@ async def build_checkout_url(request: DeepLinkRequest, headless: bool = True) ->
 
 async def _automate_booking(
     page: Page,
-    base_url: str,
     slug: str,
     checkin: str,
     checkout: str,
     adults: int,
 ) -> Optional[str]:
-    """Drive the Cloudbeds booking flow and return checkout URL."""
+    """Drive Cloudbeds: load with hash params → select room → add → book now."""
 
-    # Load the reservation page
-    await page.goto(base_url, timeout=30000, wait_until="domcontentloaded")
-    await asyncio.sleep(4)  # Wait for React to render
-
-    # Fill check-in date
-    checkin_input = page.locator('input[name="checkin"], input[data-testid="checkin"], #startDate')
-    if await checkin_input.count() > 0:
-        await checkin_input.first.click()
-        await checkin_input.first.fill(checkin)
-    else:
-        log.warning("Could not find checkin input")
-        return None
-
-    # Fill check-out date
-    checkout_input = page.locator('input[name="checkout"], input[data-testid="checkout"], #endDate')
-    if await checkout_input.count() > 0:
-        await checkout_input.first.click()
-        await checkout_input.first.fill(checkout)
-    else:
-        log.warning("Could not find checkout input")
-        return None
-
-    # Click search/check availability button
-    search_btn = page.locator(
-        'button:has-text("Search"), button:has-text("Check Availability"), '
-        'button:has-text("search"), button[type="submit"], '
-        'input[type="submit"], .search-button, #search-button'
+    # Load with hash params — Cloudbeds auto-searches and shows rooms
+    url = (
+        f"https://hotels.cloudbeds.com/reservation/{slug}"
+        f"#checkin={checkin}&checkout={checkout}&adults={adults}&submit=1"
     )
-    if await search_btn.count() > 0:
-        await search_btn.first.click()
-    else:
-        log.warning("Could not find search button")
-        return None
+    await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+    await asyncio.sleep(8)  # Wait for React + room results to render
 
-    # Wait for room results to load
+    # 1. Click "Select Accommodations" on first available room
+    select_btn = page.locator('[data-testid^="rate-plan-select-individual-button-"]').first
+    if not await select_btn.count():
+        log.warning("No 'Select Accommodations' button found")
+        return None
+    await select_btn.click()
+    await asyncio.sleep(2)
+
+    # 2. Click "Add" to add room to cart
+    add_btn = page.locator('[data-testid^="select-individual-add-button-"]').first
+    if not await add_btn.count():
+        log.warning("No 'Add' button found")
+        return None
+    await add_btn.click()
+    await asyncio.sleep(2)
+
+    # 3. Close modal overlay
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(1)
+
+    # 4. Click "Book Now" in shopping cart (force bypasses any remaining overlay)
+    book_btn = page.locator('[data-testid="shopping-cart-confirm-button"]')
+    if not await book_btn.count():
+        log.warning("No 'Book Now' button found in cart")
+        return None
+    await book_btn.click(force=True)
     await asyncio.sleep(5)
 
-    # Look for "Book Now" / "Reserve" / "Select" button on first available room
-    book_btn = page.locator(
-        'button:has-text("Book Now"), button:has-text("Reserve"), '
-        'button:has-text("Select"), button:has-text("Book"), '
-        'a:has-text("Book Now"), a:has-text("Reserve"), '
-        '.book-button, .reserve-button, .btn-book'
-    )
-    if await book_btn.count() > 0:
-        await book_btn.first.click()
-    else:
-        log.warning("Could not find book/reserve button")
-        return None
-
-    # Wait for navigation to checkout/guests page
-    await asyncio.sleep(3)
-
-    # Capture the checkout URL
-    current_url = page.url
-    if "/guests" in current_url or "/checkout" in current_url:
-        log.info(f"Captured Cloudbeds checkout URL: {current_url}")
-        return current_url
-
-    # Check if we got redirected somewhere useful
-    log.info(f"Cloudbeds landed on: {current_url}")
-    return current_url if current_url != base_url else None
+    checkout_url = page.url
+    log.info(f"Cloudbeds checkout URL: {checkout_url}")
+    return checkout_url
