@@ -41,11 +41,12 @@ from db.client import init_db, close_db, get_conn
 RMS_BASE_URL = "https://bookings12.rmscloud.com/Rates/Index"
 
 # Multiple date ranges to check (days ahead)
-# If a hotel has no availability at first range, we retry with subsequent ranges
+# Strategy: 1 check in 30-day range, 2 checks in 60-day range, 1 check in 90-day range
 CHECK_DATE_RANGES = [
-    (30, 32),  # 30 days ahead, 2-night stay
-    (60, 62),  # 60 days ahead, 2-night stay
-    (90, 92),  # 90 days ahead, 2-night stay
+    (30, 32),  # 30 days ahead (30-day range)
+    (60, 62),  # 60 days ahead (60-day range - first check)
+    (75, 77),  # 75 days ahead (60-day range - second check, different interval)
+    (90, 92),  # 90 days ahead (90-day range)
 ]
 
 
