@@ -566,7 +566,7 @@ async def _refill_rate_limiter(limiter: asyncio.Semaphore, rpm: int, stop_event:
             pass
 
 
-async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run: bool = False, country: str = "United States", engine: Optional[str] = None):
+async def run(limit: int = 500, concurrency: int = 200, rpm: int = 1000, dry_run: bool = False, country: str = "United States", engine: Optional[str] = None):
     """Run active status check on hotels by country and optionally by booking engine."""
     if not AZURE_OPENAI_API_KEY:
         logger.error("AZURE_OPENAI_API_KEY not set")
@@ -709,7 +709,7 @@ async def run(limit: int = 500, concurrency: int = 50, rpm: int = 1000, dry_run:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Check hotel active status")
     parser.add_argument("--limit", type=int, default=500, help="Max hotels to check")
-    parser.add_argument("--concurrency", type=int, default=50, help="Concurrent checks")
+    parser.add_argument("--concurrency", type=int, default=200, help="Concurrent checks")
     parser.add_argument("--rpm", type=int, default=1000, help="Azure OpenAI requests per minute limit")
     parser.add_argument("--dry-run", action="store_true", help="Don't update database")
     parser.add_argument("--country", type=str, default="United States", help="Country to check (default: United States)")
