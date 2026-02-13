@@ -46,4 +46,5 @@ class DeepLinkResult:
     engine_name: str  # "SiteMinder", "Cloudbeds", etc. or "Unknown"
     confidence: DeepLinkConfidence
     dates_prefilled: bool  # True if URL params include dates
-    original_url: str  # The input booking URL
+    original_url: str = ""  # The input booking URL (if any)
+    session_id: Optional[str] = None  # Proxy session ID (Tier 2 only)

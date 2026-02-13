@@ -70,11 +70,11 @@ resource "aws_ecs_task_definition" "deeplink" {
     }
 
     healthCheck = {
-      command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/deeplink')\" || exit 1"]
+      command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
       interval    = 30
       timeout     = 5
       retries     = 3
-      startPeriod = 10
+      startPeriod = 15
     }
   }])
 }
@@ -161,13 +161,13 @@ resource "aws_lb_target_group" "deeplink" {
   target_type = "ip"
 
   health_check {
-    path                = "/r/healthz"
+    path                = "/health"
     port                = "traffic-port"
     healthy_threshold   = 2
     unhealthy_threshold = 3
     timeout             = 5
     interval            = 30
-    matcher             = "200-499" # 404 is fine — means the app is up
+    matcher             = "200"
   }
 }
 

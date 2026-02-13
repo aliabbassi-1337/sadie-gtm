@@ -15,6 +15,12 @@ from api.deeplink.routes import router as api_router
 
 app = FastAPI(title="Sadie Deep-Link Service")
 
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 # Mount specific proxy routes (before app routes is fine — they have specific prefixes)
 app.include_router(proxy_router)
 
