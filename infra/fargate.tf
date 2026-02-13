@@ -1877,6 +1877,7 @@ resource "aws_cloudwatch_event_rule" "check_active" {
   name                = "${var.app_name}-check-active"
   description         = "Check hotel active status every 12 hours"
   schedule_expression = "rate(12 hours)"
+  is_enabled          = false
 }
 
 resource "aws_cloudwatch_event_target" "check_active" {
@@ -1940,6 +1941,7 @@ resource "aws_cloudwatch_event_rule" "rms_availability" {
   name                = "${var.app_name}-rms-availability"
   description         = "Check RMS hotel availability every 7 days"
   schedule_expression = "rate(7 days)"
+  is_enabled          = false
 }
 
 resource "aws_cloudwatch_event_target" "rms_availability" {

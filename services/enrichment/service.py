@@ -671,6 +671,51 @@ class IService(ABC):
         """Consume and process Cloudbeds enrichment queue."""
         pass
 
+    # RMS Availability Check
+    @abstractmethod
+    async def check_rms_availability(
+        self,
+        limit: int = 100,
+        concurrency: int = 30,
+        force: bool = False,
+        dry_run: bool = False,
+        proxy_mode: str = "auto",
+    ) -> Dict[str, Any]:
+        """Check RMS Australia hotel availability via ibe12 API.
+
+        Args:
+            limit: Max hotels to process
+            concurrency: Concurrent requests
+            force: Re-check all (ignore previous checks)
+            dry_run: Don't update database
+            proxy_mode: auto, direct, brightdata, free, proxy
+
+        Returns dict with counts: available, no_avail, inconclusive, errors, db_written.
+        """
+        pass
+
+    @abstractmethod
+    async def reset_rms_availability(self) -> int:
+        """Reset all Australia RMS availability results to NULL."""
+        pass
+
+    @abstractmethod
+    async def get_rms_availability_status(self) -> Dict[str, int]:
+        """Get availability check stats: total, pending, has_availability, no_availability."""
+        pass
+
+    @abstractmethod
+    async def verify_rms_availability(
+        self,
+        sample_size: int = 10,
+        proxy_mode: str = "direct",
+    ) -> Dict[str, int]:
+        """Re-check a random sample of results to verify correctness.
+
+        Returns dict with matches, mismatches counts.
+        """
+        pass
+
 
 class Service(IService):
     def __init__(self, rms_repo: Optional[RMSRepo] = None, rms_queue = None) -> None:
@@ -3371,3 +3416,226 @@ class Service(IService):
             logger.info("Sent normalization trigger to SQS")
         except Exception as e:
             logger.warning(f"Failed to send normalization trigger: {e}")
+
+    # ================================================================
+    # RMS AVAILABILITY CHECK
+    # ================================================================
+
+    async def _process_hotel_availability(
+        self,
+        hotel: dict,
+        semaphore: asyncio.Semaphore,
+        proxy_pool,
+    ) -> dict:
+        """Check availability for a single hotel via ibe12 API."""
+        from lib.rms.ibe12 import extract_client_id, get_jwt_cookie, check_availability
+        from datetime import datetime, timedelta
+
+        hotel_id = hotel["hotel_id"]
+        name = hotel.get("name", "Unknown")
+        booking_url = hotel.get("booking_url")
+
+        if not booking_url:
+            return {"hotel_id": hotel_id, "hotel_name": name, "has_availability": False, "reason": "no_url"}
+
+        client_id = extract_client_id(booking_url)
+        if not client_id:
+            return {"hotel_id": hotel_id, "hotel_name": name, "has_availability": False, "reason": "bad_url"}
+
+        async with semaphore:
+            async with proxy_pool.create_client() as client:
+                jwt_status = await get_jwt_cookie(client, client_id)
+                if jwt_status == "not_found":
+                    logger.info(f"  - {name}: not found (JWT 404)")
+                    return {"hotel_id": hotel_id, "hotel_name": name, "has_availability": False, "reason": "not_found"}
+                if jwt_status != "ok":
+                    logger.debug(f"  ? {name}: JWT failed")
+                    return {"hotel_id": hotel_id, "hotel_name": name, "has_availability": None, "reason": "jwt_failed"}
+
+                arrive = (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y")
+                depart = (datetime.now() + timedelta(days=16)).strftime("%m/%d/%Y")
+                has_rooms, n_cats = await check_availability(client, client_id, arrive, depart)
+
+                if has_rooms is None:
+                    logger.debug(f"  ? {name}: inconclusive")
+                    return {"hotel_id": hotel_id, "hotel_name": name, "has_availability": None, "reason": "inconclusive"}
+
+                if n_cats > 0:
+                    if has_rooms:
+                        logger.info(f"  + {name}: AVAILABLE ({n_cats} categories)")
+                    else:
+                        logger.info(f"  + {name}: has categories ({n_cats}), no live rates")
+                    return {"hotel_id": hotel_id, "hotel_name": name, "has_availability": True, "reason": "available" if has_rooms else "has_categories"}
+
+                logger.info(f"  - {name}: no categories")
+                return {"hotel_id": hotel_id, "hotel_name": name, "has_availability": False, "reason": "no_categories"}
+
+    async def check_rms_availability(
+        self,
+        limit: int = 100,
+        concurrency: int = 30,
+        force: bool = False,
+        dry_run: bool = False,
+        proxy_mode: str = "auto",
+    ) -> Dict[str, Any]:
+        """Check RMS Australia hotel availability via ibe12 API."""
+        from lib.proxy import ProxyPool
+        from collections import defaultdict
+
+        proxy_pool = ProxyPool(proxy_mode)
+        if proxy_mode in ("free", "auto"):
+            await proxy_pool.init_free_proxies()
+
+        hotels = await repo.get_rms_hotels_pending_availability(limit, force)
+        if not hotels:
+            logger.info("No Australia RMS leads pending availability check")
+            return {"available": 0, "no_avail": 0, "inconclusive": 0, "errors": 0, "db_written": 0}
+
+        total = len(hotels)
+        mode = "FORCE RECHECK" if force else "pending only"
+        logger.info(f"Processing {total} Australia RMS leads ({mode}, concurrency={concurrency})")
+
+        semaphore = asyncio.Semaphore(concurrency)
+        processed = 0
+        db_written = 0
+        errors = 0
+        reasons = defaultdict(int)
+        counts = {"available": 0, "no_avail": 0, "inconclusive": 0}
+        pending_flush = []
+        flush_batch_size = 50
+        start_time = time.monotonic()
+
+        async def flush_batch(batch):
+            nonlocal db_written
+            valid = [r for r in batch if r["has_availability"] is not None]
+            if not valid:
+                return
+            hotel_ids = [r["hotel_id"] for r in valid]
+            statuses = [r["has_availability"] for r in valid]
+            written = await repo.batch_update_rms_availability(hotel_ids, statuses)
+            db_written += written
+
+        tasks = {asyncio.ensure_future(self._process_hotel_availability(h, semaphore, proxy_pool)): h for h in hotels}
+        for coro in asyncio.as_completed(tasks.keys()):
+            result = await coro
+            if isinstance(result, Exception):
+                errors += 1
+                logger.error(f"Hotel check error: {result}")
+                continue
+
+            processed += 1
+            reasons[result.get("reason", "unknown")] += 1
+            ha = result.get("has_availability")
+            if ha is True:
+                counts["available"] += 1
+            elif ha is False:
+                counts["no_avail"] += 1
+            else:
+                counts["inconclusive"] += 1
+
+            if ha is not None and not dry_run:
+                pending_flush.append(result)
+
+            if len(pending_flush) >= flush_batch_size:
+                batch = pending_flush.copy()
+                pending_flush.clear()
+                await flush_batch(batch)
+
+            if processed % 100 == 0:
+                elapsed = time.monotonic() - start_time
+                rate = processed / elapsed if elapsed > 0 else 0
+                eta = (total - processed) / rate if rate > 0 else 0
+                logger.info(
+                    f"PROGRESS: {processed}/{total} ({processed*100//total}%) | "
+                    f"avail={counts['available']} no={counts['no_avail']} skip={counts['inconclusive']} err={errors} | "
+                    f"DB written={db_written} | {rate:.0f}/s ETA {eta:.0f}s"
+                )
+
+        if pending_flush and not dry_run:
+            await flush_batch(pending_flush)
+            pending_flush.clear()
+
+        elapsed = time.monotonic() - start_time
+        logger.info("=" * 60)
+        logger.info("RMS AVAILABILITY ENRICHMENT COMPLETE")
+        logger.info("=" * 60)
+        logger.info(f"Leads processed: {processed} in {elapsed:.1f}s ({processed/elapsed:.0f}/s)" if elapsed > 0 else f"Leads processed: {processed}")
+        logger.info(f"  Has availability: {counts['available']}")
+        logger.info(f"  No availability:  {counts['no_avail']}")
+        logger.info(f"  Inconclusive:     {counts['inconclusive']}")
+        logger.info(f"  Errors:           {errors}")
+        logger.info(f"Breakdown:")
+        for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
+            logger.info(f"  {reason:15s}: {count}")
+        if not dry_run:
+            logger.info(f"Database written: {db_written} leads (incremental)")
+        else:
+            logger.info("[DRY RUN] No database updates made")
+        logger.info("=" * 60)
+
+        result = {**counts, "errors": errors, "db_written": db_written, "reasons": dict(reasons)}
+
+        if not dry_run and db_written > 0:
+            verify = await self.verify_rms_availability(sample_size=10, proxy_mode="direct")
+            result["verification"] = verify
+
+        return result
+
+    async def reset_rms_availability(self) -> int:
+        """Reset all Australia RMS availability results to NULL."""
+        count = await repo.reset_rms_availability()
+        logger.info(f"Reset {count} availability results to NULL")
+        return count
+
+    async def get_rms_availability_status(self) -> Dict[str, int]:
+        """Get availability check stats."""
+        stats = await repo.get_rms_availability_stats()
+        logger.info("=" * 60)
+        logger.info("RMS AUSTRALIA AVAILABILITY STATUS")
+        logger.info("=" * 60)
+        logger.info(f"Total Australia RMS leads: {stats['total']}")
+        logger.info(f"Pending checks: {stats['pending']}")
+        logger.info(f"Has availability: {stats['has_availability']}")
+        logger.info(f"No availability: {stats['no_availability']}")
+        logger.info("=" * 60)
+        return stats
+
+    async def verify_rms_availability(
+        self,
+        sample_size: int = 10,
+        proxy_mode: str = "direct",
+    ) -> Dict[str, int]:
+        """Re-check a random sample of results to verify correctness."""
+        from lib.proxy import ProxyPool
+
+        samples = await repo.get_rms_verification_samples(sample_size)
+        if not samples:
+            logger.warning("VERIFY: No results to verify")
+            return {"matches": 0, "mismatches": 0}
+
+        proxy_pool = ProxyPool(proxy_mode)
+        semaphore = asyncio.Semaphore(10)
+
+        logger.info(f"VERIFY: Re-checking {len(samples)} random hotels...")
+        tasks = [self._process_hotel_availability(h, semaphore, proxy_pool) for h in samples]
+        recheck = await asyncio.gather(*tasks, return_exceptions=True)
+
+        matches = 0
+        mismatches = 0
+        for hotel, result in zip(samples, recheck):
+            if isinstance(result, Exception):
+                logger.warning(f"VERIFY: {hotel['name']}: recheck error: {result}")
+                continue
+            actual = result.get("has_availability")
+            name = hotel.get("name", "Unknown")
+            if actual is None:
+                logger.warning(f"VERIFY: {name}: recheck inconclusive")
+            elif actual == hotel.get("has_availability"):
+                matches += 1
+                logger.info(f"VERIFY OK: {name}: {'avail' if actual else 'no_avail'} confirmed")
+            else:
+                mismatches += 1
+                logger.error(f"VERIFY MISMATCH: {name}: recheck={'avail' if actual else 'no_avail'}")
+
+        logger.info(f"VERIFY: {matches}/{matches + mismatches} consistent ({mismatches} mismatches)")
+        return {"matches": matches, "mismatches": mismatches}
