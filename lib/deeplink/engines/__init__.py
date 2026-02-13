@@ -1,4 +1,7 @@
-"""Engine builder registry."""
+"""Engine builder registry.
+
+Tier 1 builders only — these construct URLs without any I/O.
+"""
 
 from lib.deeplink.engines.cloudbeds import CloudbedsBuilder
 from lib.deeplink.engines.mews import MewsBuilder

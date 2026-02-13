@@ -20,8 +20,8 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lib.deeplink.generator import generate_deeplink, generate_deeplink_for_hotel
 from lib.deeplink.models import DeepLinkRequest
+from services.deeplink import create_deeplink, create_deeplink_for_hotel
 
 
 def main():
@@ -68,10 +68,10 @@ Examples:
             rooms=args.rooms,
             promo_code=args.promo,
         )
-        result = generate_deeplink(request)
+        result = create_deeplink(request)
     else:
         result = asyncio.run(
-            generate_deeplink_for_hotel(
+            create_deeplink_for_hotel(
                 hotel_id=args.hotel_id,
                 checkin=checkin,
                 checkout=checkout,

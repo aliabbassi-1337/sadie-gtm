@@ -8,7 +8,7 @@ from lib.deeplink.engines.cloudbeds import CloudbedsBuilder
 from lib.deeplink.engines.mews import MewsBuilder
 from lib.deeplink.engines.rms import RmsBuilder
 from lib.deeplink.engines.siteminder import SiteMinderBuilder
-from lib.deeplink.generator import detect_engine, generate_deeplink
+from services.deeplink.service import create_deeplink as generate_deeplink, detect_engine
 from lib.deeplink.models import DeepLinkConfidence, DeepLinkRequest
 
 pytestmark = pytest.mark.no_db
