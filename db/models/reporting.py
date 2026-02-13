@@ -43,6 +43,7 @@ class HotelLead(BaseModel):
 
     # Active status
     is_active: Optional[bool] = None
+    has_availability: Optional[bool] = None
 
     model_config = ConfigDict(from_attributes=True)
 

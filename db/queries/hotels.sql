@@ -238,7 +238,8 @@ SELECT
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km,
-    h.is_active
+    h.is_active,
+    hbe.has_availability
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -275,7 +276,8 @@ SELECT
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km,
-    h.is_active
+    h.is_active,
+    hbe.has_availability
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -312,7 +314,8 @@ SELECT
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km,
-    h.is_active
+    h.is_active,
+    hbe.has_availability
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -349,7 +352,8 @@ SELECT
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km,
-    h.is_active
+    h.is_active,
+    hbe.has_availability
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -387,7 +391,8 @@ SELECT
     hrc.confidence AS room_count_confidence,
     ec.name AS nearest_customer_name,
     hcp.distance_km AS nearest_customer_distance_km,
-    h.is_active
+    h.is_active,
+    hbe.has_availability
 FROM sadie_gtm.hotels h
 JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
@@ -424,7 +429,8 @@ SELECT
     NULL::numeric AS room_count_confidence,
     NULL::text AS nearest_customer_name,
     NULL::numeric AS nearest_customer_distance_km,
-    h.is_active
+    h.is_active,
+    hbe.has_availability
 FROM sadie_gtm.hotels h
 LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
 LEFT JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id

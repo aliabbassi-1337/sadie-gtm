@@ -524,6 +524,7 @@ class Service(IService):
             ("Booking Engine", lambda l: l.booking_engine_name or ""),
             ("Category", lambda l: l.category or ""),
             ("Active", lambda l: "Yes" if l.is_active is True else ("No" if l.is_active is False else "")),
+            ("Has Availability", lambda l: "Yes" if l.has_availability is True else ("No" if l.has_availability is False else "")),
         ]
 
         # Filter out columns where ALL values are empty
