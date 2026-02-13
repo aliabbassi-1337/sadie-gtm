@@ -363,13 +363,15 @@ async def get_pending_hotels(limit: int, force: bool = False) -> list:
         where_clause = """
             be.name = 'RMS Cloud'
             AND h.country IN ('AU', 'Australia')
+            AND h.status = 1
+            AND hbe.status = 1
         """
         if not force:
             where_clause += " AND hbe.has_availability IS NULL"
 
         rows = await conn.fetch(
             f"""
-            SELECT 
+            SELECT
                 h.id AS hotel_id,
                 h.name,
                 h.city,
@@ -423,7 +425,7 @@ async def show_status():
     """Display availability check status for Australia RMS hotels."""
     async with get_conn() as conn:
         stats = await conn.fetchrow("""
-            SELECT 
+            SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE hbe.has_availability IS NULL) AS pending,
                 COUNT(*) FILTER (WHERE hbe.has_availability = TRUE) AS has_availability,
@@ -433,6 +435,8 @@ async def show_status():
             JOIN sadie_gtm.booking_engines be ON hbe.booking_engine_id = be.id
             WHERE be.name = 'RMS Cloud'
               AND h.country IN ('AU', 'Australia')
+              AND h.status = 1
+              AND hbe.status = 1
         """)
 
     logger.info("=" * 60)
@@ -542,13 +546,13 @@ def main():
 Examples:
   # Check 100 leads (fast)
   uv run python -m workflows.rms_availability --limit 100
-  
+
   # Check 3.7k leads with high concurrency
   uv run python -m workflows.rms_availability --limit 3700 --concurrency 30
-  
+
   # Force re-check all leads
   uv run python -m workflows.rms_availability --limit 3700 --force
-  
+
   # Check status
   uv run python -m workflows.rms_availability --status
         """,
