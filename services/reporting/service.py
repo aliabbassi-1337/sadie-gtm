@@ -640,6 +640,7 @@ class Service(IService):
             ("Category", lambda l: l.category or ""),
             ("Proximity", lambda l: self._format_proximity(l)),
             ("Active", lambda l: "Yes" if l.is_active is True else ("No" if l.is_active is False else "")),
+            ("Has Availability", lambda l: "Yes" if l.has_availability is True else ("No" if l.has_availability is False else "")),
         ]
 
         # Filter out columns where ALL values are empty

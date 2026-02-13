@@ -1518,3 +1518,93 @@ async def batch_set_state_from_city(ids: List[int], states: List[str], conn=None
         return _parse_update_count(await _run(conn))
     async with get_conn() as c:
         return _parse_update_count(await _run(c))
+
+
+# ============================================================================
+# RMS AVAILABILITY FUNCTIONS
+# ============================================================================
+
+
+async def get_rms_hotels_pending_availability(limit: int, force: bool = False) -> List[Dict[str, Any]]:
+    """Get Australia RMS hotels needing availability check.
+
+    Args:
+        limit: Max hotels to return
+        force: If True, return all hotels (for re-check). If False, only pending.
+    """
+    async with get_conn() as conn:
+        if force:
+            rows = await queries.get_rms_hotels_all_for_recheck(conn, limit=limit)
+        else:
+            rows = await queries.get_rms_hotels_pending_availability(conn, limit=limit)
+        return [dict(row) for row in rows]
+
+
+async def batch_update_rms_availability(hotel_ids: List[int], statuses: List[bool]) -> int:
+    """Batch update availability status for RMS hotels.
+
+    Uses unnest for efficient single-query batch update.
+    Returns count of updated rows.
+    """
+    if not hotel_ids:
+        return 0
+
+    _SQL = """
+        UPDATE sadie_gtm.hotel_booking_engines AS hbe
+        SET has_availability = m.has_availability,
+            availability_checked_at = NOW()
+        FROM (
+            SELECT unnest($1::int[]) AS hotel_id,
+                   unnest($2::boolean[]) AS has_availability
+        ) AS m
+        WHERE hbe.hotel_id = m.hotel_id
+    """
+    for attempt in range(3):
+        try:
+            async with get_conn() as conn:
+                await conn.execute(_SQL, hotel_ids, statuses)
+            return len(hotel_ids)
+        except Exception as e:
+            if attempt < 2:
+                import asyncio
+                await asyncio.sleep(1.0 * (attempt + 1))
+            else:
+                raise
+    return 0
+
+
+async def reset_rms_availability() -> int:
+    """Reset all Australia RMS availability results to NULL."""
+    async with get_conn() as conn:
+        result = await queries.reset_rms_availability(conn)
+        return _parse_update_count(result)
+
+
+async def get_rms_availability_stats() -> Dict[str, int]:
+    """Get availability check statistics for Australia RMS hotels."""
+    async with get_conn() as conn:
+        result = await queries.get_rms_availability_stats(conn)
+        return dict(result) if result else {
+            "total": 0, "pending": 0, "has_availability": 0, "no_availability": 0,
+        }
+
+
+async def get_rms_verification_samples(sample_size: int = 10) -> List[Dict[str, Any]]:
+    """Get random samples of available and no-availability hotels for verification.
+
+    Each dict includes a 'has_availability' key reflecting the DB state.
+    """
+    half = max(sample_size // 2, 1)
+    async with get_conn() as conn:
+        avail_rows = await queries.get_rms_available_sample(conn, limit=half)
+        no_avail_rows = await queries.get_rms_no_availability_sample(conn, limit=half)
+    samples = []
+    for r in avail_rows:
+        d = dict(r)
+        d["has_availability"] = True
+        samples.append(d)
+    for r in no_avail_rows:
+        d = dict(r)
+        d["has_availability"] = False
+        samples.append(d)
+    return samples
