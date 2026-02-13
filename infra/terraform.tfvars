@@ -3,3 +3,4 @@ deeplink_ecr_repo_url              = "760711518969.dkr.ecr.eu-north-1.amazonaws.
 sqs_rms_enrichment_queue_arn       = "arn:aws:sqs:eu-north-1:760711518969:sadie-gtm-rms-enrichment"
 sqs_rms_scan_queue_arn             = "arn:aws:sqs:eu-north-1:760711518969:sadie-gtm-rms-scan"
 sqs_cloudbeds_enrichment_queue_arn = "arn:aws:sqs:eu-north-1:760711518969:sadie-gtm-cloudbeds-enrichment"
+sqs_detection_queue_arn            = "arn:aws:sqs:eu-north-1:760711518969:detection-queue"

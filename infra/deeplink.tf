@@ -80,6 +80,21 @@ resource "aws_ecs_task_definition" "deeplink" {
 }
 
 # ---------------------------------------------------------------------------
+# Subnets — one per AZ (ALB requires unique AZs)
+# ---------------------------------------------------------------------------
+
+data "aws_subnets" "default_one_per_az" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+  filter {
+    name   = "default-for-az"
+    values = ["true"]
+  }
+}
+
+# ---------------------------------------------------------------------------
 # ALB
 # ---------------------------------------------------------------------------
 
@@ -135,7 +150,7 @@ resource "aws_lb" "deeplink" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.deeplink_alb.id]
-  subnets            = data.aws_subnets.default.ids
+  subnets            = data.aws_subnets.default_one_per_az.ids
 }
 
 resource "aws_lb_target_group" "deeplink" {
