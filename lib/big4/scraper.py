@@ -34,6 +34,19 @@ STATE_MAP = {
     "Australian Capital Territory": "ACT",
 }
 
+# Reverse map: abbreviation -> lowercase URL slug
+STATE_URL_SLUG = {
+    "NSW": "nsw", "VIC": "vic", "QLD": "qld", "WA": "wa",
+    "SA": "sa", "TAS": "tas", "NT": "nt", "ACT": "act",
+}
+
+# Brand prefixes stripped from park names in URL slugs
+_BRAND_PREFIX_RE = re.compile(
+    r'^(big4 |nrma |ingenia holidays |tasman holiday parks - '
+    r'|breeze holiday parks - |holiday haven )',
+    re.IGNORECASE,
+)
+
 
 def _slugify(name: str) -> str:
     """Convert a park name to a URL-safe slug."""
@@ -43,14 +56,35 @@ def _slugify(name: str) -> str:
     return slug.strip("-")
 
 
+def _url_slugify(name: str) -> str:
+    """Slugify a park name for use in big4.com.au URLs (strip brand prefix)."""
+    stripped = _BRAND_PREFIX_RE.sub("", name).strip()
+    return _slugify(stripped)
+
+
 def _state_code(state_name: str) -> str:
     """Convert full state name to abbreviation."""
     if not state_name:
         return ""
-    # Already abbreviated
     if len(state_name) <= 3 and state_name.upper() == state_name:
         return state_name
     return STATE_MAP.get(state_name, state_name)
+
+
+def _normalize_for_match(name: str) -> str:
+    """Normalize a park name for fuzzy matching (strip brand, suffix, punctuation)."""
+    n = name.lower().strip()
+    n = _BRAND_PREFIX_RE.sub("", n).strip()
+    n = re.sub(
+        r'\s*(holiday park|caravan park|tourist park|holiday village|holiday resort'
+        r'|camping ground|glamping retreat|lifestyle park|holiday parks)$',
+        '', n,
+    )
+    n = re.sub(r'[^a-z0-9\s]', '', n)
+    return re.sub(r'\s+', ' ', n).strip()
+
+
+STATE_CODES = ["nsw", "vic", "qld", "wa", "sa", "tas", "nt"]
 
 
 class Big4Scraper:
@@ -109,7 +143,42 @@ class Big4Scraper:
         logger.info(f"Algolia returned {len(hits)} parks")
         return hits
 
-    def _hit_to_park(self, hit: Dict) -> Optional[Big4Park]:
+    async def discover_urls(self) -> Dict[str, str]:
+        """Discover real park URLs from state listing pages.
+
+        Returns dict mapping normalized park name -> url_path.
+        """
+        url_map = {}
+
+        async def _discover_state(state_code: str):
+            url = f"{BASE_URL}/caravan-parks/{state_code}"
+            html = await self._fetch(url)
+            if not html:
+                return
+            pattern = rf'/caravan-parks/{state_code}/([\w-]+)/([\w-]+)'
+            seen = set()
+            for region_slug, park_slug in re.findall(pattern, html):
+                url_path = f"/caravan-parks/{state_code}/{region_slug}/{park_slug}"
+                if url_path in seen:
+                    continue
+                seen.add(url_path)
+                if park_slug in ("pet-friendly", "facilities", "contact", "deals",
+                                 "accommodation", "local-attractions", "reviews",
+                                 "whats-local", "facilities-and-activities"):
+                    continue
+                # Extract link text for matching
+                name_pat = rf'href="{re.escape(url_path)}"[^>]*>([^<]+)<'
+                name_match = re.search(name_pat, html)
+                link_name = name_match.group(1).strip() if name_match else park_slug.replace("-", " ")
+                norm = _normalize_for_match(link_name)
+                url_map[norm] = url_path
+
+        tasks = [_discover_state(code) for code in STATE_CODES]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info(f"Discovered {len(url_map)} real park URLs from state pages")
+        return url_map
+
+    def _hit_to_park(self, hit: Dict, url_map: Optional[Dict[str, str]] = None) -> Optional[Big4Park]:
         """Convert an Algolia hit to a Big4Park model."""
         park_data = hit.get("Park", {})
         name = park_data.get("Name", "").strip()
@@ -122,10 +191,15 @@ class Big4Scraper:
         town = hit.get("Town", "")
         slug = _slugify(name)
 
-        # Build url_path from state/region/slug
-        state_slug = state_full.lower().replace(" ", "-") if state_full else ""
-        region_slug = _slugify(region) if region else ""
-        url_path = f"/caravan-parks/{state_slug}/{region_slug}/{slug}" if state_slug else f"/parks/{slug}"
+        # Try to find the real URL from discovered state pages
+        norm = _normalize_for_match(name)
+        url_path = (url_map or {}).get(norm)
+        if not url_path:
+            # Fallback: construct URL from Algolia data
+            state_url = STATE_URL_SLUG.get(state, state_full.lower().replace(" ", "-")) if state else ""
+            region_slug = _slugify(region) if region else ""
+            url_slug = _url_slugify(name)
+            url_path = f"/caravan-parks/{state_url}/{region_slug}/{url_slug}" if state_url else f"/parks/{slug}"
 
         # Coordinates from Park or _geoloc
         lat = park_data.get("Latitude")
@@ -206,8 +280,37 @@ class Big4Scraper:
         return ''.join(parts)
 
     def _extract_contact_info(self, park: Big4Park, html: str) -> None:
-        """Extract contact info from the contact page HTML."""
+        """Extract contact info from the contact page HTML.
+
+        Parses the <address> block for street/city/postcode,
+        tel: links for phone, and mailto: links for email.
+        """
         text = html + self._decode_rsc_text(html)
+
+        # Extract structured address from <address> tag
+        if not park.address:
+            addr_match = re.search(r'<address[^>]*>(.*?)</address>', text, re.DOTALL | re.IGNORECASE)
+            if addr_match:
+                # Extract <p> children as address lines
+                lines = re.findall(r'<p[^>]*>(.*?)</p>', addr_match.group(1), re.DOTALL)
+                lines = [re.sub(r'<[^>]+>', '', l).strip() for l in lines]
+                lines = [l for l in lines if l]
+                if len(lines) >= 3:
+                    # Typical: [park_name, street, "City POSTCODE", "STATE"]
+                    # Skip the first line if it matches the park name
+                    if lines[0].lower().startswith(park.name[:10].lower()):
+                        lines = lines[1:]
+                    if lines:
+                        park.address = lines[0]
+                    if len(lines) >= 2:
+                        # "Sydney 2101" → city="Sydney", postcode="2101"
+                        city_post = re.match(r'^(.+?)\s+(\d{4})$', lines[1])
+                        if city_post:
+                            if not park.city:
+                                park.city = city_post.group(1)
+                            park.postcode = city_post.group(2)
+                        elif not park.city:
+                            park.city = lines[1]
 
         # Extract email from mailto: links
         if not park.email:
@@ -252,11 +355,13 @@ class Big4Scraper:
 
     async def scrape_all(self) -> List[Big4Park]:
         """Fetch all parks from Algolia, optionally enrich with contact info."""
+        # Fetch from Algolia + discover real URLs in parallel
         hits = await self.fetch_all_from_algolia()
+        url_map = await self.discover_urls() if self.enrich_contacts else {}
 
         parks = []
         for hit in hits:
-            park = self._hit_to_park(hit)
+            park = self._hit_to_park(hit, url_map)
             if park:
                 parks.append(park)
 
