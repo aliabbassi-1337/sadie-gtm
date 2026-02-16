@@ -54,9 +54,8 @@ async def run_scrape(
 async def show_status() -> None:
     await init_db()
     try:
-        from services.enrichment.big4_repo import Big4Repo
-        big4_repo = Big4Repo()
-        count = await big4_repo.get_big4_count()
+        from services.enrichment import repo
+        count = await repo.get_big4_count()
         logger.info("=" * 60)
         logger.info("BIG4 STATUS")
         logger.info("=" * 60)

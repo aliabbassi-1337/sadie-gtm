@@ -29,7 +29,7 @@ from services.enrichment.archive_scraper import ArchiveScraper, ExtractedBooking
 from services.enrichment.rms_repo import RMSRepo
 from services.enrichment.rms_queue import RMSQueue, MockQueue
 from lib.rms import RMSHotelRecord, QueueStats
-from lib.big4 import Big4Scraper, Big4Park
+from lib.big4 import Big4Scraper
 
 load_dotenv()
 
@@ -3666,10 +3666,6 @@ class Service(IService):
         delay: float = 0.5,
     ) -> Dict[str, Any]:
         """Scrape all BIG4 holiday parks and upsert into hotels table."""
-        from services.enrichment.big4_repo import Big4Repo
-
-        big4_repo = Big4Repo()
-
         logger.info("Starting BIG4 scrape")
 
         async with Big4Scraper(concurrency=concurrency, delay=delay) as scraper:
@@ -3681,8 +3677,20 @@ class Service(IService):
 
         logger.info(f"Scraped {len(parks)} parks, deduplicating and importing to DB...")
 
-        await big4_repo.upsert_parks(parks)
-        total_big4 = await big4_repo.get_big4_count()
+        await repo.upsert_big4_parks(
+            names=[p.name for p in parks],
+            slugs=[p.slug for p in parks],
+            phones=[p.phone for p in parks],
+            emails=[p.email for p in parks],
+            websites=[p.full_url for p in parks],
+            addresses=[p.address for p in parks],
+            cities=[p.city for p in parks],
+            states=[p.state for p in parks],
+            postcodes=[p.postcode for p in parks],
+            lats=[p.latitude for p in parks],
+            lons=[p.longitude for p in parks],
+        )
+        total_big4 = await repo.get_big4_count()
 
         result = {
             "discovered": len(parks),
