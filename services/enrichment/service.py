@@ -732,6 +732,18 @@ class IService(ABC):
         """
         pass
 
+    @abstractmethod
+    async def enrich_big4_websites(
+        self,
+        delay: float = 1.0,
+        limit: int = 0,
+    ) -> Dict[str, Any]:
+        """Enrich BIG4 parks with real websites via DuckDuckGo search.
+
+        Returns dict with total/found/updated counts.
+        """
+        pass
+
 class Service(IService):
     def __init__(self, rms_repo: Optional[RMSRepo] = None, rms_queue = None) -> None:
         self._rms_repo = rms_repo or RMSRepo()
@@ -3706,3 +3718,37 @@ class Service(IService):
         )
 
         return result
+
+    async def enrich_big4_websites(
+        self,
+        delay: float = 1.0,
+        limit: int = 0,
+    ) -> Dict[str, Any]:
+        """Enrich BIG4 parks with real websites via DuckDuckGo search."""
+        from lib.big4.scraper import lookup_websites
+        from db.client import get_conn
+
+        async with get_conn() as conn:
+            rows = await conn.fetch("""
+                SELECT id, name FROM sadie_gtm.hotels
+                WHERE (external_id_type = 'big4' OR source LIKE '%::big4')
+                ORDER BY name
+            """)
+
+        parks = [dict(r) for r in rows]
+        if limit:
+            parks = parks[:limit]
+
+        logger.info(f"Looking up websites for {len(parks)} BIG4 parks...")
+
+        results = await lookup_websites(parks, delay=delay)
+
+        if results:
+            hotel_ids = [r[0] for r in results]
+            websites = [r[1] for r in results]
+            await repo.update_big4_websites(hotel_ids, websites)
+
+        return {
+            "total": len(parks),
+            "found": len(results),
+        }

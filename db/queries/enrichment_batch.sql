@@ -277,3 +277,14 @@ DO UPDATE SET
                       THEN COALESCE(EXCLUDED.website, sadie_gtm.hotels.website) ELSE sadie_gtm.hotels.website END,
     category   = COALESCE(sadie_gtm.hotels.category, EXCLUDED.category),
     location   = COALESCE(sadie_gtm.hotels.location, EXCLUDED.location);
+
+-- BATCH_BIG4_UPDATE_WEBSITES
+-- Params: ($1::int[] hotel_ids, $2::text[] websites)
+-- Overwrite website for BIG4 parks (replaces big4.com.au placeholder URLs).
+UPDATE sadie_gtm.hotels h
+SET website = v.website, updated_at = NOW()
+FROM (
+    SELECT * FROM unnest($1::integer[], $2::text[]) AS t(id, website)
+) v
+WHERE h.id = v.id
+  AND v.website IS NOT NULL AND v.website != '';

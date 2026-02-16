@@ -3,6 +3,8 @@
 USAGE:
     uv run python workflows/big4.py scrape
     uv run python workflows/big4.py scrape --concurrency 20 --delay 0.3
+    uv run python workflows/big4.py enrich-websites
+    uv run python workflows/big4.py enrich-websites --limit 20 --delay 1.5
     uv run python workflows/big4.py status
 """
 
@@ -51,6 +53,34 @@ async def run_scrape(
         await close_db()
 
 
+async def run_enrich_websites(
+    delay: float = 1.0,
+    limit: int = 0,
+    notify: bool = True,
+) -> None:
+    await init_db()
+    try:
+        service = Service()
+        result = await service.enrich_big4_websites(delay=delay, limit=limit)
+        logger.info(
+            f"Website enrichment complete: "
+            f"{result['found']}/{result['total']} found"
+        )
+        if notify and result["found"] > 0:
+            slack.send_message(
+                f"*BIG4 Website Enrichment Complete*\n"
+                f"- Total parks: {result['total']}\n"
+                f"- Websites found: {result['found']}"
+            )
+    except Exception as e:
+        logger.error(f"BIG4 website enrichment failed: {e}")
+        if notify:
+            slack.send_error("BIG4 Website Enrichment", str(e))
+        raise
+    finally:
+        await close_db()
+
+
 async def show_status() -> None:
     await init_db()
     try:
@@ -76,6 +106,11 @@ def main():
     scrape_parser.add_argument("--delay", "-d", type=float, default=0.5)
     scrape_parser.add_argument("--no-notify", action="store_true")
 
+    web_parser = subparsers.add_parser("enrich-websites")
+    web_parser.add_argument("--delay", "-d", type=float, default=1.0)
+    web_parser.add_argument("--limit", "-l", type=int, default=0)
+    web_parser.add_argument("--no-notify", action="store_true")
+
     subparsers.add_parser("status")
 
     args = parser.parse_args()
@@ -84,6 +119,12 @@ def main():
         asyncio.run(run_scrape(
             concurrency=args.concurrency,
             delay=args.delay,
+            notify=not args.no_notify,
+        ))
+    elif args.command == "enrich-websites":
+        asyncio.run(run_enrich_websites(
+            delay=args.delay,
+            limit=args.limit,
             notify=not args.no_notify,
         ))
     elif args.command == "status":

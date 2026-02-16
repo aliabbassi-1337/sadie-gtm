@@ -1625,6 +1625,17 @@ async def upsert_big4_parks(
         )
 
 
+async def update_big4_websites(
+    hotel_ids: List[int], websites: List[str],
+) -> None:
+    """Batch update websites for BIG4 parks."""
+    async with get_conn() as conn:
+        await conn.execute(
+            batch_sql.BATCH_BIG4_UPDATE_WEBSITES,
+            hotel_ids, websites,
+        )
+
+
 async def get_big4_count() -> int:
     """Count BIG4 parks in the database."""
     async with get_conn() as conn:

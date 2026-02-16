@@ -7,8 +7,8 @@ enriches with contact info (email/phone) from individual park pages.
 import asyncio
 import json
 import re
-from typing import Optional, List, Dict
-from urllib.parse import urljoin
+from typing import Optional, List, Dict, Tuple
+from urllib.parse import unquote, urljoin
 
 import httpx
 from loguru import logger
@@ -549,3 +549,108 @@ class Big4Scraper:
                     park.review_count = int(rating["reviewCount"])
                 except (ValueError, TypeError):
                     pass
+
+
+# --- Website enrichment via DuckDuckGo ---
+
+DDG_URL = "https://html.duckduckgo.com/html/"
+
+_SKIP_DOMAINS = frozenset({
+    "big4.com.au", "facebook.com", "instagram.com", "tripadvisor.com",
+    "tripadvisor.com.au", "booking.com", "expedia.com", "expedia.com.au",
+    "wotif.com", "agoda.com", "yelp.com", "yelp.com.au",
+    "yellowpages.com.au", "truelocal.com.au", "hotfrog.com.au",
+    "google.com", "google.com.au", "goo.gl",
+    "wikipedia.org", "linkedin.com", "twitter.com", "youtube.com",
+    "tiktok.com", "pinterest.com",
+    "com-hotel.info", "campermate.com",
+})
+
+
+def _extract_website_from_ddg(html: str) -> Optional[str]:
+    """Extract the most likely real website from DDG search results HTML."""
+    results = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
+    for r in results[:8]:
+        actual = re.search(r"uddg=([^&]+)", r)
+        if actual:
+            r = unquote(actual.group(1))
+        domain_m = re.search(r"https?://(?:www\.)?([^/]+)", r)
+        if not domain_m:
+            continue
+        d = domain_m.group(1).lower()
+        if any(skip in d for skip in _SKIP_DOMAINS):
+            continue
+        if ".com.au" in d or ".org.au" in d or ".net.au" in d:
+            base = re.match(r"(https?://[^/]+)", r)
+            return base.group(1) if base else r
+    return None
+
+
+async def lookup_websites(
+    parks: List[Dict],
+    delay: float = 1.0,
+) -> List[Tuple[int, str]]:
+    """Look up real websites for parks via DuckDuckGo.
+
+    Args:
+        parks: list of dicts with 'id' and 'name' keys.
+        delay: seconds between requests.
+
+    Returns:
+        list of (hotel_id, website) tuples.
+    """
+    client = httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=15,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36"
+            ),
+        },
+    )
+
+    results: List[Tuple[int, str]] = []
+    blocked = 0
+
+    try:
+        for i, park in enumerate(parks):
+            name = park["name"]
+
+            try:
+                resp = await client.get(
+                    DDG_URL,
+                    params={"q": f"{name} official website"},
+                )
+
+                if resp.status_code != 200 or "captcha" in resp.text.lower():
+                    blocked += 1
+                    logger.warning(f"[{i+1}] DDG blocked: {name}")
+                    if blocked >= 3:
+                        logger.error(
+                            f"DDG rate limited after {i+1} requests, stopping"
+                        )
+                        break
+                    await asyncio.sleep(5)
+                    continue
+
+                website = _extract_website_from_ddg(resp.text)
+                if website:
+                    results.append((park["id"], website))
+
+                if (i + 1) % 25 == 0:
+                    logger.info(
+                        f"  Website lookup [{i+1}/{len(parks)}]: "
+                        f"{len(results)} found"
+                    )
+
+            except Exception as e:
+                logger.error(f"DDG error for {name}: {e}")
+                await asyncio.sleep(2)
+
+            await asyncio.sleep(delay)
+    finally:
+        await client.aclose()
+
+    logger.info(f"Website lookup complete: {len(results)}/{len(parks)} found")
+    return results
