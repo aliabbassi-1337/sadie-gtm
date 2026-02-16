@@ -6,6 +6,7 @@ Usage:
     uv run python workflows/enqueue_detection.py --limit 1000
     uv run python workflows/enqueue_detection.py --limit 5000 --batch-size 20
     uv run python workflows/enqueue_detection.py --limit 5000 --categories hotel motel
+    uv run python workflows/enqueue_detection.py --source big4 --batch-size 10
 """
 
 import sys
@@ -27,6 +28,7 @@ async def run(
     limit: int = 1000,
     batch_size: int = 20,
     categories: Optional[List[str]] = None,
+    source: Optional[str] = None,
     notify: bool = True,
 ):
     """Enqueue hotels for detection."""
@@ -34,7 +36,8 @@ async def run(
     try:
         service = Service()
         count = await service.enqueue_hotels_for_detection(
-            limit=limit, batch_size=batch_size, categories=categories
+            limit=limit, batch_size=batch_size,
+            categories=categories, source=source,
         )
         logger.info(f"Enqueued {count} hotels for detection")
 
@@ -42,6 +45,8 @@ async def run(
             msg = f"*Detection Queue Updated*\n• Hotels enqueued: {count}\n• Batch size: {batch_size}"
             if categories:
                 msg += f"\n• Categories: {', '.join(categories)}"
+            if source:
+                msg += f"\n• Source: {source}"
             slack.send_message(msg)
     except Exception as e:
         logger.error(f"Enqueue failed: {e}")
@@ -69,6 +74,9 @@ Examples:
     # Enqueue only hotels and motels (DBPR leads)
     uv run python workflows/enqueue_detection.py --limit 5000 --categories hotel motel
 
+    # Enqueue only BIG4 parks (smaller batches for more parallelism)
+    uv run python workflows/enqueue_detection.py --source big4 --batch-size 10
+
 Environment:
     SQS_DETECTION_QUEUE_URL - Required. The SQS queue URL.
     AWS_REGION - Optional. Defaults to eu-north-1.
@@ -93,6 +101,10 @@ Environment:
         help="Filter by categories (e.g., --categories hotel motel)"
     )
     parser.add_argument(
+        "--source", "-s",
+        help="Filter by source (e.g., --source big4)"
+    )
+    parser.add_argument(
         "--no-notify",
         action="store_true",
         help="Disable Slack notification"
@@ -100,12 +112,19 @@ Environment:
 
     args = parser.parse_args()
 
-    cat_str = f", categories={args.categories}" if args.categories else ""
-    logger.info(f"Enqueuing up to {args.limit} hotels (batch_size={args.batch_size}{cat_str})")
+    filters = []
+    if args.categories:
+        filters.append(f"categories={args.categories}")
+    if args.source:
+        filters.append(f"source={args.source}")
+    filter_str = f", {', '.join(filters)}" if filters else ""
+
+    logger.info(f"Enqueuing up to {args.limit} hotels (batch_size={args.batch_size}{filter_str})")
     asyncio.run(run(
         limit=args.limit,
         batch_size=args.batch_size,
         categories=args.categories,
+        source=args.source,
         notify=not args.no_notify,
     ))
 

@@ -153,18 +153,20 @@ LIMIT :limit;
 
 -- name: update_hotel_status!
 -- Update hotel status after detection
+-- Only fills phone/email if currently null/empty to avoid overwriting authoritative data
 UPDATE sadie_gtm.hotels
 SET status = :status,
-    phone_website = COALESCE(:phone_website, phone_website),
-    email = COALESCE(:email, email),
+    phone_website = CASE WHEN (phone_website IS NULL OR phone_website = '') THEN COALESCE(:phone_website, phone_website) ELSE phone_website END,
+    email = CASE WHEN (email IS NULL OR email = '') THEN COALESCE(:email, email) ELSE email END,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
 -- name: update_hotel_contact_info!
 -- Update hotel contact info without changing status
+-- Only fills phone/email if currently null/empty to avoid overwriting authoritative data
 UPDATE sadie_gtm.hotels
-SET phone_website = COALESCE(:phone_website, phone_website),
-    email = COALESCE(:email, email),
+SET phone_website = CASE WHEN (phone_website IS NULL OR phone_website = '') THEN COALESCE(:phone_website, phone_website) ELSE phone_website END,
+    email = CASE WHEN (email IS NULL OR email = '') THEN COALESCE(:email, email) ELSE email END,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = :hotel_id;
 
