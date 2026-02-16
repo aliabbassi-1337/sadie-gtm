@@ -3680,13 +3680,15 @@ class Service(IService):
             logger.warning("No parks discovered")
             return {"discovered": 0, "imported": 0, "skipped": 0, "failed": 0}
 
-        logger.info(f"Scraped {len(parks)} parks, importing to DB...")
+        logger.info(f"Scraped {len(parks)} parks, deduplicating and importing to DB...")
 
         imported = await big4_repo.upsert_parks(parks)
+        matched_existing = len(parks) - imported
 
         result = {
             "discovered": len(parks),
-            "imported": imported,
+            "new_inserted": imported,
+            "matched_existing": matched_existing,
             "with_email": sum(1 for p in parks if p.email),
             "with_phone": sum(1 for p in parks if p.phone),
             "with_address": sum(1 for p in parks if p.address),
@@ -3695,7 +3697,8 @@ class Service(IService):
 
         logger.info(
             f"BIG4 scrape complete: {result['discovered']} discovered, "
-            f"{result['imported']} imported, "
+            f"{result['new_inserted']} new, "
+            f"{result['matched_existing']} matched existing (enriched), "
             f"{result['with_email']} with email, "
             f"{result['with_phone']} with phone"
         )
