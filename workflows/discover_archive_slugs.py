@@ -65,6 +65,21 @@ async def main():
         action="store_true",
         help="Skip deduplication against database (not recommended)",
     )
+    parser.add_argument(
+        "--no-arquivo",
+        action="store_true",
+        help="Disable Arquivo.pt CDX queries",
+    )
+    parser.add_argument(
+        "--no-alienvault",
+        action="store_true",
+        help="Disable AlienVault OTX queries",
+    )
+    parser.add_argument(
+        "--no-mews-sitemap",
+        action="store_true",
+        help="Disable Mews sitemap hotel website scraping",
+    )
     args = parser.parse_args()
 
     service = Service()
@@ -76,6 +91,9 @@ async def main():
         max_results=args.limit,
         cc_index_count=args.cc_indexes,
         dedupe_from_db=not args.skip_db_dedupe,
+        enable_arquivo=not args.no_arquivo,
+        enable_alienvault=not args.no_alienvault,
+        enable_mews_sitemap=not args.no_mews_sitemap,
     )
 
     print(f"\n{'=' * 50}")

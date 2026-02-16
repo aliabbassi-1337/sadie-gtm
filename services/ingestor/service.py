@@ -50,11 +50,14 @@ S3_REGION = "eu-north-1"
 
 class DiscoveryResult(BaseModel):
     """Result of archive slug discovery."""
-    
+
     engine: str
     total_slugs: int
     wayback_count: int
     commoncrawl_count: int
+    arquivo_count: int = 0
+    alienvault_count: int = 0
+    mews_sitemap_count: int = 0
     s3_key: Optional[str] = None
 
 
@@ -249,12 +252,16 @@ class Service(IService):
         cc_index_count: int = 12,
         dedupe_from_db: bool = True,
         db_connection=None,
+        enable_arquivo: bool = True,
+        enable_alienvault: bool = True,
+        enable_mews_sitemap: bool = True,
     ) -> List[DiscoveryResult]:
         """
         Discover booking engine slugs from web archives.
 
-        Queries Wayback Machine and Common Crawl for historical booking URLs,
-        then deduplicates against existing slugs in the database.
+        Queries Wayback Machine, Common Crawl, Arquivo.pt, AlienVault OTX,
+        and Mews sitemap for historical booking URLs, then deduplicates
+        against existing slugs in the database.
 
         Args:
             engine: Specific engine to query (rms, cloudbeds, etc.), or None for all
@@ -265,6 +272,9 @@ class Service(IService):
             cc_index_count: Number of historical Common Crawl indexes to query
             dedupe_from_db: Whether to deduplicate against database
             db_connection: Optional database connection (for testing)
+            enable_arquivo: Enable Arquivo.pt CDX queries
+            enable_alienvault: Enable AlienVault OTX queries
+            enable_mews_sitemap: Enable Mews sitemap hotel website scraping
 
         Returns:
             List of DiscoveryResult for each engine
@@ -280,6 +290,9 @@ class Service(IService):
             timeout=timeout,
             max_results_per_query=max_results,
             cc_index_count=cc_index_count,
+            enable_arquivo=enable_arquivo,
+            enable_alienvault=enable_alienvault,
+            enable_mews_sitemap=enable_mews_sitemap,
         )
 
         if engine and engine != "all":
@@ -296,8 +309,18 @@ class Service(IService):
         for eng, slugs in results.items():
             wayback_count = sum(1 for s in slugs if s.archive_source == "wayback")
             cc_count = sum(1 for s in slugs if s.archive_source == "commoncrawl")
+            arquivo_count = sum(1 for s in slugs if s.archive_source == "arquivo")
+            alienvault_count = sum(1 for s in slugs if s.archive_source == "alienvault")
+            mews_sitemap_count = sum(1 for s in slugs if s.archive_source == "mews_sitemap")
 
-            logger.info(f"{eng.upper()}: {len(slugs)} NEW slugs (wayback: {wayback_count}, cc: {cc_count})")
+            sources = [f"wayback: {wayback_count}", f"cc: {cc_count}"]
+            if arquivo_count:
+                sources.append(f"arquivo: {arquivo_count}")
+            if alienvault_count:
+                sources.append(f"alienvault: {alienvault_count}")
+            if mews_sitemap_count:
+                sources.append(f"mews_sitemap: {mews_sitemap_count}")
+            logger.info(f"{eng.upper()}: {len(slugs)} NEW slugs ({', '.join(sources)})")
 
             # Prepare output data
             slug_dicts = [
@@ -322,6 +345,9 @@ class Service(IService):
                     total_slugs=len(slugs),
                     wayback_count=wayback_count,
                     commoncrawl_count=cc_count,
+                    arquivo_count=arquivo_count,
+                    alienvault_count=alienvault_count,
+                    mews_sitemap_count=mews_sitemap_count,
                     s3_key=s3_key,
                 )
             )

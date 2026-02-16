@@ -8,6 +8,7 @@ on:
 env:
   AWS_REGION: eu-north-1
   ECR_REPOSITORY: sadie-gtm-consumer
+  ECR_REPOSITORY_DEEPLINK: sadie-gtm-deeplink
   ECS_CLUSTER: sadie-gtm-cluster
 
 jobs:
@@ -28,8 +29,8 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image to Amazon ECR
-        id: build-image
+      - name: Build, tag, and push consumer image to ECR
+        id: build-consumer
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
@@ -37,12 +38,21 @@ jobs:
           docker build -f Dockerfile.consumer -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Build, tag, and push deeplink image to ECR
+        id: build-deeplink
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -f Dockerfile.deeplink -t $ECR_REGISTRY/$ECR_REPOSITORY_DEEPLINK:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_DEEPLINK:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_DEEPLINK:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_DEEPLINK:latest
 
       - name: Force new deployment of ECS services
         run: |
           # Update all services to pull the new image
-          for service in sadie-gtm-rms-enrichment sadie-gtm-cloudbeds-consumer sadie-gtm-siteminder-consumer sadie-gtm-mews-consumer; do
+          for service in sadie-gtm-rms-enrichment sadie-gtm-cloudbeds-consumer sadie-gtm-siteminder-consumer sadie-gtm-mews-consumer sadie-gtm-deeplink; do
             aws ecs update-service --cluster $ECS_CLUSTER --service $service --force-new-deployment || true
           done
           echo "Deployment triggered - new tasks will use updated image"

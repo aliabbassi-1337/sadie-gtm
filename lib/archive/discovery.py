@@ -1,9 +1,10 @@
-"""Archive slug discovery from Wayback Machine and Common Crawl."""
+"""Archive slug discovery from Wayback Machine, Common Crawl, and OSINT sources."""
 
 import asyncio
 import json
 import re
 import logging
+import ssl
 from typing import Optional, Set
 
 import httpx
@@ -36,7 +37,7 @@ class DiscoveredSlug(BaseModel):
     engine: str
     slug: str
     source_url: str
-    archive_source: str  # "wayback" or "commoncrawl"
+    archive_source: str  # "wayback", "commoncrawl", "arquivo", "alienvault", "mews_sitemap"
     timestamp: Optional[str] = None
 
 
@@ -169,13 +170,16 @@ BOOKING_ENGINE_PATTERNS = [
 
 
 class ArchiveSlugDiscovery(BaseModel):
-    """Discover booking engine slugs from web archives."""
+    """Discover booking engine slugs from web archives and OSINT sources."""
 
     timeout: float = 60.0
     max_results_per_query: int = 50000
     discovered_slugs: dict = Field(default_factory=dict)
     cc_index_count: int = DEFAULT_CC_INDEX_COUNT
     existing_slugs: dict = Field(default_factory=dict)  # engine -> set of existing slugs
+    enable_arquivo: bool = True
+    enable_alienvault: bool = True
+    enable_mews_sitemap: bool = True
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -206,6 +210,24 @@ class ArchiveSlugDiscovery(BaseModel):
             cc_slugs = await self.query_commoncrawl_historical(pattern)
             engine_slugs.extend(cc_slugs)
             logger.info(f"  Common Crawl ({self.cc_index_count} indexes): {len(cc_slugs)} slugs")
+
+            # Query Arquivo.pt (Portuguese Web Archive)
+            if self.enable_arquivo:
+                arquivo_slugs = await self.query_arquivo(pattern)
+                engine_slugs.extend(arquivo_slugs)
+                logger.info(f"  Arquivo.pt: {len(arquivo_slugs)} slugs")
+
+            # Query AlienVault OTX
+            if self.enable_alienvault:
+                otx_slugs = await self.query_alienvault(pattern)
+                engine_slugs.extend(otx_slugs)
+                logger.info(f"  AlienVault OTX: {len(otx_slugs)} slugs")
+
+            # Mews sitemap hotel website scraping (Mews-only)
+            if self.enable_mews_sitemap and pattern.name == "mews":
+                sitemap_slugs = await self.query_mews_sitemap()
+                engine_slugs.extend(sitemap_slugs)
+                logger.info(f"  Mews sitemap: {len(sitemap_slugs)} slugs")
 
             # Dedupe by slug (case-insensitive)
             unique_slugs = self._dedupe_slugs(engine_slugs)
@@ -417,6 +439,218 @@ class ArchiveSlugDiscovery(BaseModel):
             return indexes[0].get("cdx-api")
         return None
 
+    async def query_arquivo(
+        self, pattern: BookingEnginePattern
+    ) -> list[DiscoveredSlug]:
+        """Query Arquivo.pt CDX API for URLs matching pattern."""
+        slugs = []
+        cdx_url = "https://arquivo.pt/wayback/cdx"
+        params = {
+            "url": pattern.wayback_url_pattern,
+            "output": "json",
+            "limit": 100000,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(cdx_url, params=params)
+                response.raise_for_status()
+                data = response.json()
+
+                if isinstance(data, list):
+                    for record in data:
+                        url = record.get("url", "") if isinstance(record, dict) else ""
+                        timestamp = record.get("timestamp") if isinstance(record, dict) else None
+                        slug = self._extract_slug(url, pattern.slug_regex)
+                        if slug:
+                            slugs.append(
+                                DiscoveredSlug(
+                                    engine=pattern.name,
+                                    slug=slug,
+                                    source_url=url,
+                                    archive_source="arquivo",
+                                    timestamp=str(timestamp) if timestamp else None,
+                                )
+                            )
+        except httpx.HTTPError as e:
+            logger.warning(f"Arquivo.pt query failed for {pattern.name}: {e}")
+        except Exception as e:
+            logger.error(f"Arquivo.pt error for {pattern.name}: {e}")
+
+        return slugs
+
+    async def query_alienvault(
+        self, pattern: BookingEnginePattern
+    ) -> list[DiscoveredSlug]:
+        """Query AlienVault OTX URL list for URLs matching pattern."""
+        # Map engine patterns to OTX hostnames
+        HOSTNAME_MAP = {
+            "mews": "app.mews.com",
+            "cloudbeds": "hotels.cloudbeds.com",
+            "rms": "bookings.rmscloud.com",
+            "rms_rates": "bookings.rmscloud.com",
+            "rms_ibe": "ibe.rmscloud.com",
+            "siteminder": "www.siteminder.com",
+            "bookonlinenow": "www.book-onlinenow.net",
+            "webrez": "secure.webrez.com",
+            "ipms247": "live.ipms247.com",
+        }
+
+        hostname = HOSTNAME_MAP.get(pattern.name)
+        if not hostname:
+            return []
+
+        slugs = []
+        page = 1
+        max_pages = 20  # Safety limit
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                while page <= max_pages:
+                    url = f"https://otx.alienvault.com/api/v1/indicators/hostname/{hostname}/url_list"
+                    params = {"limit": 500, "page": page}
+
+                    response = await client.get(url, params=params)
+                    if response.status_code != 200:
+                        break
+
+                    data = response.json()
+                    url_list = data.get("url_list", [])
+                    if not url_list:
+                        break
+
+                    for item in url_list:
+                        item_url = item.get("url", "")
+                        slug = self._extract_slug(item_url, pattern.slug_regex)
+                        if slug:
+                            slugs.append(
+                                DiscoveredSlug(
+                                    engine=pattern.name,
+                                    slug=slug,
+                                    source_url=item_url,
+                                    archive_source="alienvault",
+                                )
+                            )
+
+                    if not data.get("has_next", False):
+                        break
+                    page += 1
+                    await asyncio.sleep(0.5)
+
+        except httpx.HTTPError as e:
+            logger.warning(f"AlienVault OTX query failed for {pattern.name}: {e}")
+        except Exception as e:
+            logger.error(f"AlienVault OTX error for {pattern.name}: {e}")
+
+        return slugs
+
+    async def query_mews_sitemap(self) -> list[DiscoveredSlug]:
+        """
+        Discover Mews UUIDs by scraping hotel websites found in the Mews customer sitemap.
+
+        Steps:
+        1. Fetch Mews sitemap.xml, extract customer case study URLs
+        2. Scrape each case study page for hotel website domains
+        3. Fetch hotel homepages and extract Mews widget configurationId UUIDs
+        """
+        slugs = []
+        uuid_pat = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
+        )
+        mews_markers = ["mews", "distributor", "configurationid", "configurationids",
+                        "booking-engine.services.mews"]
+        skip_domains = {
+            "mews.com", "hubspot", "google", "facebook", "twitter", "linkedin",
+            "youtube", "instagram", "cookielaw", "abtasty", "hubspotusercontent",
+            "hsforms", "gstatic", "schema.org", "w3.org", "unpkg.com",
+            "integrityline", "hotjar.com", "amazonaws.com", "cloudflare",
+            "jsdelivr", "bootstrapcdn", "jquery", "fontawesome", "recaptcha",
+            "googletagmanager", "doubleclick", "hoteltechreport.com", "wistia.com",
+        }
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0, verify=False, follow_redirects=True
+            ) as client:
+                # Step 1: Get customer slugs from sitemap
+                resp = await client.get("https://www.mews.com/sitemap.xml")
+                resp.raise_for_status()
+                customer_slugs = set(
+                    re.findall(r"/customers/([^/<]+)", resp.text)
+                )
+                logger.info(f"  Mews sitemap: {len(customer_slugs)} customer pages")
+
+                # Step 2: Scrape customer pages for hotel domains
+                hotel_domains = set()
+                for i, slug in enumerate(sorted(customer_slugs)):
+                    try:
+                        page_resp = await client.get(
+                            f"https://www.mews.com/en/customers/{slug}"
+                        )
+                        if page_resp.status_code != 200:
+                            continue
+
+                        html = page_resp.text
+                        hrefs = re.findall(
+                            r'href="(https?://(?:www\.)?[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-z]{2,6}[^"]*)"',
+                            html,
+                        )
+                        for href in hrefs:
+                            dm = re.search(
+                                r"https?://(?:www\.)?([a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-z]{2,6})",
+                                href,
+                            )
+                            if dm:
+                                d = dm.group(1).lower()
+                                if not any(s in d for s in skip_domains):
+                                    hotel_domains.add(d)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.3)
+
+                logger.info(f"  Mews sitemap: {len(hotel_domains)} hotel domains found")
+
+                # Step 3: Scrape hotel homepages for Mews UUIDs
+                for domain in sorted(hotel_domains):
+                    url = f"https://www.{domain}" if not domain.startswith("en.") else f"https://{domain}"
+                    try:
+                        page_resp = await client.get(url)
+                        if page_resp.status_code != 200:
+                            continue
+
+                        html = page_resp.text
+                        html_lower = html.lower()
+                        if not any(m in html_lower for m in mews_markers):
+                            continue
+
+                        uuids = uuid_pat.findall(html)
+                        for uid in uuids:
+                            uid_lower = uid.lower()
+                            idx = html_lower.find(uid_lower)
+                            if idx >= 0:
+                                context = html_lower[max(0, idx - 200) : idx + 200]
+                                if any(m in context for m in mews_markers):
+                                    slugs.append(
+                                        DiscoveredSlug(
+                                            engine="mews",
+                                            slug=uid_lower,
+                                            source_url=url,
+                                            archive_source="mews_sitemap",
+                                        )
+                                    )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.2)
+
+        except Exception as e:
+            logger.error(f"Mews sitemap scraping error: {e}")
+
+        return slugs
+
     def _extract_slug(self, url: str, regex: str) -> Optional[str]:
         """Extract slug from URL using regex."""
         try:
@@ -460,6 +694,14 @@ async def discover_slugs_for_engine(
     wayback_slugs = await discovery.query_wayback(pattern)
     cc_slugs = await discovery.query_commoncrawl_historical(pattern)
     all_slugs = wayback_slugs + cc_slugs
+
+    if discovery.enable_arquivo:
+        all_slugs.extend(await discovery.query_arquivo(pattern))
+    if discovery.enable_alienvault:
+        all_slugs.extend(await discovery.query_alienvault(pattern))
+    if discovery.enable_mews_sitemap and pattern.name == "mews":
+        all_slugs.extend(await discovery.query_mews_sitemap())
+
     unique_slugs = discovery._dedupe_slugs(all_slugs)
 
     # Filter out existing slugs
