@@ -50,11 +50,15 @@ S3_REGION = "eu-north-1"
 
 class DiscoveryResult(BaseModel):
     """Result of archive slug discovery."""
-    
+
     engine: str
     total_slugs: int
     wayback_count: int
     commoncrawl_count: int
+    alienvault_count: int = 0
+    urlscan_count: int = 0
+    virustotal_count: int = 0
+    arquivo_count: int = 0
     s3_key: Optional[str] = None
 
 
@@ -249,12 +253,18 @@ class Service(IService):
         cc_index_count: int = 12,
         dedupe_from_db: bool = True,
         db_connection=None,
+        enable_alienvault: bool = True,
+        enable_urlscan: bool = True,
+        enable_virustotal: bool = True,
+        enable_arquivo: bool = True,
+        proxy_url: Optional[str] = None,
     ) -> List[DiscoveryResult]:
         """
         Discover booking engine slugs from web archives.
 
-        Queries Wayback Machine and Common Crawl for historical booking URLs,
-        then deduplicates against existing slugs in the database.
+        Queries Wayback Machine, Common Crawl, AlienVault OTX, URLScan.io,
+        and VirusTotal for historical booking URLs, then deduplicates against
+        existing slugs in the database.
 
         Args:
             engine: Specific engine to query (rms, cloudbeds, etc.), or None for all
@@ -265,6 +275,9 @@ class Service(IService):
             cc_index_count: Number of historical Common Crawl indexes to query
             dedupe_from_db: Whether to deduplicate against database
             db_connection: Optional database connection (for testing)
+            enable_alienvault: Whether to query AlienVault OTX
+            enable_urlscan: Whether to query URLScan.io
+            enable_virustotal: Whether to query VirusTotal
 
         Returns:
             List of DiscoveryResult for each engine
@@ -280,11 +293,24 @@ class Service(IService):
             timeout=timeout,
             max_results_per_query=max_results,
             cc_index_count=cc_index_count,
+            enable_alienvault=enable_alienvault,
+            enable_urlscan=enable_urlscan,
+            enable_virustotal=enable_virustotal,
+            enable_arquivo=enable_arquivo,
+            proxy_url=proxy_url,
         )
 
         if engine and engine != "all":
             engine_existing = {engine: existing_slugs.get(engine, set())}
-            slugs = await discover_slugs_for_engine(engine, engine_existing.get(engine))
+            slugs = await discover_slugs_for_engine(
+                engine,
+                engine_existing.get(engine),
+                enable_alienvault=enable_alienvault,
+                enable_urlscan=enable_urlscan,
+                enable_virustotal=enable_virustotal,
+                enable_arquivo=enable_arquivo,
+                proxy_url=proxy_url,
+            )
             results = {engine: slugs}
         else:
             results = await discovery.discover_all(existing_slugs=existing_slugs)
@@ -296,8 +322,17 @@ class Service(IService):
         for eng, slugs in results.items():
             wayback_count = sum(1 for s in slugs if s.archive_source == "wayback")
             cc_count = sum(1 for s in slugs if s.archive_source == "commoncrawl")
+            av_count = sum(1 for s in slugs if s.archive_source == "alienvault")
+            us_count = sum(1 for s in slugs if s.archive_source == "urlscan")
+            vt_count = sum(1 for s in slugs if s.archive_source == "virustotal")
+            arq_count = sum(1 for s in slugs if s.archive_source == "arquivo")
 
-            logger.info(f"{eng.upper()}: {len(slugs)} NEW slugs (wayback: {wayback_count}, cc: {cc_count})")
+            logger.info(
+                f"{eng.upper()}: {len(slugs)} NEW slugs "
+                f"(wayback: {wayback_count}, cc: {cc_count}, "
+                f"alienvault: {av_count}, urlscan: {us_count}, "
+                f"virustotal: {vt_count}, arquivo: {arq_count})"
+            )
 
             # Prepare output data
             slug_dicts = [
@@ -322,6 +357,10 @@ class Service(IService):
                     total_slugs=len(slugs),
                     wayback_count=wayback_count,
                     commoncrawl_count=cc_count,
+                    alienvault_count=av_count,
+                    urlscan_count=us_count,
+                    virustotal_count=vt_count,
+                    arquivo_count=arq_count,
                     s3_key=s3_key,
                 )
             )
@@ -352,6 +391,9 @@ class Service(IService):
             "cloudbeds": 3,
             "mews": 4,
             "siteminder": 14,
+            "siteminder_directbook": 14,  # Same as siteminder
+            "siteminder_bookingbutton": 14,  # Same as siteminder
+            "siteminder_directonline": 14,  # Same as siteminder
             "ipms247": 22,  # JEHS / iPMS / Yanolja Cloud Solution
         }
 
@@ -410,7 +452,7 @@ class Service(IService):
 
         url = url.lower()
 
-        if engine in ("rms", "rms_ibe"):
+        if engine in ("rms", "rms_rates", "rms_ibe"):
             # RMS formats: /search/index/SLUG, /rates/index/SLUG, ibe*.rmscloud.com/SLUG
             if "/search/index/" in url:
                 return url.split("/search/index/")[-1].split("/")[0].split("?")[0]
@@ -426,7 +468,7 @@ class Service(IService):
             # Mews: /distributor/UUID
             if "/distributor/" in url:
                 return url.split("/distributor/")[-1].split("/")[0].split("?")[0]
-        elif engine == "siteminder":
+        elif engine in ("siteminder", "siteminder_directbook", "siteminder_bookingbutton", "siteminder_directonline"):
             # SiteMinder: /reservations/SLUG or /properties/SLUG
             if "/reservations/" in url:
                 return url.split("/reservations/")[-1].split("/")[0].split("?")[0]
