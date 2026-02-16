@@ -177,3 +177,33 @@ WHERE hotel_id = ANY($1::integer[]);
 UPDATE sadie_gtm.hotel_booking_engines
 SET last_enrichment_attempt = NOW()
 WHERE hotel_id = ANY($1::integer[]);
+
+-- BATCH_ENRICH_BIG4_EXISTING
+-- Params: ($1::int[] hotel_ids, $2::text[] emails, $3::text[] phones, $4::text[] websites,
+--          $5::text[] addresses, $6::text[] cities, $7::float[] latitudes, $8::float[] longitudes)
+-- Fill-empty-only: only writes to NULL/empty fields, never overwrites existing data.
+UPDATE sadie_gtm.hotels h
+SET
+    email = CASE WHEN (h.email IS NULL OR h.email = '') AND v.email IS NOT NULL AND v.email != ''
+                 THEN v.email ELSE h.email END,
+    phone_website = CASE WHEN (h.phone_website IS NULL OR h.phone_website = '') AND v.phone IS NOT NULL AND v.phone != ''
+                        THEN v.phone ELSE h.phone_website END,
+    website = CASE WHEN (h.website IS NULL OR h.website = '') AND v.website IS NOT NULL AND v.website != ''
+                   THEN v.website ELSE h.website END,
+    address = CASE WHEN (h.address IS NULL OR h.address = '') AND v.address IS NOT NULL AND v.address != ''
+                   THEN v.address ELSE h.address END,
+    city = CASE WHEN (h.city IS NULL OR h.city = '') AND v.city IS NOT NULL AND v.city != ''
+                THEN v.city ELSE h.city END,
+    location = CASE
+        WHEN h.location IS NULL AND v.latitude IS NOT NULL AND v.longitude IS NOT NULL
+        THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
+        ELSE h.location
+    END,
+    updated_at = NOW()
+FROM (
+    SELECT * FROM unnest(
+        $1::int[], $2::text[], $3::text[], $4::text[],
+        $5::text[], $6::text[], $7::float[], $8::float[]
+    ) AS t(hotel_id, email, phone, website, address, city, latitude, longitude)
+) v
+WHERE h.id = v.hotel_id;
