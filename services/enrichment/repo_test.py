@@ -246,3 +246,94 @@ async def test_get_pending_proximity_count():
     # Cleanup
     await delete_room_count(hotel_id)
     await delete_hotel(hotel_id)  # CASCADE deletes hotel_booking_engines
+
+
+# ============================================================================
+# BIG4 TESTS
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_big4_count():
+    """Test counting BIG4 parks returns an integer."""
+    from services.enrichment.repo import get_big4_count
+    count = await get_big4_count()
+    assert isinstance(count, int)
+    assert count >= 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_big4_parks_empty():
+    """Test upserting empty arrays is a no-op."""
+    from services.enrichment.repo import upsert_big4_parks
+    await upsert_big4_parks(
+        names=[], slugs=[], phones=[], emails=[], websites=[],
+        addresses=[], cities=[], states=[], postcodes=[], lats=[], lons=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_big4_parks_single():
+    """Test upserting a single BIG4 park."""
+    from services.enrichment.repo import upsert_big4_parks, get_big4_count
+    from db.client import get_conn
+
+    count_before = await get_big4_count()
+
+    await upsert_big4_parks(
+        names=["Test BIG4 Park"],
+        slugs=["test-big4-park-unit-test"],
+        phones=["02 0000 0000"],
+        emails=["test@example.com"],
+        websites=["https://www.big4.com.au/test"],
+        addresses=["1 Test St"],
+        cities=["Testville"],
+        states=["NSW"],
+        postcodes=["2000"],
+        lats=[-33.87],
+        lons=[151.21],
+    )
+
+    count_after = await get_big4_count()
+    assert count_after >= count_before
+
+    # Cleanup
+    async with get_conn() as conn:
+        await conn.execute(
+            "DELETE FROM sadie_gtm.hotels WHERE external_id = 'big4_test-big4-park-unit-test'"
+        )
+
+
+@pytest.mark.asyncio
+async def test_upsert_big4_parks_idempotent():
+    """Test upserting the same park twice does not duplicate."""
+    from services.enrichment.repo import upsert_big4_parks, get_big4_count
+    from db.client import get_conn
+
+    args = dict(
+        names=["Idempotent BIG4 Park"],
+        slugs=["idempotent-big4-unit-test"],
+        phones=[None],
+        emails=[None],
+        websites=["https://www.big4.com.au/idempotent"],
+        addresses=["2 Test St"],
+        cities=["Testville"],
+        states=["NSW"],
+        postcodes=["2000"],
+        lats=[-33.87],
+        lons=[151.21],
+    )
+
+    await upsert_big4_parks(**args)
+    count_first = await get_big4_count()
+
+    await upsert_big4_parks(**args)
+    count_second = await get_big4_count()
+
+    assert count_second == count_first
+
+    # Cleanup
+    async with get_conn() as conn:
+        await conn.execute(
+            "DELETE FROM sadie_gtm.hotels WHERE external_id = 'big4_idempotent-big4-unit-test'"
+        )

@@ -1608,3 +1608,36 @@ async def get_rms_verification_samples(sample_size: int = 10) -> List[Dict[str, 
         d["has_availability"] = False
         samples.append(d)
     return samples
+
+
+async def upsert_big4_parks(
+    names: List[str], slugs: List[str], phones: List[str],
+    emails: List[str], websites: List[str], addresses: List[str],
+    cities: List[str], states: List[str], postcodes: List[str],
+    lats: List[float], lons: List[float],
+) -> None:
+    """Upsert BIG4 parks with cross-source dedup (all logic in SQL)."""
+    async with get_conn() as conn:
+        await conn.execute(
+            batch_sql.BATCH_BIG4_UPSERT,
+            names, slugs, phones, emails, websites,
+            addresses, cities, states, postcodes, lats, lons,
+        )
+
+
+async def update_big4_websites(
+    hotel_ids: List[int], websites: List[str],
+) -> None:
+    """Batch update websites for BIG4 parks."""
+    async with get_conn() as conn:
+        await conn.execute(
+            batch_sql.BATCH_BIG4_UPDATE_WEBSITES,
+            hotel_ids, websites,
+        )
+
+
+async def get_big4_count() -> int:
+    """Count BIG4 parks in the database."""
+    async with get_conn() as conn:
+        result = await queries.get_big4_count(conn)
+        return result["count"] if result else 0
