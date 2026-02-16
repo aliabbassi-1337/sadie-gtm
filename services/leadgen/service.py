@@ -164,12 +164,12 @@ class IService(ABC):
         limit: int = 1000,
         batch_size: int = 20,
         categories: Optional[List[str]] = None,
+        source: Optional[str] = None,
     ) -> int:
         """
         Enqueue hotels for detection via SQS.
-        Queries hotels with status=0 and no hotel_booking_engines record.
-        Detection tracked by hotel_booking_engines presence, not status.
-        Optionally filter by categories (e.g., ['hotel', 'motel']).
+        Queries hotels pending detection (no hotel_booking_engines record).
+        Optionally filter by categories or source (e.g., 'big4').
         Returns count of hotels enqueued.
         """
         pass
@@ -689,20 +689,22 @@ class Service(IService):
         limit: int = 1000,
         batch_size: int = 20,
         categories: Optional[List[str]] = None,
+        source: Optional[str] = None,
     ) -> int:
         """Enqueue hotels for detection via SQS.
 
-        Queries hotels with status=0 and no hotel_booking_engines record.
+        Queries hotels pending detection (no hotel_booking_engines record).
         Sends to SQS in batches. Does NOT update status - detection is tracked
         by presence of hotel_booking_engines record.
-        Optionally filter by categories (e.g., ['hotel', 'motel']).
+        Optionally filter by categories or source (e.g., 'big4').
 
         Returns count of hotels enqueued.
         """
         from infra.sqs import send_messages_batch, get_queue_url
 
-        # Get hotels pending detection (status=0, no booking engine record)
-        hotels = await repo.get_hotels_pending_detection(limit=limit, categories=categories)
+        hotels = await repo.get_hotels_pending_detection(
+            limit=limit, categories=categories, source=source,
+        )
         if not hotels:
             return 0
 

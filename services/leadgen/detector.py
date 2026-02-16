@@ -189,7 +189,7 @@ SKIP_NON_HOTEL_NAMES = [
     "chipotle", "taco bell", "kfc", "wendy's", "dunkin", "chick-fil-a",
     "papa john's", "sonic drive", "arby's", "popeyes", "five guys",
     "olive garden", "applebee", "chili's", "ihop", "denny's", "waffle house",
-    "cracker barrel", "outback", "longhorn", "red lobster", "texas roadhouse",
+    "cracker barrel", "outback steak", "longhorn", "red lobster", "texas roadhouse",
     "buffalo wild wings", "hooters", "carrabba", "bonefish", "cheesecake factory",
     "pf chang", "benihana", "shake shack", "in-n-out", "whataburger",
     "jack in the box", "hardee", "carl's jr", "krispy kreme", "baskin",

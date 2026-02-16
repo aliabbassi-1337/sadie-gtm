@@ -762,7 +762,7 @@ resource "aws_ecs_task_definition" "detection_consumer" {
     name  = "consumer"
     image = "${var.ecr_repo_url}:latest"
     
-    command = ["uv", "run", "python", "-m", "workflows.detection_consumer", "--preset", "small"]
+    command = ["uv", "run", "python", "-m", "workflows.detection_consumer", "--pool-size", "10", "--idle-timeout", "120"]
     
     environment = [
       { name = "AWS_REGION", value = "eu-north-1" },

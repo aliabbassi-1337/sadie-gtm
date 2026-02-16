@@ -70,6 +70,7 @@ async def delete_hotel(hotel_id: int) -> None:
 async def get_hotels_pending_detection(
     limit: int = 100,
     categories: Optional[List[str]] = None,
+    source: Optional[str] = None,
 ) -> List[Hotel]:
     """Get hotels that need booking engine detection.
 
@@ -78,9 +79,28 @@ async def get_hotels_pending_detection(
     - website is not null
     - no hotel_booking_engines record yet (excludes reverse lookup leads)
     - optionally filtered by categories (e.g., ['hotel', 'motel'])
+    - optionally filtered by source (e.g., 'big4')
     """
     async with get_conn() as conn:
-        if categories:
+        if source:
+            # Source-specific filter (e.g. big4 parks)
+            results = await conn.fetch("""
+                SELECT h.id, h.name, h.external_id, h.external_id_type,
+                       h.website, h.phone_google, h.phone_website, h.email,
+                       h.city, h.state, h.country, h.address,
+                       ST_Y(h.location::geometry) AS latitude,
+                       ST_X(h.location::geometry) AS longitude,
+                       h.rating, h.review_count, h.status, h.source,
+                       h.created_at, h.updated_at
+                FROM sadie_gtm.hotels h
+                LEFT JOIN sadie_gtm.hotel_booking_engines hbe ON h.id = hbe.hotel_id
+                WHERE h.status >= 0 AND h.status < 30
+                  AND hbe.hotel_id IS NULL
+                  AND h.website IS NOT NULL AND h.website != ''
+                  AND (h.external_id_type = $1 OR h.source LIKE '%::' || $1)
+                LIMIT $2
+            """, source, limit)
+        elif categories:
             results = await queries.get_hotels_pending_detection_by_categories(
                 conn, limit=limit, categories=categories
             )
