@@ -677,5 +677,115 @@ class TestSanitizeEnrichmentData:
         assert updates[0]['name'] == 'Hotel'
 
 
+# ============================================================================
+# BIG4 SCRAPE TESTS
+# ============================================================================
+
+
+@pytest.mark.no_db
+class TestScrapeBig4ParksNoParks:
+    """Tests for scrape_big4_parks when scraper returns empty."""
+
+    @pytest.fixture
+    def service(self):
+        return Service(rms_repo=None, rms_queue=MockQueue())
+
+    @pytest.mark.asyncio
+    async def test_returns_zeros_when_no_parks(self, service):
+        """Should return zero counts when no parks discovered."""
+        from unittest.mock import patch, AsyncMock
+
+        mock_scraper = AsyncMock()
+        mock_scraper.scrape_all = AsyncMock(return_value=[])
+        mock_scraper.__aenter__ = AsyncMock(return_value=mock_scraper)
+        mock_scraper.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("lib.big4.Big4Scraper", return_value=mock_scraper):
+            result = await service.scrape_big4_parks()
+
+        assert result["discovered"] == 0
+        assert result["total_big4"] == 0
+        assert result["with_email"] == 0
+        assert result["with_phone"] == 0
+        assert result["with_address"] == 0
+
+
+@pytest.mark.no_db
+class TestScrapeBig4ParksWithMocks:
+    """Tests for scrape_big4_parks with mocked scraper and repo."""
+
+    @pytest.mark.asyncio
+    async def test_returns_correct_counts(self):
+        """Should return correct discovered and contact counts."""
+        from unittest.mock import patch, AsyncMock
+        from lib.big4.models import Big4Park
+
+        parks = [
+            Big4Park(name="Park A", slug="a", url_path="/a", email="a@test.com", phone="123", address="1 St"),
+            Big4Park(name="Park B", slug="b", url_path="/b", email="b@test.com"),
+            Big4Park(name="Park C", slug="c", url_path="/c", phone="456"),
+        ]
+
+        mock_scraper = AsyncMock()
+        mock_scraper.scrape_all = AsyncMock(return_value=parks)
+        mock_scraper.__aenter__ = AsyncMock(return_value=mock_scraper)
+        mock_scraper.__aexit__ = AsyncMock(return_value=False)
+
+        service = Service(rms_repo=None, rms_queue=MockQueue())
+
+        with patch("lib.big4.Big4Scraper", return_value=mock_scraper):
+            with patch("services.enrichment.repo.upsert_big4_parks", new_callable=AsyncMock) as mock_upsert:
+                with patch("services.enrichment.repo.get_big4_count", new_callable=AsyncMock, return_value=3) as mock_count:
+                    result = await service.scrape_big4_parks()
+
+        assert result["discovered"] == 3
+        assert result["total_big4"] == 3
+        assert result["with_email"] == 2
+        assert result["with_phone"] == 2
+        assert result["with_address"] == 1
+        mock_upsert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_passes_correct_arrays_to_repo(self):
+        """Should pass correctly structured arrays to upsert_big4_parks."""
+        from unittest.mock import patch, AsyncMock
+        from lib.big4.models import Big4Park
+
+        parks = [
+            Big4Park(
+                name="BIG4 Test Park", slug="test-park", url_path="/caravan-parks/nsw/test/test-park",
+                state="NSW", phone="02 1111 2222", email="test@park.com",
+                address="10 Park Rd", city="Parkville", postcode="2000",
+                latitude=-33.5, longitude=151.0,
+            ),
+        ]
+
+        mock_scraper = AsyncMock()
+        mock_scraper.scrape_all = AsyncMock(return_value=parks)
+        mock_scraper.__aenter__ = AsyncMock(return_value=mock_scraper)
+        mock_scraper.__aexit__ = AsyncMock(return_value=False)
+
+        service = Service(rms_repo=None, rms_queue=MockQueue())
+
+        with patch("lib.big4.Big4Scraper", return_value=mock_scraper):
+            with patch("services.enrichment.repo.upsert_big4_parks", new_callable=AsyncMock) as mock_upsert:
+                with patch("services.enrichment.repo.get_big4_count", new_callable=AsyncMock, return_value=1):
+                    await service.scrape_big4_parks()
+
+        mock_upsert.assert_called_once_with(
+            names=["BIG4 Test Park"],
+            slugs=["test-park"],
+            phones=["02 1111 2222"],
+            emails=["test@park.com"],
+            websites=["https://www.big4.com.au/caravan-parks/nsw/test/test-park"],
+            addresses=["10 Park Rd"],
+            cities=["Parkville"],
+            states=["NSW"],
+            postcodes=["2000"],
+            lats=[-33.5],
+            lons=[151.0],
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

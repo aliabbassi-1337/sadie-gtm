@@ -716,6 +716,33 @@ class IService(ABC):
         """
         pass
 
+    # BIG4 Australia
+    @abstractmethod
+    async def scrape_big4_parks(
+        self,
+        concurrency: int = 10,
+        delay: float = 0.5,
+    ) -> Dict[str, Any]:
+        """Scrape all BIG4 holiday parks from big4.com.au.
+
+        Discovers parks from state listing pages, scrapes each park page
+        for structured data (JSON-LD), and upserts into hotels table.
+
+        Returns dict with discovered/total_big4/with_email/with_phone/with_address counts.
+        """
+        pass
+
+    @abstractmethod
+    async def enrich_big4_websites(
+        self,
+        delay: float = 1.0,
+        limit: int = 0,
+    ) -> Dict[str, Any]:
+        """Enrich BIG4 parks with real websites via DuckDuckGo search.
+
+        Returns dict with total/found/updated counts.
+        """
+        pass
 
 class Service(IService):
     def __init__(self, rms_repo: Optional[RMSRepo] = None, rms_queue = None) -> None:
@@ -3639,3 +3666,89 @@ class Service(IService):
 
         logger.info(f"VERIFY: {matches}/{matches + mismatches} consistent ({mismatches} mismatches)")
         return {"matches": matches, "mismatches": mismatches}
+
+    # =========================================================================
+    # BIG4 Australia
+    # =========================================================================
+
+    async def scrape_big4_parks(
+        self,
+        concurrency: int = 10,
+        delay: float = 0.5,
+    ) -> Dict[str, Any]:
+        """Scrape all BIG4 holiday parks and upsert into hotels table."""
+        from lib.big4 import Big4Scraper
+
+        async with Big4Scraper(concurrency=concurrency, delay=delay) as scraper:
+            parks = await scraper.scrape_all()
+
+        if not parks:
+            return {"discovered": 0, "total_big4": 0, "with_email": 0, "with_phone": 0, "with_address": 0}
+
+        logger.info(f"Deduplicating and importing {len(parks)} parks to DB...")
+
+        await repo.upsert_big4_parks(
+            names=[p.name for p in parks],
+            slugs=[p.slug for p in parks],
+            phones=[p.phone for p in parks],
+            emails=[p.email for p in parks],
+            websites=[p.full_url for p in parks],
+            addresses=[p.address for p in parks],
+            cities=[p.city for p in parks],
+            states=[p.state for p in parks],
+            postcodes=[p.postcode for p in parks],
+            lats=[p.latitude for p in parks],
+            lons=[p.longitude for p in parks],
+        )
+        total_big4 = await repo.get_big4_count()
+
+        result = {
+            "discovered": len(parks),
+            "total_big4": total_big4,
+            "with_email": sum(1 for p in parks if p.email),
+            "with_phone": sum(1 for p in parks if p.phone),
+            "with_address": sum(1 for p in parks if p.address),
+        }
+
+        logger.info(
+            f"BIG4 complete: {result['discovered']} discovered, "
+            f"{result['total_big4']} total in DB, "
+            f"{result['with_email']} with email, "
+            f"{result['with_phone']} with phone"
+        )
+
+        return result
+
+    async def enrich_big4_websites(
+        self,
+        delay: float = 1.0,
+        limit: int = 0,
+    ) -> Dict[str, Any]:
+        """Enrich BIG4 parks with real websites via DuckDuckGo search."""
+        from lib.big4.scraper import lookup_websites
+        from db.client import get_conn
+
+        async with get_conn() as conn:
+            rows = await conn.fetch("""
+                SELECT id, name FROM sadie_gtm.hotels
+                WHERE (external_id_type = 'big4' OR source LIKE '%::big4')
+                ORDER BY name
+            """)
+
+        parks = [dict(r) for r in rows]
+        if limit:
+            parks = parks[:limit]
+
+        logger.info(f"Looking up websites for {len(parks)} BIG4 parks...")
+
+        results = await lookup_websites(parks, delay=delay)
+
+        if results:
+            hotel_ids = [r[0] for r in results]
+            websites = [r[1] for r in results]
+            await repo.update_big4_websites(hotel_ids, websites)
+
+        return {
+            "total": len(parks),
+            "found": len(results),
+        }
