@@ -242,6 +242,10 @@ matched AS (
         location  = CASE WHEN h.location IS NULL AND d.lat IS NOT NULL AND d.lon IS NOT NULL
                          THEN ST_SetSRID(ST_MakePoint(d.lon, d.lat), 4326)::geography
                          ELSE h.location END,
+        category = COALESCE(h.category, 'holiday_park'),
+        source = CASE WHEN h.source IS NULL OR h.source = '' THEN 'big4_scrape'
+                      WHEN h.source NOT LIKE '%::big4' THEN h.source || '::big4'
+                      ELSE h.source END,
         updated_at = NOW()
     FROM deduped_match d
     WHERE h.id = d.existing_id
