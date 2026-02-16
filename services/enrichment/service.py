@@ -733,7 +733,6 @@ class IService(ABC):
         """
         pass
 
-
 class Service(IService):
     def __init__(self, rms_repo: Optional[RMSRepo] = None, rms_queue = None) -> None:
         self._rms_repo = rms_repo or RMSRepo()
