@@ -202,13 +202,44 @@ class Big4Scraper:
         return parks
 
     def _extract_json_ld(self, html: str) -> Optional[Dict]:
-        """Extract JSON-LD structured data from HTML."""
-        pattern = r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
-        matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+        """Extract JSON-LD structured data from HTML.
 
-        for match in matches:
+        Handles both standard <script type="application/ld+json"> tags
+        and Next.js RSC streaming format (self.__next_f.push).
+        """
+        candidates = []
+
+        # Standard JSON-LD script tags
+        pattern = r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
+        candidates.extend(re.findall(pattern, html, re.DOTALL | re.IGNORECASE))
+
+        # Next.js RSC streaming: JSON-LD embedded in self.__next_f.push([1, "..."])
+        for m in re.finditer(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, re.DOTALL):
+            content = m.group(1)
+            if '"@context"' not in content and '@context' not in content:
+                continue
             try:
-                data = json.loads(match.strip())
+                unescaped = content.encode().decode('unicode_escape')
+            except (UnicodeDecodeError, ValueError):
+                continue
+            json_match = re.search(r'(\{"@context".*)', unescaped)
+            if not json_match:
+                continue
+            raw = json_match.group(1)
+            # Find balanced braces to extract complete JSON object
+            depth = 0
+            for i, c in enumerate(raw):
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                if depth == 0:
+                    candidates.append(raw[:i + 1])
+                    break
+
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate.strip())
                 if isinstance(data, list):
                     for item in data:
                         if item.get("@type") in ("LodgingBusiness", "Hotel", "LocalBusiness"):
@@ -284,35 +315,62 @@ class Big4Scraper:
                 except (ValueError, TypeError):
                     pass
 
+    def _decode_rsc_text(self, html: str) -> str:
+        """Decode Next.js RSC streaming chunks into plain text."""
+        parts = []
+        for m in re.finditer(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, re.DOTALL):
+            try:
+                parts.append(m.group(1).encode().decode('unicode_escape'))
+            except (UnicodeDecodeError, ValueError):
+                continue
+        return ''.join(parts)
+
     def _extract_contact_info(self, park: Big4Park, html: str) -> None:
         """Extract contact info from the contact page HTML."""
+        # Decode RSC chunks for searching (site uses Next.js RSC streaming)
+        text = html + self._decode_rsc_text(html)
+
         # Extract email from mailto: links
         if not park.email:
-            email_pattern = r'href=["\']mailto:([^"\'?]+)'
-            email_match = re.search(email_pattern, html, re.IGNORECASE)
+            email_pattern = r'mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+            email_match = re.search(email_pattern, text, re.IGNORECASE)
             if email_match:
                 park.email = email_match.group(1).strip()
 
+        # Fallback: find any email address in text
+        if not park.email:
+            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.(?:com\.au|com|org\.au|net\.au)'
+            email_match = re.search(email_pattern, text)
+            if email_match:
+                park.email = email_match.group(0).strip()
+
         # Extract phone from tel: links (prefer specific park phone over generic 1800)
-        phone_pattern = r'href=["\']tel://?([\d\s+()-]+)'
-        phone_matches = re.findall(phone_pattern, html)
+        phone_pattern = r'tel:/?/?([\d\s+()-]+)'
+        phone_matches = re.findall(phone_pattern, text)
         for phone in phone_matches:
             phone = phone.strip()
-            # Prefer local numbers over the generic BIG4 1800 number
             if phone and not phone.startswith("1800"):
                 park.phone = phone
                 break
 
+        # Fallback: Australian local phone pattern (0X XXXX XXXX) in decoded text
+        if not park.phone or park.phone.startswith("1800"):
+            local_pattern = r'\(0[2-9]\)\s*\d{4}\s*\d{4}'
+            local_matches = re.findall(local_pattern, text)
+            for phone in local_matches:
+                phone = phone.strip()
+                if phone:
+                    park.phone = phone
+                    break
+
         # Try to find manager/contact person names
-        # Common patterns in park contact pages
         manager_patterns = [
             r'(?:park\s*manager|manager|managed\s*by|host|hosts?)[:\s]+([A-Z][a-z]+ (?:& )?[A-Z][a-z]+)',
             r'(?:contact|managed by)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)',
         ]
         for pattern in manager_patterns:
-            match = re.search(pattern, html, re.IGNORECASE)
+            match = re.search(pattern, text, re.IGNORECASE)
             if match:
-                # Store in description if found (no dedicated field)
                 manager_name = match.group(1).strip()
                 if park.description:
                     park.description = f"Manager: {manager_name}. {park.description}"

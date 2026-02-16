@@ -33,6 +33,15 @@ class TestExtractJsonLd:
         result = scraper._extract_json_ld(html)
         assert result["name"] == "Graph Hotel"
 
+    def test_extracts_from_rsc_streaming(self, scraper):
+        """Should extract JSON-LD from Next.js RSC self.__next_f.push format."""
+        ld_json = '{"@context":"http://schema.org","@type":"LodgingBusiness","name":"RSC Park","address":{"streetAddress":"1 Test St"}}'
+        escaped = ld_json.replace('"', '\\"')
+        html = f'<script>self.__next_f.push([1,"{escaped}"])</script>'
+        result = scraper._extract_json_ld(html)
+        assert result is not None
+        assert result["name"] == "RSC Park"
+
     def test_returns_none_for_no_match(self, scraper):
         html = '<script type="application/ld+json">{"@type":"WebSite"}</script>'
         assert scraper._extract_json_ld(html) is None
