@@ -1,25 +1,17 @@
 """Owner enrichment workflow - find hotel decision makers (owners, GMs).
 
 USAGE:
-    # Run full waterfall enrichment
-    uv run python workflows/enrich_owners.py run --limit 20
-
-    # Run specific layer only
-    uv run python workflows/enrich_owners.py run --limit 50 --layer rdap
-    uv run python workflows/enrich_owners.py run --limit 50 --layer whois-history
-    uv run python workflows/enrich_owners.py run --limit 50 --layer dns
-    uv run python workflows/enrich_owners.py run --limit 50 --layer website
-    uv run python workflows/enrich_owners.py run --limit 50 --layer reviews
-    uv run python workflows/enrich_owners.py run --limit 50 --layer email-verify
+    # Direct mode (local testing, no SQS needed)
+    uv run python workflows/enrich_owners.py run --limit 5
+    uv run python workflows/enrich_owners.py run --limit 10 --layer rdap
+    uv run python workflows/enrich_owners.py run --limit 10 --layer website
 
     # Show enrichment status
     uv run python workflows/enrich_owners.py status
 
-    # Preview hotels that would be enriched
-    uv run python workflows/enrich_owners.py preview --limit 10
-
-    # Reset stale claims from crashed workers
-    uv run python workflows/enrich_owners.py reset-claims
+    # For production SQS-based processing, use:
+    #   uv run python workflows/enrich_owners_enqueue.py --limit 500
+    #   uv run python workflows/enrich_owners_consumer.py --concurrency 5
 """
 
 import sys
@@ -55,7 +47,7 @@ async def run_enrichment(
     concurrency: int = 5,
     layer: str = "all",
 ) -> None:
-    """Run owner enrichment waterfall."""
+    """Run owner enrichment (direct mode, no SQS)."""
     await init_db()
     try:
         layer_mask = LAYER_MAP.get(layer, 0xFF)
@@ -63,24 +55,23 @@ async def run_enrichment(
 
         logger.info(f"Owner enrichment: limit={limit}, concurrency={concurrency}, layer={layer}")
 
-        # Claim hotels
-        hotels = await repo.claim_hotels_for_owner_enrichment(
+        hotels = await repo.get_hotels_pending_owner_enrichment(
             limit=limit, layer=layer_filter,
         )
         if not hotels:
             logger.info("No hotels pending owner enrichment")
             return
 
-        logger.info(f"Claimed {len(hotels)} hotels for enrichment")
+        logger.info(f"Processing {len(hotels)} hotels")
+        for h in hotels:
+            logger.info(f"  [{h['hotel_id']}] {h['name']} - {h.get('website', 'N/A')[:60]}")
 
-        # Run waterfall
         results = await enrich_batch(
             hotels=hotels,
             concurrency=concurrency,
             layers=layer_mask,
         )
 
-        # Summary
         found = sum(1 for r in results if r.found_any)
         total_contacts = sum(len(r.decision_makers) for r in results)
         verified = sum(
@@ -115,8 +106,6 @@ async def show_status() -> None:
 
         print("\n=== Owner Enrichment Status ===")
         print(f"  Hotels with website:    {stats.get('total_with_website', 0):,}")
-        print(f"  Pending:                {stats.get('pending', 0):,}")
-        print(f"  Claimed (in progress):  {stats.get('claimed', 0):,}")
         print(f"  Complete:               {stats.get('complete', 0):,}")
         print(f"  No results:             {stats.get('no_results', 0):,}")
         print(f"  ---")
@@ -129,42 +118,11 @@ async def show_status() -> None:
         await close_db()
 
 
-async def preview(limit: int = 10) -> None:
-    """Preview hotels that would be enriched."""
-    await init_db()
-    try:
-        hotels = await repo.get_hotels_pending_owner_enrichment(limit=limit)
-        if not hotels:
-            logger.info("No hotels pending enrichment")
-            return
-
-        print(f"\n=== Next {len(hotels)} Hotels for Owner Enrichment ===")
-        for h in hotels:
-            print(f"  [{h['hotel_id']}] {h['name']}")
-            print(f"    Website: {h.get('website', 'N/A')}")
-            print(f"    Location: {h.get('city', '?')}, {h.get('state', '?')}")
-            print()
-
-    finally:
-        await close_db()
-
-
-async def reset_claims() -> None:
-    """Reset stale claims from crashed workers."""
-    await init_db()
-    try:
-        count = await repo.reset_stale_owner_claims()
-        logger.info(f"Reset {count} stale claims")
-    finally:
-        await close_db()
-
-
 def main():
     parser = argparse.ArgumentParser(description="Hotel owner/GM enrichment pipeline")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
-    # run command
-    run_parser = subparsers.add_parser("run", help="Run owner enrichment waterfall")
+    run_parser = subparsers.add_parser("run", help="Run owner enrichment (direct mode)")
     run_parser.add_argument("--limit", type=int, default=20, help="Max hotels to process")
     run_parser.add_argument("--concurrency", type=int, default=5, help="Max concurrent enrichments")
     run_parser.add_argument(
@@ -172,15 +130,7 @@ def main():
         help="Run specific layer only (default: all)",
     )
 
-    # status command
     subparsers.add_parser("status", help="Show enrichment pipeline status")
-
-    # preview command
-    preview_parser = subparsers.add_parser("preview", help="Preview next hotels to enrich")
-    preview_parser.add_argument("--limit", type=int, default=10, help="Number of hotels to preview")
-
-    # reset-claims command
-    subparsers.add_parser("reset-claims", help="Reset stale claims from crashed workers")
 
     args = parser.parse_args()
 
@@ -192,10 +142,6 @@ def main():
         ))
     elif args.command == "status":
         asyncio.run(show_status())
-    elif args.command == "preview":
-        asyncio.run(preview(limit=args.limit))
-    elif args.command == "reset-claims":
-        asyncio.run(reset_claims())
     else:
         parser.print_help()
 

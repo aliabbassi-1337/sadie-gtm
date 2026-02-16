@@ -102,9 +102,16 @@ def get_soa_email(domain: str) -> Optional[str]:
             if len(parts) == 2:
                 email = f"{parts[0]}@{parts[1]}"
                 # Filter out generic DNS admin emails
-                generic_prefixes = {"hostmaster", "dns-admin", "dnsadmin", "admin", "root", "postmaster"}
-                if parts[0].lower() not in generic_prefixes:
-                    return email
+                generic_prefixes = {"hostmaster", "dns-admin", "dnsadmin", "admin", "root", "postmaster", "dns", "noc"}
+                local = parts[0].lower()
+                email_domain = parts[1].lower()
+                # Skip if local part is generic or contains "hostmaster"/"dns"
+                if local in generic_prefixes or "hostmaster" in local or "dns" in local:
+                    continue
+                # Skip if email domain doesn't match the queried domain (hosting provider email)
+                if email_domain != domain.lower() and not domain.lower().endswith("." + email_domain):
+                    continue
+                return email
     except Exception:
         pass
     return None

@@ -174,7 +174,7 @@ async def enrich_single_hotel(
     seen = set()
     unique = []
     for dm in result.decision_makers:
-        key = (dm.full_name or "", dm.title or "").lower()
+        key = ((dm.full_name or "").lower(), (dm.title or "").lower())
         if key not in seen:
             seen.add(key)
             unique.append(dm)
@@ -201,7 +201,7 @@ async def enrich_batch(
     sem = asyncio.Semaphore(concurrency)
     results = []
 
-    async with httpx.AsyncClient(http2=True, timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         async def process_one(hotel: dict):
             async with sem:
                 return await enrich_single_hotel(client, hotel, layers=layers)

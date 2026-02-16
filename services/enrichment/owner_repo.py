@@ -1,12 +1,24 @@
 """Repository for owner enrichment database operations.
 
-Follows the same patterns as repo.py: atomic claiming, batch updates,
-stale claim recovery, status tracking.
+Result tracking and caching only — work distribution is handled by SQS.
 """
 
+from datetime import datetime
 from typing import Optional
 from db.client import get_conn
 from lib.owner_discovery.models import DecisionMaker, DomainIntel
+
+MAX_QUERY_LIMIT = 5000
+
+
+def _parse_date(val: Optional[str]) -> Optional[datetime]:
+    """Parse ISO date string to datetime for asyncpg."""
+    if not val:
+        return None
+    try:
+        return datetime.fromisoformat(val.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
 
 
 async def get_hotels_pending_owner_enrichment(
@@ -17,15 +29,15 @@ async def get_hotels_pending_owner_enrichment(
 
     Criteria:
     - Has a website (needed for most enrichment layers)
-    - Not already claimed (status != -1)
     - Not already completed (status != 1)
     - Optionally: hasn't completed a specific layer yet
 
     Returns list of dicts with hotel_id, name, website, city, state, country.
     """
+    limit = min(limit, MAX_QUERY_LIMIT)
+
     async with get_conn() as conn:
         if layer:
-            # Filter to hotels that haven't completed this specific layer
             rows = await conn.fetch("""
                 SELECT h.id as hotel_id, h.name, h.website, h.city, h.state, h.country,
                        h.email, h.phone_website, h.phone_google
@@ -33,7 +45,7 @@ async def get_hotels_pending_owner_enrichment(
                 LEFT JOIN hotel_owner_enrichment hoe ON h.id = hoe.hotel_id
                 WHERE h.website IS NOT NULL
                   AND h.website != ''
-                  AND (hoe.hotel_id IS NULL OR (hoe.status != -1 AND hoe.layers_completed & $1 = 0))
+                  AND (hoe.hotel_id IS NULL OR hoe.layers_completed & $1 = 0)
                 ORDER BY h.id
                 LIMIT $2
             """, layer, limit)
@@ -45,57 +57,11 @@ async def get_hotels_pending_owner_enrichment(
                 LEFT JOIN hotel_owner_enrichment hoe ON h.id = hoe.hotel_id
                 WHERE h.website IS NOT NULL
                   AND h.website != ''
-                  AND (hoe.hotel_id IS NULL OR hoe.status NOT IN (-1, 1))
+                  AND (hoe.hotel_id IS NULL OR hoe.status NOT IN (1))
                 ORDER BY h.id
                 LIMIT $1
             """, limit)
         return [dict(r) for r in rows]
-
-
-async def claim_hotels_for_owner_enrichment(
-    limit: int = 100,
-    layer: Optional[int] = None,
-) -> list[dict]:
-    """Atomically claim hotels for owner enrichment (multi-worker safe).
-
-    Inserts status=-1 into hotel_owner_enrichment, or updates existing
-    rows to status=-1. Uses ON CONFLICT to prevent race conditions.
-
-    Returns list of successfully claimed hotels.
-    """
-    hotels = await get_hotels_pending_owner_enrichment(limit=limit, layer=layer)
-    if not hotels:
-        return []
-
-    hotel_ids = [h["hotel_id"] for h in hotels]
-
-    async with get_conn() as conn:
-        # Upsert into tracking table with status=-1 (claimed)
-        await conn.execute("""
-            INSERT INTO hotel_owner_enrichment (hotel_id, status, last_attempt)
-            SELECT unnest($1::integer[]), -1, NOW()
-            ON CONFLICT (hotel_id) DO UPDATE
-            SET status = -1, last_attempt = NOW()
-            WHERE hotel_owner_enrichment.status NOT IN (-1)
-        """, hotel_ids)
-
-    return hotels
-
-
-async def reset_stale_owner_claims(minutes: int = 30) -> int:
-    """Reset claims stuck in processing for too long.
-
-    Returns count of reset claims.
-    """
-    async with get_conn() as conn:
-        result = await conn.execute("""
-            UPDATE hotel_owner_enrichment
-            SET status = 0
-            WHERE status = -1
-              AND last_attempt < NOW() - INTERVAL '%s minutes'
-        """ % minutes)  # Safe: minutes is always an int from our code
-        count = int(result.split()[-1]) if result else 0
-        return count
 
 
 async def insert_decision_maker(hotel_id: int, dm: DecisionMaker) -> Optional[int]:
@@ -136,7 +102,11 @@ async def update_enrichment_status(
     status: int,
     layers_completed: int,
 ) -> None:
-    """Update the enrichment status for a hotel."""
+    """Update the enrichment status for a hotel.
+
+    Status: 0=pending, 1=complete, 2=no_results
+    layers_completed: bitmask OR'd with existing value
+    """
     async with get_conn() as conn:
         await conn.execute("""
             INSERT INTO hotel_owner_enrichment (hotel_id, status, layers_completed, last_attempt)
@@ -155,7 +125,7 @@ async def cache_domain_intel(intel: DomainIntel) -> None:
             INSERT INTO domain_whois_cache
                 (domain, registrant_name, registrant_org, registrant_email,
                  registrar, registration_date, is_privacy_protected, source, queried_at)
-            VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7, $8, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
             ON CONFLICT (domain) DO UPDATE
             SET registrant_name = COALESCE(EXCLUDED.registrant_name, domain_whois_cache.registrant_name),
                 registrant_org = COALESCE(EXCLUDED.registrant_org, domain_whois_cache.registrant_org),
@@ -163,7 +133,7 @@ async def cache_domain_intel(intel: DomainIntel) -> None:
                 is_privacy_protected = EXCLUDED.is_privacy_protected,
                 queried_at = NOW()
         """, intel.domain, intel.registrant_name, intel.registrant_org,
-            intel.registrant_email, intel.registrar, intel.registration_date,
+            intel.registrant_email, intel.registrar, _parse_date(intel.registration_date),
             intel.is_privacy_protected, intel.whois_source)
 
 
@@ -195,7 +165,6 @@ async def get_enrichment_stats() -> dict:
             SELECT
                 COUNT(*) FILTER (WHERE h.website IS NOT NULL AND h.website != '') as total_with_website,
                 COUNT(hoe.hotel_id) FILTER (WHERE hoe.status = 0) as pending,
-                COUNT(hoe.hotel_id) FILTER (WHERE hoe.status = -1) as claimed,
                 COUNT(hoe.hotel_id) FILTER (WHERE hoe.status = 1) as complete,
                 COUNT(hoe.hotel_id) FILTER (WHERE hoe.status = 2) as no_results,
                 COUNT(DISTINCT hdm.hotel_id) as hotels_with_contacts,

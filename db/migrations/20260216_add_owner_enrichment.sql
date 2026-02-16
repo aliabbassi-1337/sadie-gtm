@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_hotel_dm_confidence ON sadie_gtm.hotel_decision_m
 -- Enrichment status tracking (1:1 with hotels)
 CREATE TABLE IF NOT EXISTS sadie_gtm.hotel_owner_enrichment (
     hotel_id INTEGER PRIMARY KEY REFERENCES sadie_gtm.hotels(id) ON DELETE CASCADE,
-    status INTEGER DEFAULT 0,       -- 0=pending, -1=claimed, 1=complete, 2=no_results
+    status INTEGER DEFAULT 0,       -- 0=pending, 1=complete, 2=no_results
     layers_completed INTEGER DEFAULT 0,  -- bitmask: 1=rdap, 2=whois_history, 4=dns, 8=website, 16=reviews, 32=email_verify
     last_attempt TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
