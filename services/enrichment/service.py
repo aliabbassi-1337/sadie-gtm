@@ -729,7 +729,7 @@ class IService(ABC):
         Discovers parks from state listing pages, scrapes each park page
         for structured data (JSON-LD), and upserts into hotels table.
 
-        Returns dict with discovered/imported/skipped/failed counts.
+        Returns dict with discovered/total_big4/with_email/with_phone/with_address counts.
         """
         pass
 
@@ -3678,27 +3678,24 @@ class Service(IService):
 
         if not parks:
             logger.warning("No parks discovered")
-            return {"discovered": 0, "imported": 0, "skipped": 0, "failed": 0}
+            return {"discovered": 0, "total_big4": 0, "with_email": 0, "with_phone": 0, "with_address": 0}
 
         logger.info(f"Scraped {len(parks)} parks, deduplicating and importing to DB...")
 
-        imported = await big4_repo.upsert_parks(parks)
-        matched_existing = len(parks) - imported
+        await big4_repo.upsert_parks(parks)
+        total_big4 = await big4_repo.get_big4_count()
 
         result = {
             "discovered": len(parks),
-            "new_inserted": imported,
-            "matched_existing": matched_existing,
+            "total_big4": total_big4,
             "with_email": sum(1 for p in parks if p.email),
             "with_phone": sum(1 for p in parks if p.phone),
             "with_address": sum(1 for p in parks if p.address),
-            "with_location": sum(1 for p in parks if p.has_location()),
         }
 
         logger.info(
             f"BIG4 scrape complete: {result['discovered']} discovered, "
-            f"{result['new_inserted']} new, "
-            f"{result['matched_existing']} matched existing (enriched), "
+            f"{result['total_big4']} total in DB, "
             f"{result['with_email']} with email, "
             f"{result['with_phone']} with phone"
         )

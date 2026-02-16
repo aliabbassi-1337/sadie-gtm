@@ -76,30 +76,3 @@ FROM new_hotel
 WHERE NOT EXISTS (
     SELECT 1 FROM sadie_gtm.hotel_booking_engines WHERE booking_url = $6
 );
-
--- BATCH_UPSERT_BIG4_PARK
--- Params: (name, source, status, address, city, state, country, phone, category, external_id, external_id_type, lat, lon)
--- Fill-empty-only upsert: on conflict, only fills NULL/empty fields — never overwrites.
-INSERT INTO sadie_gtm.hotels (
-    name, source, status, address, city, state, country,
-    phone_google, category, external_id, external_id_type, location
-)
-VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-    CASE WHEN $12::float8 IS NOT NULL AND $13::float8 IS NOT NULL
-         THEN ST_SetSRID(ST_MakePoint($13::float8, $12::float8), 4326)::geography
-         ELSE NULL END
-)
-ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL
-DO UPDATE SET
-    address = CASE WHEN (sadie_gtm.hotels.address IS NULL OR sadie_gtm.hotels.address = '')
-                   THEN COALESCE(EXCLUDED.address, sadie_gtm.hotels.address)
-                   ELSE sadie_gtm.hotels.address END,
-    city = CASE WHEN (sadie_gtm.hotels.city IS NULL OR sadie_gtm.hotels.city = '')
-                THEN COALESCE(EXCLUDED.city, sadie_gtm.hotels.city)
-                ELSE sadie_gtm.hotels.city END,
-    phone_google = CASE WHEN (sadie_gtm.hotels.phone_google IS NULL OR sadie_gtm.hotels.phone_google = '')
-                        THEN COALESCE(EXCLUDED.phone_google, sadie_gtm.hotels.phone_google)
-                        ELSE sadie_gtm.hotels.phone_google END,
-    category = COALESCE(sadie_gtm.hotels.category, EXCLUDED.category),
-    location = COALESCE(sadie_gtm.hotels.location, EXCLUDED.location);

@@ -6,14 +6,6 @@ SELECT COUNT(*) AS count
 FROM sadie_gtm.hotels
 WHERE external_id_type = 'big4';
 
--- name: get_existing_au_hotels
--- Get all Australian hotels for cross-source dedup matching.
-SELECT id, name, state, city, email, website, address,
-       external_id, external_id_type
-FROM sadie_gtm.hotels
-WHERE country IN ('Australia', 'AU')
-  AND status >= 0;
-
 -- name: get_big4_dedup_stats^
 -- Get stats about BIG4 parks and overlap with other sources.
 SELECT

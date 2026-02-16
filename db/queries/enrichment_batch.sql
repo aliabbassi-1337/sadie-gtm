@@ -178,32 +178,86 @@ UPDATE sadie_gtm.hotel_booking_engines
 SET last_enrichment_attempt = NOW()
 WHERE hotel_id = ANY($1::integer[]);
 
--- BATCH_ENRICH_BIG4_EXISTING
--- Params: ($1::int[] hotel_ids, $2::text[] emails, $3::text[] phones, $4::text[] websites,
---          $5::text[] addresses, $6::text[] cities, $7::float[] latitudes, $8::float[] longitudes)
--- Fill-empty-only: only writes to NULL/empty fields, never overwrites existing data.
-UPDATE sadie_gtm.hotels h
-SET
-    email = CASE WHEN (h.email IS NULL OR h.email = '') AND v.email IS NOT NULL AND v.email != ''
-                 THEN v.email ELSE h.email END,
-    phone_website = CASE WHEN (h.phone_website IS NULL OR h.phone_website = '') AND v.phone IS NOT NULL AND v.phone != ''
-                        THEN v.phone ELSE h.phone_website END,
-    website = CASE WHEN (h.website IS NULL OR h.website = '') AND v.website IS NOT NULL AND v.website != ''
-                   THEN v.website ELSE h.website END,
-    address = CASE WHEN (h.address IS NULL OR h.address = '') AND v.address IS NOT NULL AND v.address != ''
-                   THEN v.address ELSE h.address END,
-    city = CASE WHEN (h.city IS NULL OR h.city = '') AND v.city IS NOT NULL AND v.city != ''
-                THEN v.city ELSE h.city END,
-    location = CASE
-        WHEN h.location IS NULL AND v.latitude IS NOT NULL AND v.longitude IS NOT NULL
-        THEN ST_SetSRID(ST_MakePoint(v.longitude, v.latitude), 4326)::geography
-        ELSE h.location
-    END,
-    updated_at = NOW()
-FROM (
-    SELECT * FROM unnest(
-        $1::int[], $2::text[], $3::text[], $4::text[],
-        $5::text[], $6::text[], $7::float[], $8::float[]
-    ) AS t(hotel_id, email, phone, website, address, city, latitude, longitude)
-) v
-WHERE h.id = v.hotel_id;
+-- BATCH_BIG4_UPSERT
+-- Params: ($1::text[] names, $2::text[] slugs, $3::text[] phones, $4::text[] emails,
+--          $5::text[] websites, $6::text[] addresses, $7::text[] cities,
+--          $8::text[] states, $9::text[] postcodes, $10::float[] lats, $11::float[] lons)
+--
+-- Two-phase upsert for BIG4 parks with cross-source dedup:
+--   Phase 1 (CTE "matched"): UPDATE existing AU hotels whose normalized name+state
+--           matches an incoming park. Fill-empty-only — never overwrites.
+--   Phase 2 (final INSERT): Insert parks that didn't match any existing hotel.
+--           On same-source conflict (external_id_type=big4), also fill-empty-only.
+--
+-- Name normalization: lowercase, strip common brand prefixes and property type
+-- suffixes so "BIG4 Sydney Lakeside Holiday Park" matches "Sydney Lakeside".
+WITH incoming AS (
+    SELECT *,
+        regexp_replace(
+            regexp_replace(
+                lower(trim(name)),
+                '^(big4 |big 4 |nrma |ingenia holidays |tasman holiday parks - |tasman holiday parks |breeze holiday parks - |holiday haven )',
+                ''
+            ),
+            ' (holiday park|caravan park|tourist park|holiday village|holiday resort|camping ground|glamping retreat|lifestyle park)$',
+            ''
+        ) AS norm_name
+    FROM unnest(
+        $1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
+        $6::text[], $7::text[], $8::text[], $9::text[], $10::float[], $11::float[]
+    ) AS t(name, slug, phone, email, website, address, city, state, postcode, lat, lon)
+),
+existing_norm AS (
+    SELECT id,
+        regexp_replace(
+            regexp_replace(
+                lower(trim(h.name)),
+                '^(big4 |big 4 |nrma |ingenia holidays |tasman holiday parks - |tasman holiday parks |breeze holiday parks - |holiday haven )',
+                ''
+            ),
+            ' (holiday park|caravan park|tourist park|holiday village|holiday resort|camping ground|glamping retreat|lifestyle park)$',
+            ''
+        ) AS norm_name,
+        upper(h.state) AS norm_state
+    FROM sadie_gtm.hotels h
+    WHERE h.country IN ('Australia', 'AU') AND h.status >= 0
+),
+matched AS (
+    UPDATE sadie_gtm.hotels h
+    SET
+        email     = CASE WHEN (h.email IS NULL OR h.email = '')             AND i.email IS NOT NULL AND i.email != ''   THEN i.email     ELSE h.email END,
+        phone_website = CASE WHEN (h.phone_website IS NULL OR h.phone_website = '') AND i.phone IS NOT NULL AND i.phone != '' THEN i.phone     ELSE h.phone_website END,
+        website   = CASE WHEN (h.website IS NULL OR h.website = '')         AND i.website IS NOT NULL AND i.website != '' THEN i.website   ELSE h.website END,
+        address   = CASE WHEN (h.address IS NULL OR h.address = '')         AND i.address IS NOT NULL AND i.address != '' THEN i.address   ELSE h.address END,
+        city      = CASE WHEN (h.city IS NULL OR h.city = '')               AND i.city IS NOT NULL AND i.city != ''     THEN i.city      ELSE h.city END,
+        location  = CASE WHEN h.location IS NULL AND i.lat IS NOT NULL AND i.lon IS NOT NULL
+                         THEN ST_SetSRID(ST_MakePoint(i.lon, i.lat), 4326)::geography
+                         ELSE h.location END,
+        updated_at = NOW()
+    FROM incoming i
+    JOIN existing_norm e ON e.norm_name = i.norm_name AND e.norm_state = upper(i.state)
+    WHERE h.id = e.id
+    RETURNING i.slug
+)
+INSERT INTO sadie_gtm.hotels (
+    name, source, status, address, city, state, country,
+    phone_google, category, external_id, external_id_type, location
+)
+SELECT
+    i.name, 'big4_scrape', 1, i.address, i.city, i.state, 'Australia',
+    i.phone, 'holiday_park', 'big4_' || i.slug, 'big4',
+    CASE WHEN i.lat IS NOT NULL AND i.lon IS NOT NULL
+         THEN ST_SetSRID(ST_MakePoint(i.lon, i.lat), 4326)::geography
+         ELSE NULL END
+FROM incoming i
+WHERE i.slug NOT IN (SELECT slug FROM matched)
+ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL
+DO UPDATE SET
+    address    = CASE WHEN (sadie_gtm.hotels.address IS NULL OR sadie_gtm.hotels.address = '')
+                      THEN COALESCE(EXCLUDED.address, sadie_gtm.hotels.address) ELSE sadie_gtm.hotels.address END,
+    city       = CASE WHEN (sadie_gtm.hotels.city IS NULL OR sadie_gtm.hotels.city = '')
+                      THEN COALESCE(EXCLUDED.city, sadie_gtm.hotels.city) ELSE sadie_gtm.hotels.city END,
+    phone_google = CASE WHEN (sadie_gtm.hotels.phone_google IS NULL OR sadie_gtm.hotels.phone_google = '')
+                        THEN COALESCE(EXCLUDED.phone_google, sadie_gtm.hotels.phone_google) ELSE sadie_gtm.hotels.phone_google END,
+    category   = COALESCE(sadie_gtm.hotels.category, EXCLUDED.category),
+    location   = COALESCE(sadie_gtm.hotels.location, EXCLUDED.location);

@@ -37,8 +37,7 @@ async def run_scrape(
             slack.send_message(
                 f"*BIG4 Scrape Complete*\n"
                 f"- Parks discovered: {result['discovered']}\n"
-                f"- New inserted: {result['new_inserted']}\n"
-                f"- Matched existing (enriched): {result['matched_existing']}\n"
+                f"- Total BIG4 in DB: {result['total_big4']}\n"
                 f"- With email: {result['with_email']}\n"
                 f"- With phone: {result['with_phone']}\n"
                 f"- With address: {result['with_address']}"
