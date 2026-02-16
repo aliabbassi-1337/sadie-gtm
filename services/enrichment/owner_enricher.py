@@ -1,11 +1,11 @@
 """Owner enrichment waterfall orchestrator.
 
 Runs multiple enrichment layers in sequence for each hotel:
-  1. RDAP domain lookup → registrant name/email
-  2. Historical WHOIS via Wayback Machine → pre-GDPR registrant data
+  1. RDAP domain lookup → registrant name/email (structured JSON protocol)
+  2. WHOIS lookup → live python-whois (socket), then Wayback Machine fallback
   3. DNS intelligence → email provider, SOA admin email
   4. Website scraping → /about, /team, /contact pages + LLM extraction
-  5. Google review mining → owner/GM names from review responses
+  5. Google review mining → owner/GM names from review responses (Serper)
   6. Email verification → SMTP/O365 autodiscover
 
 Each layer adds to the hotel's decision_makers list. Stops early
@@ -25,7 +25,7 @@ from lib.owner_discovery.models import (
     LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
 )
 from lib.owner_discovery.rdap_client import rdap_to_decision_maker
-from lib.owner_discovery.whois_history import whois_history_to_decision_maker
+from lib.owner_discovery.whois_history import whois_lookup, whois_to_decision_maker
 from lib.owner_discovery.dns_intel import analyze_domain
 from lib.owner_discovery.website_scraper import scrape_hotel_website, extract_from_google_reviews
 from lib.owner_discovery.email_discovery import enrich_decision_maker_email
@@ -91,14 +91,31 @@ async def enrich_single_hotel(
                 logger.info(f"[{hotel_id}] RDAP hit: {dm.full_name}")
             result.layers_completed |= LAYER_RDAP
 
-        # === Layer 2: Historical WHOIS ===
+        # === Layer 2: WHOIS (live python-whois + Wayback fallback) ===
         if layers & LAYER_WHOIS_HISTORY:
-            # Only run if RDAP didn't find anything (privacy protected)
+            # Only run if RDAP didn't find registrant data
             if not result.found_any or domain_intel.is_privacy_protected:
-                dm = await whois_history_to_decision_maker(client, domain)
-                if dm:
-                    result.decision_makers.append(dm)
-                    logger.info(f"[{hotel_id}] Historical WHOIS hit: {dm.full_name}")
+                whois_intel = await whois_lookup(client, domain)
+                if whois_intel:
+                    # Cache the WHOIS data
+                    await repo.cache_domain_intel(whois_intel)
+                    # Merge into domain_intel
+                    if not domain_intel.registrant_name:
+                        domain_intel.registrant_name = whois_intel.registrant_name
+                    if not domain_intel.registrant_org:
+                        domain_intel.registrant_org = whois_intel.registrant_org
+                    if not domain_intel.registrant_email:
+                        domain_intel.registrant_email = whois_intel.registrant_email
+                    if not domain_intel.registrar:
+                        domain_intel.registrar = whois_intel.registrar
+                    # Convert to decision maker
+                    dm = whois_to_decision_maker(whois_intel)
+                    if dm:
+                        result.decision_makers.append(dm)
+                        logger.info(
+                            f"[{hotel_id}] WHOIS hit ({whois_intel.whois_source}): "
+                            f"{dm.full_name} | {dm.email}"
+                        )
             result.layers_completed |= LAYER_WHOIS_HISTORY
 
         # === Layer 3: DNS Intelligence ===

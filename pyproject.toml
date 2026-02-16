@@ -21,6 +21,7 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "openai>=2.20.0",
     "dnspython>=2.6.0",
+    "python-whois>=0.9.6",
 ]
 
 [dependency-groups]
