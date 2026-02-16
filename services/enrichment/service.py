@@ -29,6 +29,7 @@ from services.enrichment.archive_scraper import ArchiveScraper, ExtractedBooking
 from services.enrichment.rms_repo import RMSRepo
 from services.enrichment.rms_queue import RMSQueue, MockQueue
 from lib.rms import RMSHotelRecord, QueueStats
+from lib.big4 import Big4Scraper, Big4Park
 
 load_dotenv()
 
@@ -713,6 +714,22 @@ class IService(ABC):
         """Re-check a random sample of results to verify correctness.
 
         Returns dict with matches, mismatches counts.
+        """
+        pass
+
+    # BIG4 Australia
+    @abstractmethod
+    async def scrape_big4_parks(
+        self,
+        concurrency: int = 10,
+        delay: float = 0.5,
+    ) -> Dict[str, Any]:
+        """Scrape all BIG4 holiday parks from big4.com.au.
+
+        Discovers parks from state listing pages, scrapes each park page
+        for structured data (JSON-LD), and upserts into hotels table.
+
+        Returns dict with discovered/imported/skipped/failed counts.
         """
         pass
 
@@ -3639,3 +3656,48 @@ class Service(IService):
 
         logger.info(f"VERIFY: {matches}/{matches + mismatches} consistent ({mismatches} mismatches)")
         return {"matches": matches, "mismatches": mismatches}
+
+    # =========================================================================
+    # BIG4 Australia
+    # =========================================================================
+
+    async def scrape_big4_parks(
+        self,
+        concurrency: int = 10,
+        delay: float = 0.5,
+    ) -> Dict[str, Any]:
+        """Scrape all BIG4 holiday parks and upsert into hotels table."""
+        from services.enrichment.big4_repo import Big4Repo
+
+        big4_repo = Big4Repo()
+
+        logger.info("Starting BIG4 scrape")
+
+        async with Big4Scraper(concurrency=concurrency, delay=delay) as scraper:
+            parks = await scraper.scrape_all()
+
+        if not parks:
+            logger.warning("No parks discovered")
+            return {"discovered": 0, "imported": 0, "skipped": 0, "failed": 0}
+
+        logger.info(f"Scraped {len(parks)} parks, importing to DB...")
+
+        imported = await big4_repo.upsert_parks(parks)
+
+        result = {
+            "discovered": len(parks),
+            "imported": imported,
+            "with_email": sum(1 for p in parks if p.email),
+            "with_phone": sum(1 for p in parks if p.phone),
+            "with_address": sum(1 for p in parks if p.address),
+            "with_location": sum(1 for p in parks if p.has_location()),
+        }
+
+        logger.info(
+            f"BIG4 scrape complete: {result['discovered']} discovered, "
+            f"{result['imported']} imported, "
+            f"{result['with_email']} with email, "
+            f"{result['with_phone']} with phone"
+        )
+
+        return result
