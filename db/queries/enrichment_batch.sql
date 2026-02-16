@@ -221,31 +221,39 @@ existing_norm AS (
         upper(h.state) AS norm_state
     FROM sadie_gtm.hotels h
     WHERE h.country IN ('Australia', 'AU') AND h.status >= 0
+      AND (h.external_id_type IS NULL OR h.external_id_type != 'big4')
+),
+deduped_match AS (
+    SELECT DISTINCT ON (e.id)
+        e.id AS existing_id, i.slug, i.phone, i.email, i.website,
+        i.address, i.city, i.lat, i.lon
+    FROM incoming i
+    JOIN existing_norm e ON e.norm_name = i.norm_name AND e.norm_state = upper(i.state)
+    ORDER BY e.id, i.slug
 ),
 matched AS (
     UPDATE sadie_gtm.hotels h
     SET
-        email     = CASE WHEN (h.email IS NULL OR h.email = '')             AND i.email IS NOT NULL AND i.email != ''   THEN i.email     ELSE h.email END,
-        phone_website = CASE WHEN (h.phone_website IS NULL OR h.phone_website = '') AND i.phone IS NOT NULL AND i.phone != '' THEN i.phone     ELSE h.phone_website END,
-        website   = CASE WHEN (h.website IS NULL OR h.website = '')         AND i.website IS NOT NULL AND i.website != '' THEN i.website   ELSE h.website END,
-        address   = CASE WHEN (h.address IS NULL OR h.address = '')         AND i.address IS NOT NULL AND i.address != '' THEN i.address   ELSE h.address END,
-        city      = CASE WHEN (h.city IS NULL OR h.city = '')               AND i.city IS NOT NULL AND i.city != ''     THEN i.city      ELSE h.city END,
-        location  = CASE WHEN h.location IS NULL AND i.lat IS NOT NULL AND i.lon IS NOT NULL
-                         THEN ST_SetSRID(ST_MakePoint(i.lon, i.lat), 4326)::geography
+        email     = CASE WHEN (h.email IS NULL OR h.email = '')             AND d.email IS NOT NULL AND d.email != ''   THEN d.email     ELSE h.email END,
+        phone_website = CASE WHEN (h.phone_website IS NULL OR h.phone_website = '') AND d.phone IS NOT NULL AND d.phone != '' THEN d.phone     ELSE h.phone_website END,
+        website   = CASE WHEN (h.website IS NULL OR h.website = '')         AND d.website IS NOT NULL AND d.website != '' THEN d.website   ELSE h.website END,
+        address   = CASE WHEN (h.address IS NULL OR h.address = '')         AND d.address IS NOT NULL AND d.address != '' THEN d.address   ELSE h.address END,
+        city      = CASE WHEN (h.city IS NULL OR h.city = '')               AND d.city IS NOT NULL AND d.city != ''     THEN d.city      ELSE h.city END,
+        location  = CASE WHEN h.location IS NULL AND d.lat IS NOT NULL AND d.lon IS NOT NULL
+                         THEN ST_SetSRID(ST_MakePoint(d.lon, d.lat), 4326)::geography
                          ELSE h.location END,
         updated_at = NOW()
-    FROM incoming i
-    JOIN existing_norm e ON e.norm_name = i.norm_name AND e.norm_state = upper(i.state)
-    WHERE h.id = e.id
-    RETURNING i.slug
+    FROM deduped_match d
+    WHERE h.id = d.existing_id
+    RETURNING d.slug
 )
 INSERT INTO sadie_gtm.hotels (
     name, source, status, address, city, state, country,
-    phone_google, category, external_id, external_id_type, location
+    phone_google, email, website, category, external_id, external_id_type, location
 )
 SELECT
     i.name, 'big4_scrape', 1, i.address, i.city, i.state, 'Australia',
-    i.phone, 'holiday_park', 'big4_' || i.slug, 'big4',
+    i.phone, i.email, i.website, 'holiday_park', 'big4_' || i.slug, 'big4',
     CASE WHEN i.lat IS NOT NULL AND i.lon IS NOT NULL
          THEN ST_SetSRID(ST_MakePoint(i.lon, i.lat), 4326)::geography
          ELSE NULL END
@@ -259,5 +267,9 @@ DO UPDATE SET
                       THEN COALESCE(EXCLUDED.city, sadie_gtm.hotels.city) ELSE sadie_gtm.hotels.city END,
     phone_google = CASE WHEN (sadie_gtm.hotels.phone_google IS NULL OR sadie_gtm.hotels.phone_google = '')
                         THEN COALESCE(EXCLUDED.phone_google, sadie_gtm.hotels.phone_google) ELSE sadie_gtm.hotels.phone_google END,
+    email      = CASE WHEN (sadie_gtm.hotels.email IS NULL OR sadie_gtm.hotels.email = '')
+                      THEN COALESCE(EXCLUDED.email, sadie_gtm.hotels.email) ELSE sadie_gtm.hotels.email END,
+    website    = CASE WHEN (sadie_gtm.hotels.website IS NULL OR sadie_gtm.hotels.website = '')
+                      THEN COALESCE(EXCLUDED.website, sadie_gtm.hotels.website) ELSE sadie_gtm.hotels.website END,
     category   = COALESCE(sadie_gtm.hotels.category, EXCLUDED.category),
     location   = COALESCE(sadie_gtm.hotels.location, EXCLUDED.location);

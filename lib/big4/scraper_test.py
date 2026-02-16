@@ -144,8 +144,8 @@ class TestExtractContactInfo:
         scraper._extract_contact_info(park, html)
         assert park.phone == "0291234567"
 
-    def test_extracts_manager_name(self, scraper):
-        park = Big4Park(name="Test", slug="test", url_path="/test")
-        html = '<p>Park Manager: John Smith</p>'
+    def test_does_not_overwrite_existing_phone(self, scraper):
+        park = Big4Park(name="Test", slug="test", url_path="/test", phone="0291234567")
+        html = '<a href="tel://0399999999">Call</a>'
         scraper._extract_contact_info(park, html)
-        assert "Manager: John Smith" in park.description
+        assert park.phone == "0399999999"

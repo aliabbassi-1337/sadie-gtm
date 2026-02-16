@@ -1,7 +1,7 @@
 """BIG4 Holiday Parks - Scraper.
 
-Scrapes big4.com.au to extract all park listings and their details.
-The site is Next.js SSR so we can extract data from HTML + JSON-LD.
+Fetches all park data from BIG4's Algolia search index, then optionally
+enriches with contact info (email/phone) from individual park pages.
 """
 
 import asyncio
@@ -17,32 +17,56 @@ from lib.big4.models import Big4Park
 
 
 BASE_URL = "https://www.big4.com.au"
-STATE_CODES = ["nsw", "vic", "qld", "wa", "sa", "tas", "nt"]
 
-# Map state codes to full names for the DB
+ALGOLIA_APP_ID = "SD2B0F3EPJ"
+ALGOLIA_API_KEY = "c98d8ef4558ee5ea250125c84fc8d7bb"
+ALGOLIA_INDEX = "UmbracoParkProdIndex"
+ALGOLIA_URL = f"https://{ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/*/queries"
+
 STATE_MAP = {
-    "nsw": "NSW",
-    "vic": "VIC",
-    "qld": "QLD",
-    "wa": "WA",
-    "sa": "SA",
-    "tas": "TAS",
-    "nt": "NT",
+    "New South Wales": "NSW",
+    "Victoria": "VIC",
+    "Queensland": "QLD",
+    "Western Australia": "WA",
+    "South Australia": "SA",
+    "Tasmania": "TAS",
+    "Northern Territory": "NT",
+    "Australian Capital Territory": "ACT",
 }
 
 
+def _slugify(name: str) -> str:
+    """Convert a park name to a URL-safe slug."""
+    slug = name.lower().strip()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"[\s-]+", "-", slug)
+    return slug.strip("-")
+
+
+def _state_code(state_name: str) -> str:
+    """Convert full state name to abbreviation."""
+    if not state_name:
+        return ""
+    # Already abbreviated
+    if len(state_name) <= 3 and state_name.upper() == state_name:
+        return state_name
+    return STATE_MAP.get(state_name, state_name)
+
+
 class Big4Scraper:
-    """Scrapes BIG4 holiday parks from big4.com.au."""
+    """Fetches BIG4 parks from their Algolia index + contact pages."""
 
     def __init__(
         self,
         concurrency: int = 10,
         delay: float = 0.5,
         timeout: float = 30.0,
+        enrich_contacts: bool = True,
     ):
         self.concurrency = concurrency
         self.delay = delay
         self.timeout = timeout
+        self.enrich_contacts = enrich_contacts
         self._client: Optional[httpx.AsyncClient] = None
         self._semaphore: Optional[asyncio.Semaphore] = None
 
@@ -52,7 +76,7 @@ class Big4Scraper:
             follow_redirects=True,
             headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml",
+                "Accept": "text/html,application/xhtml+xml,application/json",
             },
         )
         self._semaphore = asyncio.Semaphore(self.concurrency)
@@ -62,6 +86,92 @@ class Big4Scraper:
         if self._client:
             await self._client.aclose()
             self._client = None
+
+    async def fetch_all_from_algolia(self) -> List[Dict]:
+        """Fetch all parks from the Algolia search index."""
+        resp = await self._client.post(
+            ALGOLIA_URL,
+            headers={
+                "x-algolia-application-id": ALGOLIA_APP_ID,
+                "x-algolia-api-key": ALGOLIA_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "requests": [{
+                    "indexName": ALGOLIA_INDEX,
+                    "params": "hitsPerPage=1000&page=0",
+                }]
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        hits = data["results"][0]["hits"]
+        logger.info(f"Algolia returned {len(hits)} parks")
+        return hits
+
+    def _hit_to_park(self, hit: Dict) -> Optional[Big4Park]:
+        """Convert an Algolia hit to a Big4Park model."""
+        park_data = hit.get("Park", {})
+        name = park_data.get("Name", "").strip()
+        if not name:
+            return None
+
+        state_full = hit.get("State", "")
+        state = _state_code(state_full)
+        region = hit.get("Region", "")
+        town = hit.get("Town", "")
+        slug = _slugify(name)
+
+        # Build url_path from state/region/slug
+        state_slug = state_full.lower().replace(" ", "-") if state_full else ""
+        region_slug = _slugify(region) if region else ""
+        url_path = f"/caravan-parks/{state_slug}/{region_slug}/{slug}" if state_slug else f"/parks/{slug}"
+
+        # Coordinates from Park or _geoloc
+        lat = park_data.get("Latitude")
+        lon = park_data.get("Longitude")
+        if lat is None or lon is None:
+            geoloc = hit.get("_geoloc", {})
+            lat = geoloc.get("lat")
+            lon = geoloc.get("lng")
+
+        # Rating
+        rating = park_data.get("Rating")
+        if rating is not None:
+            try:
+                rating = float(rating)
+                if rating == 0:
+                    rating = None
+            except (ValueError, TypeError):
+                rating = None
+
+        # Pets
+        pets = park_data.get("PetsAllowed")
+
+        # Description from About
+        description = hit.get("About", "")
+        if description:
+            # Strip HTML tags
+            description = re.sub(r"<[^>]+>", "", description).strip()
+            description = description[:500]
+
+        # Website
+        website = f"{BASE_URL}{url_path}"
+
+        return Big4Park(
+            name=name,
+            slug=slug,
+            url_path=url_path,
+            region=region or None,
+            state=state or None,
+            city=town or park_data.get("Suburb") or None,
+            latitude=float(lat) if lat is not None else None,
+            longitude=float(lon) if lon is not None else None,
+            rating=rating,
+            pets_allowed=pets if isinstance(pets, bool) else None,
+            description=description or None,
+            website=website,
+        )
 
     async def _fetch(self, url: str, retries: int = 3) -> Optional[str]:
         """Fetch URL with retries."""
@@ -85,135 +195,102 @@ class Big4Scraper:
                     logger.error(f"Failed to fetch {url}: {e}")
         return None
 
-    async def discover_parks(self) -> List[Dict[str, str]]:
-        """Discover all park URLs by scraping state listing pages.
-
-        Returns list of dicts with keys: name, url_path, state, region
-        """
-        all_parks = []
-
-        tasks = [self._discover_state(code) for code in STATE_CODES]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error(f"State discovery failed: {result}")
+    def _decode_rsc_text(self, html: str) -> str:
+        """Decode Next.js RSC streaming chunks into plain text."""
+        parts = []
+        for m in re.finditer(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, re.DOTALL):
+            try:
+                parts.append(m.group(1).encode().decode('unicode_escape'))
+            except (UnicodeDecodeError, ValueError):
                 continue
-            all_parks.extend(result)
+        return ''.join(parts)
 
-        logger.info(f"Discovered {len(all_parks)} parks across {len(STATE_CODES)} states")
-        return all_parks
+    def _extract_contact_info(self, park: Big4Park, html: str) -> None:
+        """Extract contact info from the contact page HTML."""
+        text = html + self._decode_rsc_text(html)
 
-    async def _discover_state(self, state_code: str) -> List[Dict[str, str]]:
-        """Discover all parks in a single state."""
-        url = f"{BASE_URL}/caravan-parks/{state_code}"
-        html = await self._fetch(url)
-        if not html:
-            logger.error(f"Failed to fetch state page: {state_code}")
-            return []
+        # Extract email from mailto: links
+        if not park.email:
+            email_pattern = r'mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+            email_match = re.search(email_pattern, text, re.IGNORECASE)
+            if email_match:
+                park.email = email_match.group(1).strip()
 
-        parks = []
-        # Extract park links: /caravan-parks/{state}/{region}/{slug}
-        pattern = rf'/caravan-parks/{state_code}/([\w-]+)/([\w-]+)'
-        matches = re.findall(pattern, html)
-        seen = set()
+        # Fallback: find any email address in text
+        if not park.email:
+            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.(?:com\.au|com|org\.au|net\.au)'
+            email_match = re.search(email_pattern, text)
+            if email_match:
+                park.email = email_match.group(0).strip()
 
-        for region_slug, park_slug in matches:
-            url_path = f"/caravan-parks/{state_code}/{region_slug}/{park_slug}"
-            if url_path in seen:
-                continue
-            seen.add(url_path)
+        # Extract phone from tel: links (prefer local over 1800)
+        phone_pattern = r'tel:/?/?([\d\s+()-]+)'
+        phone_matches = re.findall(phone_pattern, text)
+        for phone in phone_matches:
+            phone = phone.strip()
+            if phone and not phone.startswith("1800"):
+                park.phone = phone
+                break
 
-            # Skip non-park paths (subpages like /contact, /facilities etc.)
-            # These won't appear because our regex only matches 4-segment paths
-            # But filter out known subpage slugs just in case
-            if park_slug in ("pet-friendly", "facilities", "contact", "deals",
-                             "accommodation", "local-attractions", "reviews"):
-                continue
+        # Fallback: Australian local phone pattern
+        if not park.phone or park.phone.startswith("1800"):
+            local_pattern = r'\(0[2-9]\)\s*\d{4}\s*\d{4}'
+            local_matches = re.findall(local_pattern, text)
+            for phone in local_matches:
+                phone = phone.strip()
+                if phone:
+                    park.phone = phone
+                    break
 
-            # Try to extract name from link text
-            name_pattern = rf'href="{re.escape(url_path)}"[^>]*>([^<]+)<'
-            name_match = re.search(name_pattern, html)
-            name = name_match.group(1).strip() if name_match else park_slug.replace("-", " ").title()
-
-            # Clean region name
-            region = region_slug.replace("-", " ").title()
-
-            parks.append({
-                "name": name,
-                "url_path": url_path,
-                "slug": park_slug,
-                "state": STATE_MAP.get(state_code, state_code.upper()),
-                "region": region,
-            })
-
-        logger.info(f"  {state_code.upper()}: {len(parks)} parks")
-        return parks
-
-    async def scrape_park(self, park_info: Dict[str, str]) -> Optional[Big4Park]:
-        """Scrape a single park's detail page for structured data."""
-        url = f"{BASE_URL}{park_info['url_path']}"
-        html = await self._fetch(url)
-        if not html:
-            return None
-
+    async def _enrich_park_contact(self, park: Big4Park) -> None:
+        """Fetch the park's contact page and extract email/phone."""
+        html = await self._fetch(park.contact_url)
+        if html:
+            self._extract_contact_info(park, html)
         if self.delay > 0:
             await asyncio.sleep(self.delay)
 
-        park = Big4Park(
-            name=park_info["name"],
-            slug=park_info["slug"],
-            url_path=park_info["url_path"],
-            state=park_info.get("state"),
-            region=park_info.get("region"),
-        )
-
-        # Extract JSON-LD structured data
-        json_ld = self._extract_json_ld(html)
-        if json_ld:
-            self._apply_json_ld(park, json_ld)
-
-        # Extract email from contact page
-        contact_html = await self._fetch(park.contact_url)
-        if contact_html:
-            self._extract_contact_info(park, contact_html)
-
-        return park
-
     async def scrape_all(self) -> List[Big4Park]:
-        """Discover and scrape all parks."""
-        park_infos = await self.discover_parks()
+        """Fetch all parks from Algolia, optionally enrich with contact info."""
+        hits = await self.fetch_all_from_algolia()
 
         parks = []
-        tasks = [self.scrape_park(info) for info in park_infos]
+        for hit in hits:
+            park = self._hit_to_park(hit)
+            if park:
+                parks.append(park)
 
-        for i, coro in enumerate(asyncio.as_completed(tasks)):
-            try:
-                park = await coro
-                if park:
-                    parks.append(park)
-            except Exception as e:
-                logger.error(f"Error scraping park: {e}")
+        logger.info(f"Parsed {len(parks)} parks from Algolia")
 
-            if (i + 1) % 20 == 0:
-                logger.info(f"  Scraped {i + 1}/{len(park_infos)} parks ({len(parks)} successful)")
+        if self.enrich_contacts:
+            logger.info("Enriching parks with contact info from park pages...")
+            tasks = [self._enrich_park_contact(p) for p in parks]
+            for i, coro in enumerate(asyncio.as_completed(tasks)):
+                try:
+                    await coro
+                except Exception as e:
+                    logger.error(f"Error enriching park contact: {e}")
+                if (i + 1) % 50 == 0:
+                    logger.info(f"  Enriched {i + 1}/{len(parks)} parks")
 
-        logger.info(f"Scraped {len(parks)} parks total")
+        with_email = sum(1 for p in parks if p.email)
+        with_phone = sum(1 for p in parks if p.phone)
+        with_coords = sum(1 for p in parks if p.has_location())
+        logger.info(
+            f"Scrape complete: {len(parks)} parks, "
+            f"{with_coords} with coords, {with_email} with email, {with_phone} with phone"
+        )
         return parks
 
-    def _extract_json_ld(self, html: str) -> Optional[Dict]:
-        """Extract JSON-LD structured data from HTML.
+    # --- Legacy HTML methods kept for tests ---
 
-        Handles both standard <script type="application/ld+json"> tags
-        and Next.js RSC streaming format (self.__next_f.push).
-        """
+    def _extract_json_ld(self, html: str) -> Optional[Dict]:
+        """Extract JSON-LD structured data from HTML."""
         candidates = []
 
-        # Standard JSON-LD script tags
         pattern = r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
         candidates.extend(re.findall(pattern, html, re.DOTALL | re.IGNORECASE))
 
-        # Next.js RSC streaming: JSON-LD embedded in self.__next_f.push([1, "..."])
         for m in re.finditer(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, re.DOTALL):
             content = m.group(1)
             if '"@context"' not in content and '@context' not in content:
@@ -226,7 +303,6 @@ class Big4Scraper:
             if not json_match:
                 continue
             raw = json_match.group(1)
-            # Find balanced braces to extract complete JSON object
             depth = 0
             for i, c in enumerate(raw):
                 if c == '{':
@@ -275,7 +351,6 @@ class Big4Scraper:
         if "description" in data:
             park.description = data["description"][:500]
 
-        # Address
         addr = data.get("address", {})
         if isinstance(addr, dict):
             if "streetAddress" in addr:
@@ -287,7 +362,6 @@ class Big4Scraper:
             if "postalCode" in addr:
                 park.postcode = addr["postalCode"]
 
-        # Geo coordinates
         geo = data.get("geo", {})
         if isinstance(geo, dict):
             if "latitude" in geo:
@@ -301,7 +375,6 @@ class Big4Scraper:
                 except (ValueError, TypeError):
                     pass
 
-        # Rating
         rating = data.get("aggregateRating", {})
         if isinstance(rating, dict):
             if "ratingValue" in rating:
@@ -314,66 +387,3 @@ class Big4Scraper:
                     park.review_count = int(rating["reviewCount"])
                 except (ValueError, TypeError):
                     pass
-
-    def _decode_rsc_text(self, html: str) -> str:
-        """Decode Next.js RSC streaming chunks into plain text."""
-        parts = []
-        for m in re.finditer(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', html, re.DOTALL):
-            try:
-                parts.append(m.group(1).encode().decode('unicode_escape'))
-            except (UnicodeDecodeError, ValueError):
-                continue
-        return ''.join(parts)
-
-    def _extract_contact_info(self, park: Big4Park, html: str) -> None:
-        """Extract contact info from the contact page HTML."""
-        # Decode RSC chunks for searching (site uses Next.js RSC streaming)
-        text = html + self._decode_rsc_text(html)
-
-        # Extract email from mailto: links
-        if not park.email:
-            email_pattern = r'mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
-            email_match = re.search(email_pattern, text, re.IGNORECASE)
-            if email_match:
-                park.email = email_match.group(1).strip()
-
-        # Fallback: find any email address in text
-        if not park.email:
-            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.(?:com\.au|com|org\.au|net\.au)'
-            email_match = re.search(email_pattern, text)
-            if email_match:
-                park.email = email_match.group(0).strip()
-
-        # Extract phone from tel: links (prefer specific park phone over generic 1800)
-        phone_pattern = r'tel:/?/?([\d\s+()-]+)'
-        phone_matches = re.findall(phone_pattern, text)
-        for phone in phone_matches:
-            phone = phone.strip()
-            if phone and not phone.startswith("1800"):
-                park.phone = phone
-                break
-
-        # Fallback: Australian local phone pattern (0X XXXX XXXX) in decoded text
-        if not park.phone or park.phone.startswith("1800"):
-            local_pattern = r'\(0[2-9]\)\s*\d{4}\s*\d{4}'
-            local_matches = re.findall(local_pattern, text)
-            for phone in local_matches:
-                phone = phone.strip()
-                if phone:
-                    park.phone = phone
-                    break
-
-        # Try to find manager/contact person names
-        manager_patterns = [
-            r'(?:park\s*manager|manager|managed\s*by|host|hosts?)[:\s]+([A-Z][a-z]+ (?:& )?[A-Z][a-z]+)',
-            r'(?:contact|managed by)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)',
-        ]
-        for pattern in manager_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                manager_name = match.group(1).strip()
-                if park.description:
-                    park.description = f"Manager: {manager_name}. {park.description}"
-                else:
-                    park.description = f"Manager: {manager_name}"
-                break
