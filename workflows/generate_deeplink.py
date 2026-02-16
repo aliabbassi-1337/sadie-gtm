@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -25,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from services.deeplink.service import create_direct_link, create_proxy_session
 
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(
         description="Generate deep-link booking URLs with dates pre-filled",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -66,7 +67,7 @@ Examples:
     checkout = date.fromisoformat(args.checkout)
 
     if args.proxy:
-        result = create_proxy_session(
+        result = await create_proxy_session(
             engine=args.engine,
             property_id=args.property_id,
             checkin=checkin,
@@ -102,4 +103,4 @@ Examples:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

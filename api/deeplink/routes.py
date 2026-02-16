@@ -89,7 +89,7 @@ async def create_deeplink(body: DeepLinkBody, request: Request):
     proxy_host = request.headers.get("host", "localhost:8000")
 
     if body.proxy:
-        result = service.create_proxy_session(
+        result = await service.create_proxy_session(
             engine=body.engine,
             property_id=body.property_id,
             checkin=body.checkin,
@@ -127,7 +127,7 @@ async def create_deeplink(body: DeepLinkBody, request: Request):
 
     # For direct links, add a short URL redirect
     if not body.proxy:
-        code = service.create_short_link(result.url)
+        code = await service.create_short_link(result.url)
         base_url = str(request.base_url).rstrip("/")
         resp.short_url = f"{base_url}/r/{code}"
 
@@ -136,7 +136,7 @@ async def create_deeplink(body: DeepLinkBody, request: Request):
 
 @router.get("/r/{code}")
 async def redirect(code: str):
-    url = service.resolve_short_link(code)
+    url = await service.resolve_short_link(code)
     if not url:
         raise HTTPException(status_code=404, detail="Link not found")
     # Use JS redirect instead of 302 to bypass ngrok free-tier interstitial

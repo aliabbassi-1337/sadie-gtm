@@ -68,13 +68,20 @@ def create_direct_link(
 
 
 def _direct_resnexus(property_id: str, checkin: date, checkout: date,
-                     adults: int = 2, **kwargs) -> DeepLinkResult:
+                     adults: int = 2, rate_id: Optional[str] = None,
+                     **kwargs) -> DeepLinkResult:
     nights = (checkout - checkin).days
     startdate = checkin.strftime("%m/%d/%Y")
-    url = (
-        f"https://resnexus.com/resnexus/reservations/book/{property_id}"
-        f"?startdate={startdate}&nights={nights}&adults={adults}"
-    )
+    if rate_id:
+        url = (
+            f"https://resnexus.com/resnexus/reservations/book/{property_id}/package"
+            f"?id={rate_id}&startdate={startdate}&nights={nights}&adults={adults}"
+        )
+    else:
+        url = (
+            f"https://resnexus.com/resnexus/reservations/book/{property_id}"
+            f"?startdate={startdate}&nights={nights}&adults={adults}"
+        )
     return DeepLinkResult(
         url=url,
         engine_name="ResNexus",
@@ -168,7 +175,7 @@ DIRECT_LINK_BUILDERS = {
 # ---------------------------------------------------------------------------
 
 
-def create_proxy_session(
+async def create_proxy_session(
     engine: str,
     property_id: str,
     checkin: date,
@@ -194,7 +201,7 @@ def create_proxy_session(
             confidence=DeepLinkConfidence.NONE,
             dates_prefilled=False,
         )
-    return builder(
+    return await builder(
         property_id=property_id,
         checkin=checkin,
         checkout=checkout,
@@ -209,29 +216,39 @@ def create_proxy_session(
     )
 
 
-def _proxy_resnexus(
+async def _proxy_resnexus(
     property_id: str,
     checkin: date,
     checkout: date,
     adults: int = 2,
-    autobook: bool = True,
+    rate_id: Optional[str] = None,
     proxy_host: Optional[str] = None,
     **kwargs,
 ) -> DeepLinkResult:
-    """Create proxy session for ResNexus."""
+    """Create proxy session for ResNexus.
+
+    If rate_id is provided, sends user directly to that room/package page
+    via /package?id={rate_id}. Otherwise sends to room selection.
+    """
     nights = (checkout - checkin).days
     startdate = checkin.strftime("%m/%d/%Y")
 
-    checkout_path = (
-        f"/resnexus/reservations/book/{property_id}"
-        f"?startdate={startdate}&nights={nights}&adults={adults}"
-    )
+    if rate_id:
+        checkout_path = (
+            f"/resnexus/reservations/book/{property_id}/package"
+            f"?id={rate_id}&startdate={startdate}&nights={nights}&adults={adults}"
+        )
+    else:
+        checkout_path = (
+            f"/resnexus/reservations/book/{property_id}"
+            f"?startdate={startdate}&nights={nights}&adults={adults}"
+        )
 
-    session_id = repo.store_proxy_session(
+    session_id = await repo.store_proxy_session(
         cookies={},
         target_host="resnexus.com",
         checkout_path=checkout_path,
-        autobook=autobook,
+        autobook=not rate_id,  # server-side intercept when no room pre-selected
         autobook_engine="resnexus",
     )
 
@@ -247,7 +264,7 @@ def _proxy_resnexus(
     )
 
 
-def _proxy_cloudbeds(
+async def _proxy_cloudbeds(
     property_id: str,
     checkin: date,
     checkout: date,
@@ -267,7 +284,7 @@ def _proxy_cloudbeds(
     if currency:
         checkout_path += f"&currency={currency}"
 
-    session_id = repo.store_proxy_session(
+    session_id = await repo.store_proxy_session(
         cookies={},
         target_host="hotels.cloudbeds.com",
         checkout_path=checkout_path,
@@ -298,21 +315,21 @@ PROXY_BUILDERS = {
 # ---------------------------------------------------------------------------
 
 
-def create_short_link(url: str) -> str:
+async def create_short_link(url: str) -> str:
     """Create a short link code for a URL. Returns the code."""
     code = secrets.token_urlsafe(6)
-    repo.store_short_link(code, url)
+    await repo.store_short_link(code, url)
     return code
 
 
-def resolve_short_link(code: str) -> Optional[str]:
+async def resolve_short_link(code: str) -> Optional[str]:
     """Resolve a short link code to its URL."""
-    return repo.get_short_link(code)
+    return await repo.get_short_link(code)
 
 
-def get_proxy_session(session_id: str) -> Optional[dict]:
+async def get_proxy_session(session_id: str) -> Optional[dict]:
     """Retrieve a proxy session by ID."""
-    return repo.get_proxy_session(session_id)
+    return await repo.get_proxy_session(session_id)
 
 
 # ---------------------------------------------------------------------------

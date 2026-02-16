@@ -38,8 +38,8 @@ resource "aws_ecs_task_definition" "deeplink" {
   family                   = "${var.app_name}-deeplink"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
+  cpu                      = "512"
+  memory                   = "1024"
   execution_role_arn       = aws_iam_role.ecs_task_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
@@ -57,7 +57,9 @@ resource "aws_ecs_task_definition" "deeplink" {
     ]
 
     secrets = [
-      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" }
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "CF_WORKER_URL", valueFrom = "/${var.app_name}/cf-worker-url" },
+      { name = "CF_PROXY_KEY", valueFrom = "/${var.app_name}/cf-proxy-key" }
     ]
 
     logConfiguration = {
