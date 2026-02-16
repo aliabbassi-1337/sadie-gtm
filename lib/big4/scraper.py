@@ -74,6 +74,8 @@ def _state_code(state_name: str) -> str:
 def _normalize_for_match(name: str) -> str:
     """Normalize a park name for fuzzy matching (strip brand, suffix, punctuation)."""
     n = name.lower().strip()
+    # Normalize HTML entities and special chars before stripping
+    n = n.replace("&amp;", "&").replace("&#x27;", "'").replace("&#39;", "'")
     n = _BRAND_PREFIX_RE.sub("", n).strip()
     n = re.sub(
         r'\s*(holiday park|caravan park|tourist park|holiday village|holiday resort'
@@ -143,12 +145,13 @@ class Big4Scraper:
         logger.info(f"Algolia returned {len(hits)} parks")
         return hits
 
-    async def discover_urls(self) -> Dict[str, str]:
+    async def discover_urls(self) -> Dict[str, List[str]]:
         """Discover real park URLs from state listing pages.
 
-        Returns dict mapping normalized park name -> url_path.
+        Returns dict mapping normalized park name -> list of url_paths.
+        Multiple URLs per norm name handles same-city parks from different brands.
         """
-        url_map = {}
+        url_map: Dict[str, List[str]] = {}
 
         async def _discover_state(state_code: str):
             url = f"{BASE_URL}/caravan-parks/{state_code}"
@@ -166,19 +169,19 @@ class Big4Scraper:
                                  "accommodation", "local-attractions", "reviews",
                                  "whats-local", "facilities-and-activities"):
                     continue
-                # Extract link text for matching
                 name_pat = rf'href="{re.escape(url_path)}"[^>]*>([^<]+)<'
                 name_match = re.search(name_pat, html)
                 link_name = name_match.group(1).strip() if name_match else park_slug.replace("-", " ")
                 norm = _normalize_for_match(link_name)
-                url_map[norm] = url_path
+                url_map.setdefault(norm, []).append(url_path)
 
         tasks = [_discover_state(code) for code in STATE_CODES]
         await asyncio.gather(*tasks, return_exceptions=True)
-        logger.info(f"Discovered {len(url_map)} real park URLs from state pages")
+        total = sum(len(v) for v in url_map.values())
+        logger.info(f"Discovered {total} real park URLs from state pages")
         return url_map
 
-    def _hit_to_park(self, hit: Dict, url_map: Optional[Dict[str, str]] = None) -> Optional[Big4Park]:
+    def _hit_to_park(self, hit: Dict, url_map: Optional[Dict[str, List[str]]] = None) -> Optional[Big4Park]:
         """Convert an Algolia hit to a Big4Park model."""
         park_data = hit.get("Park", {})
         name = park_data.get("Name", "").strip()
@@ -193,7 +196,19 @@ class Big4Scraper:
 
         # Try to find the real URL from discovered state pages
         norm = _normalize_for_match(name)
-        url_path = (url_map or {}).get(norm)
+        candidates = (url_map or {}).get(norm, [])
+        url_path = None
+        if len(candidates) == 1:
+            url_path = candidates[0]
+        elif len(candidates) > 1:
+            # Multiple URLs for same normalized name - pick best match by slug similarity
+            url_slug = _url_slugify(name)
+            for c in candidates:
+                if url_slug in c:
+                    url_path = c
+                    break
+            if not url_path:
+                url_path = candidates[0]
         if not url_path:
             # Fallback: construct URL from Algolia data
             state_url = STATE_URL_SLUG.get(state, state_full.lower().replace(" ", "-")) if state else ""
@@ -329,14 +344,20 @@ class Big4Scraper:
         # Extract phone from tel: links (prefer local over 1800)
         phone_pattern = r'tel:/?/?([\d\s+()-]+)'
         phone_matches = re.findall(phone_pattern, text)
+        first_1800 = None
         for phone in phone_matches:
             phone = phone.strip()
-            if phone and not phone.startswith("1800"):
-                park.phone = phone
-                break
+            if not phone:
+                continue
+            if phone.startswith("1800"):
+                if not first_1800:
+                    first_1800 = phone
+                continue
+            park.phone = phone
+            break
 
         # Fallback: Australian local phone pattern
-        if not park.phone or park.phone.startswith("1800"):
+        if not park.phone:
             local_pattern = r'\(0[2-9]\)\s*\d{4}\s*\d{4}'
             local_matches = re.findall(local_pattern, text)
             for phone in local_matches:
@@ -345,11 +366,47 @@ class Big4Scraper:
                     park.phone = phone
                     break
 
+        # Last resort: use 1800 number
+        if not park.phone and first_1800:
+            park.phone = first_1800
+
+    def _enrich_from_json_ld(self, park: Big4Park, html: str) -> None:
+        """Extract phone/email/address from JSON-LD structured data in HTML."""
+        ld = self._extract_json_ld(html)
+        if not ld:
+            return
+        if not park.phone and ld.get("telephone"):
+            park.phone = ld["telephone"].strip()
+        if not park.email and ld.get("email"):
+            park.email = ld["email"].strip()
+        addr = ld.get("address", {})
+        if isinstance(addr, dict):
+            if not park.address and addr.get("streetAddress"):
+                park.address = addr["streetAddress"]
+            if not park.city and addr.get("addressLocality"):
+                park.city = addr["addressLocality"]
+            if not park.postcode and addr.get("postalCode"):
+                park.postcode = addr["postalCode"]
+
     async def _enrich_park_contact(self, park: Big4Park) -> None:
-        """Fetch the park's contact page and extract email/phone."""
+        """Fetch the park's contact page and extract email/phone.
+
+        Falls back to the main park page if the contact page 404s.
+        """
         html = await self._fetch(park.contact_url)
         if html:
             self._extract_contact_info(park, html)
+            self._enrich_from_json_ld(park, html)
+
+        # Fallback: try main park page if contact page failed or had no phone
+        if not park.phone:
+            main_url = f"{BASE_URL}{park.url_path}"
+            if main_url != park.contact_url:
+                main_html = await self._fetch(main_url)
+                if main_html:
+                    self._extract_contact_info(park, main_html)
+                    self._enrich_from_json_ld(park, main_html)
+
         if self.delay > 0:
             await asyncio.sleep(self.delay)
 
@@ -357,7 +414,7 @@ class Big4Scraper:
         """Fetch all parks from Algolia, optionally enrich with contact info."""
         # Fetch from Algolia + discover real URLs in parallel
         hits = await self.fetch_all_from_algolia()
-        url_map = await self.discover_urls() if self.enrich_contacts else {}
+        url_map: Dict[str, List[str]] = await self.discover_urls() if self.enrich_contacts else {}
 
         parks = []
         for hit in hits:
