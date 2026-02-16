@@ -253,7 +253,7 @@ matched AS (
 )
 INSERT INTO sadie_gtm.hotels (
     name, source, status, address, city, state, country,
-    phone_google, email, website, category, external_id, external_id_type, location
+    phone_website, email, website, category, external_id, external_id_type, location
 )
 SELECT
     i.name, 'big4_scrape', 1, i.address, i.city, i.state, 'Australia',
@@ -269,8 +269,8 @@ DO UPDATE SET
                       THEN COALESCE(EXCLUDED.address, sadie_gtm.hotels.address) ELSE sadie_gtm.hotels.address END,
     city       = CASE WHEN (sadie_gtm.hotels.city IS NULL OR sadie_gtm.hotels.city = '')
                       THEN COALESCE(EXCLUDED.city, sadie_gtm.hotels.city) ELSE sadie_gtm.hotels.city END,
-    phone_google = CASE WHEN (sadie_gtm.hotels.phone_google IS NULL OR sadie_gtm.hotels.phone_google = '')
-                        THEN COALESCE(EXCLUDED.phone_google, sadie_gtm.hotels.phone_google) ELSE sadie_gtm.hotels.phone_google END,
+    phone_website = CASE WHEN (sadie_gtm.hotels.phone_website IS NULL OR sadie_gtm.hotels.phone_website = '')
+                        THEN COALESCE(EXCLUDED.phone_website, sadie_gtm.hotels.phone_website) ELSE sadie_gtm.hotels.phone_website END,
     email      = CASE WHEN (sadie_gtm.hotels.email IS NULL OR sadie_gtm.hotels.email = '')
                       THEN COALESCE(EXCLUDED.email, sadie_gtm.hotels.email) ELSE sadie_gtm.hotels.email END,
     website    = CASE WHEN (sadie_gtm.hotels.website IS NULL OR sadie_gtm.hotels.website = '')
