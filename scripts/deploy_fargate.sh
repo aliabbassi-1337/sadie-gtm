@@ -22,7 +22,7 @@ aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --
 
 # 3. Build image
 echo "Building Docker image..."
-docker build -f Dockerfile.consumer -t $ECR_REPO:$IMAGE_TAG .
+docker build --platform linux/amd64 -f Dockerfile.consumer -t $ECR_REPO:$IMAGE_TAG .
 
 # 4. Tag and push
 echo "Pushing to ECR..."

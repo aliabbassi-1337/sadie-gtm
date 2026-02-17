@@ -44,6 +44,16 @@ variable "sqs_detection_queue_arn" {
   type        = string
 }
 
+variable "sqs_mews_enrichment_queue_arn" {
+  description = "ARN of the Mews enrichment SQS queue"
+  type        = string
+}
+
+variable "sqs_siteminder_enrichment_queue_arn" {
+  description = "ARN of the SiteMinder enrichment SQS queue"
+  type        = string
+}
+
 # VPC (use default for now)
 data "aws_vpc" "default" {
   default = true
@@ -124,7 +134,9 @@ resource "aws_iam_role_policy" "ecs_task_sqs" {
           var.sqs_rms_enrichment_queue_arn,
           var.sqs_rms_scan_queue_arn,
           var.sqs_cloudbeds_enrichment_queue_arn,
-          var.sqs_detection_queue_arn
+          var.sqs_detection_queue_arn,
+          var.sqs_mews_enrichment_queue_arn,
+          var.sqs_siteminder_enrichment_queue_arn
         ]
       },
       {
@@ -427,6 +439,308 @@ resource "aws_cloudwatch_metric_alarm" "cloudbeds_queue_low" {
   }
 
   alarm_actions = [aws_appautoscaling_policy.cloudbeds_consumer_scale_down.arn]
+}
+
+# =============================================================================
+# MEWS SQS CONSUMER (scales based on queue depth)
+# =============================================================================
+
+# ECS Task Definition - Mews SQS Consumer
+resource "aws_ecs_task_definition" "mews_consumer" {
+  family                   = "${var.app_name}-mews-consumer"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "consumer"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["uv", "run", "python", "-m", "workflows.enrich_mews_consumer", "--concurrency", "10"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "SQS_MEWS_ENRICHMENT_QUEUE_URL", valueFrom = "/${var.app_name}/sqs-mews-enrichment-queue-url" },
+      { name = "BRIGHTDATA_CUSTOMER_ID", valueFrom = "/${var.app_name}/brightdata-customer-id" },
+      { name = "BRIGHTDATA_DC_ZONE", valueFrom = "/${var.app_name}/brightdata-dc-zone" },
+      { name = "BRIGHTDATA_DC_PASSWORD", valueFrom = "/${var.app_name}/brightdata-dc-password" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "mews-consumer"
+      }
+    }
+  }])
+}
+
+# ECS Service - Mews Consumer (scales based on SQS)
+resource "aws_ecs_service" "mews_consumer" {
+  name            = "${var.app_name}-mews-consumer"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.mews_consumer.arn
+  desired_count   = 0  # Starts at 0, auto-scaling kicks in
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = data.aws_subnets.default.ids
+    security_groups  = [aws_security_group.fargate.id]
+    assign_public_ip = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]  # Managed by auto-scaling
+  }
+}
+
+# Auto-scaling for Mews Consumer
+resource "aws_appautoscaling_target" "mews_consumer" {
+  max_capacity       = 3
+  min_capacity       = 0
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.mews_consumer.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "mews_consumer_scale_up" {
+  name               = "${var.app_name}-mews-consumer-scale-up"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.mews_consumer.resource_id
+  scalable_dimension = aws_appautoscaling_target.mews_consumer.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.mews_consumer.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = 1
+      metric_interval_lower_bound = 0
+      metric_interval_upper_bound = 100
+    }
+    step_adjustment {
+      scaling_adjustment          = 2
+      metric_interval_lower_bound = 100
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "mews_consumer_scale_down" {
+  name               = "${var.app_name}-mews-consumer-scale-down"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.mews_consumer.resource_id
+  scalable_dimension = aws_appautoscaling_target.mews_consumer.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.mews_consumer.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 300
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = -1
+      metric_interval_upper_bound = 0
+    }
+  }
+}
+
+# CloudWatch Alarms for Mews queue scaling
+resource "aws_cloudwatch_metric_alarm" "mews_queue_high" {
+  alarm_name          = "${var.app_name}-mews-queue-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_description   = "Scale up when messages in Mews queue"
+
+  dimensions = {
+    QueueName = "sadie-gtm-mews-enrichment"
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.mews_consumer_scale_up.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "mews_queue_low" {
+  alarm_name          = "${var.app_name}-mews-queue-empty"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  evaluation_periods  = 5
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_description   = "Scale down when Mews queue is empty"
+
+  dimensions = {
+    QueueName = "sadie-gtm-mews-enrichment"
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.mews_consumer_scale_down.arn]
+}
+
+# =============================================================================
+# SITEMINDER SQS CONSUMER (scales based on queue depth)
+# =============================================================================
+
+# ECS Task Definition - SiteMinder SQS Consumer
+resource "aws_ecs_task_definition" "siteminder_consumer" {
+  family                   = "${var.app_name}-siteminder-consumer"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "512"
+  memory                   = "1024"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "consumer"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["uv", "run", "python", "-m", "workflows.enrich_siteminder_consumer", "--concurrency", "50", "--brightdata"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "SQS_SITEMINDER_ENRICHMENT_QUEUE_URL", valueFrom = "/${var.app_name}/sqs-siteminder-enrichment-queue-url" },
+      { name = "BRIGHTDATA_CUSTOMER_ID", valueFrom = "/${var.app_name}/brightdata-customer-id" },
+      { name = "BRIGHTDATA_DC_ZONE", valueFrom = "/${var.app_name}/brightdata-dc-zone" },
+      { name = "BRIGHTDATA_DC_PASSWORD", valueFrom = "/${var.app_name}/brightdata-dc-password" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "siteminder-consumer"
+      }
+    }
+  }])
+}
+
+# ECS Service - SiteMinder Consumer (scales based on SQS)
+resource "aws_ecs_service" "siteminder_consumer" {
+  name            = "${var.app_name}-siteminder-consumer"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.siteminder_consumer.arn
+  desired_count   = 0  # Starts at 0, auto-scaling kicks in
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = data.aws_subnets.default.ids
+    security_groups  = [aws_security_group.fargate.id]
+    assign_public_ip = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]  # Managed by auto-scaling
+  }
+}
+
+# Auto-scaling for SiteMinder Consumer
+resource "aws_appautoscaling_target" "siteminder_consumer" {
+  max_capacity       = 3
+  min_capacity       = 0
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.siteminder_consumer.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "siteminder_consumer_scale_up" {
+  name               = "${var.app_name}-siteminder-consumer-scale-up"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.siteminder_consumer.resource_id
+  scalable_dimension = aws_appautoscaling_target.siteminder_consumer.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.siteminder_consumer.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = 1
+      metric_interval_lower_bound = 0
+      metric_interval_upper_bound = 100
+    }
+    step_adjustment {
+      scaling_adjustment          = 2
+      metric_interval_lower_bound = 100
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "siteminder_consumer_scale_down" {
+  name               = "${var.app_name}-siteminder-consumer-scale-down"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.siteminder_consumer.resource_id
+  scalable_dimension = aws_appautoscaling_target.siteminder_consumer.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.siteminder_consumer.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 300
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      scaling_adjustment          = -1
+      metric_interval_upper_bound = 0
+    }
+  }
+}
+
+# CloudWatch Alarms for SiteMinder queue scaling
+resource "aws_cloudwatch_metric_alarm" "siteminder_queue_high" {
+  alarm_name          = "${var.app_name}-siteminder-queue-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_description   = "Scale up when messages in SiteMinder queue"
+
+  dimensions = {
+    QueueName = "sadie-gtm-siteminder-enrichment"
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.siteminder_consumer_scale_up.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "siteminder_queue_low" {
+  alarm_name          = "${var.app_name}-siteminder-queue-empty"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  evaluation_periods  = 5
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 0
+  alarm_description   = "Scale down when SiteMinder queue is empty"
+
+  dimensions = {
+    QueueName = "sadie-gtm-siteminder-enrichment"
+  }
+
+  alarm_actions = [aws_appautoscaling_policy.siteminder_consumer_scale_down.arn]
 }
 
 # =============================================================================
@@ -1454,6 +1768,201 @@ resource "aws_ecs_task_definition" "normalize_states" {
 # Note: normalize_states is run on-demand, not scheduled
 # To run manually: aws ecs run-task --cluster sadie-gtm-cluster --task-definition sadie-gtm-normalize-states ...
 
+# =============================================================================
+# NORMALIZE LOCATIONS (country codes, state abbreviations, special chars)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "normalize_locations" {
+  family                   = "${var.app_name}-normalize-locations"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "normalize"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["sh", "-c", "uv run python -m workflows.normalize_data && uv run python -m workflows.normalize"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "normalize-locations"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "normalize_locations" {
+  name                = "${var.app_name}-normalize-locations"
+  description         = "Normalize country codes, state abbreviations, and special chars every 6 hours"
+  schedule_expression = "rate(6 hours)"
+}
+
+resource "aws_cloudwatch_event_target" "normalize_locations" {
+  rule      = aws_cloudwatch_event_rule.normalize_locations.name
+  target_id = "normalize-locations"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.normalize_locations.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# =============================================================================
+# CHECK ACTIVE (property active status detection)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "check_active" {
+  family                   = "${var.app_name}-check-active"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "check-active"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["uv", "run", "python", "-m", "workflows.check_active", "--limit", "2000", "--concurrency", "200", "--rpm", "1000"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "AZURE_OPENAI_API_KEY", valueFrom = "/${var.app_name}/azure-openai-api-key" },
+      { name = "AZURE_OPENAI_ENDPOINT", valueFrom = "/${var.app_name}/azure-openai-endpoint" },
+      { name = "AZURE_OPENAI_DEPLOYMENT", valueFrom = "/${var.app_name}/azure-openai-deployment" },
+      { name = "SERPER_API_KEY", valueFrom = "/${var.app_name}/serper-api-key" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "check-active"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "check_active" {
+  name                = "${var.app_name}-check-active"
+  description         = "Check hotel active status every 12 hours"
+  schedule_expression = "rate(12 hours)"
+  is_enabled          = false
+}
+
+resource "aws_cloudwatch_event_target" "check_active" {
+  rule      = aws_cloudwatch_event_rule.check_active.name
+  target_id = "check-active"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.check_active.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
+# =============================================================================
+# RMS AVAILABILITY (booking availability enrichment)
+# =============================================================================
+
+resource "aws_ecs_task_definition" "rms_availability" {
+  family                   = "${var.app_name}-rms-availability"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "rms-availability"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["uv", "run", "python", "-m", "workflows.rms_availability", "--limit", "4000", "--concurrency", "30"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "rms-availability"
+      }
+    }
+  }])
+}
+
+resource "aws_cloudwatch_event_rule" "rms_availability" {
+  name                = "${var.app_name}-rms-availability"
+  description         = "Check RMS hotel availability every 7 days"
+  schedule_expression = "rate(7 days)"
+  is_enabled          = false
+}
+
+resource "aws_cloudwatch_event_target" "rms_availability" {
+  rule      = aws_cloudwatch_event_rule.rms_availability.name
+  target_id = "rms-availability"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.eventbridge_ecs.arn
+
+  ecs_target {
+    task_count          = 1
+    task_definition_arn = aws_ecs_task_definition.rms_availability.arn
+    launch_type         = "FARGATE"
+
+    network_configuration {
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.fargate.id]
+      assign_public_ip = true
+    }
+  }
+}
+
 # Outputs
 output "cluster_name" {
   value = aws_ecs_cluster.main.name
@@ -1473,6 +1982,14 @@ output "cloudbeds_consumer_service_name" {
 
 output "detection_consumer_service_name" {
   value = aws_ecs_service.detection_consumer.name
+}
+
+output "mews_consumer_service_name" {
+  value = aws_ecs_service.mews_consumer.name
+}
+
+output "siteminder_consumer_service_name" {
+  value = aws_ecs_service.siteminder_consumer.name
 }
 
 output "scheduled_tasks" {
@@ -1495,6 +2012,15 @@ output "scheduled_tasks" {
     # Exports
     export_states = aws_cloudwatch_event_rule.export_states.name
     export_crawl  = aws_cloudwatch_event_rule.export_crawl.name
+
+    # Normalization
+    normalize_locations = aws_cloudwatch_event_rule.normalize_locations.name
+
+    # Active status
+    check_active = aws_cloudwatch_event_rule.check_active.name
+
+    # Availability
+    rms_availability = aws_cloudwatch_event_rule.rms_availability.name
   }
 }
 

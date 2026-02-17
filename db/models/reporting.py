@@ -41,6 +41,10 @@ class HotelLead(BaseModel):
     nearest_customer_name: Optional[str] = None
     nearest_customer_distance_km: Optional[Decimal] = None
 
+    # Active status
+    is_active: Optional[bool] = None
+    has_availability: Optional[bool] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 

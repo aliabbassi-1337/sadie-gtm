@@ -523,15 +523,17 @@ class Service(IService):
             ("Booking URL", lambda l: l.booking_url or ""),
             ("Booking Engine", lambda l: l.booking_engine_name or ""),
             ("Category", lambda l: l.category or ""),
+            ("Active", lambda l: "Yes" if l.is_active is True else ("No" if l.is_active is False else "")),
+            ("Has Availability", lambda l: "Yes" if l.has_availability is True else ("No" if l.has_availability is False else "")),
         ]
-        
+
         # Filter out columns where ALL values are empty
         columns = []
         for header, extractor in all_columns:
             has_data = any(extractor(lead) for lead in leads)
             if has_data:
                 columns.append((header, extractor))
-        
+
         headers = [c[0] for c in columns]
         extractors = [c[1] for c in columns]
 
@@ -637,6 +639,8 @@ class Service(IService):
             ("Booking Engine", lambda l: l.booking_engine_name or ""),
             ("Category", lambda l: l.category or ""),
             ("Proximity", lambda l: self._format_proximity(l)),
+            ("Active", lambda l: "Yes" if l.is_active is True else ("No" if l.is_active is False else "")),
+            ("Has Availability", lambda l: "Yes" if l.has_availability is True else ("No" if l.has_availability is False else "")),
         ]
 
         # Filter out columns where ALL values are empty
@@ -891,6 +895,26 @@ class Service(IService):
     async def get_launched_count(self) -> int:
         """Count hotels that have been launched."""
         return await repo.get_launched_count()
+
+    async def get_takedown_count(self) -> int:
+        """Count launched hotels without an active booking engine."""
+        return await repo.get_takedown_count()
+
+    async def get_takedown_candidates(self, limit: int = 100) -> list:
+        """Get launched hotels without an active booking engine."""
+        return await repo.get_takedown_candidates(limit=limit)
+
+    async def takedown_hotels_without_engine(self, limit: int = 10000) -> int:
+        """Take down launched hotels without an active booking engine.
+
+        Sets status back to 0 (pending). Returns count of taken-down hotels.
+        """
+        taken_down_ids = await repo.takedown_hotels_without_engine(limit=limit)
+        if taken_down_ids:
+            logger.info(f"Taken down {len(taken_down_ids)} hotels without active engine")
+        else:
+            logger.info("No hotels to take down")
+        return len(taken_down_ids)
 
     # =========================================================================
     # PIPELINE STATUS METHODS

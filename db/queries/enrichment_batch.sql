@@ -177,3 +177,114 @@ WHERE hotel_id = ANY($1::integer[]);
 UPDATE sadie_gtm.hotel_booking_engines
 SET last_enrichment_attempt = NOW()
 WHERE hotel_id = ANY($1::integer[]);
+
+-- BATCH_BIG4_UPSERT
+-- Params: ($1::text[] names, $2::text[] slugs, $3::text[] phones, $4::text[] emails,
+--          $5::text[] websites, $6::text[] addresses, $7::text[] cities,
+--          $8::text[] states, $9::text[] postcodes, $10::float[] lats, $11::float[] lons)
+--
+-- Two-phase upsert for BIG4 parks with cross-source dedup:
+--   Phase 1 (CTE "matched"): UPDATE existing AU hotels whose normalized name+state
+--           matches an incoming park. Fill-empty-only — never overwrites.
+--   Phase 2 (final INSERT): Insert parks that didn't match any existing hotel.
+--           On same-source conflict (external_id_type=big4), also fill-empty-only.
+--
+-- Name normalization: lowercase, strip common brand prefixes and property type
+-- suffixes so "BIG4 Sydney Lakeside Holiday Park" matches "Sydney Lakeside".
+WITH incoming AS (
+    SELECT *,
+        regexp_replace(
+            regexp_replace(
+                lower(trim(name)),
+                '^(big4 |big 4 |nrma |ingenia holidays |tasman holiday parks - |tasman holiday parks |breeze holiday parks - |holiday haven )',
+                ''
+            ),
+            ' (holiday park|caravan park|tourist park|holiday village|holiday resort|camping ground|glamping retreat|lifestyle park)$',
+            ''
+        ) AS norm_name
+    FROM unnest(
+        $1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
+        $6::text[], $7::text[], $8::text[], $9::text[], $10::float[], $11::float[]
+    ) AS t(name, slug, phone, email, website, address, city, state, postcode, lat, lon)
+),
+existing_norm AS (
+    SELECT id,
+        regexp_replace(
+            regexp_replace(
+                lower(trim(h.name)),
+                '^(big4 |big 4 |nrma |ingenia holidays |tasman holiday parks - |tasman holiday parks |breeze holiday parks - |holiday haven )',
+                ''
+            ),
+            ' (holiday park|caravan park|tourist park|holiday village|holiday resort|camping ground|glamping retreat|lifestyle park)$',
+            ''
+        ) AS norm_name,
+        upper(h.state) AS norm_state
+    FROM sadie_gtm.hotels h
+    WHERE h.country IN ('Australia', 'AU') AND h.status >= 0
+      AND (h.external_id_type IS NULL OR h.external_id_type != 'big4')
+),
+deduped_match AS (
+    SELECT DISTINCT ON (e.id)
+        e.id AS existing_id, i.slug, i.phone, i.email, i.website,
+        i.address, i.city, i.lat, i.lon
+    FROM incoming i
+    JOIN existing_norm e ON e.norm_name = i.norm_name AND e.norm_state = upper(i.state)
+    ORDER BY e.id, i.slug
+),
+matched AS (
+    UPDATE sadie_gtm.hotels h
+    SET
+        email     = CASE WHEN (h.email IS NULL OR h.email = '')             AND d.email IS NOT NULL AND d.email != ''   THEN d.email     ELSE h.email END,
+        phone_website = CASE WHEN (h.phone_website IS NULL OR h.phone_website = '') AND d.phone IS NOT NULL AND d.phone != '' THEN d.phone     ELSE h.phone_website END,
+        website   = CASE WHEN (h.website IS NULL OR h.website = '')         AND d.website IS NOT NULL AND d.website != '' THEN d.website   ELSE h.website END,
+        address   = CASE WHEN (h.address IS NULL OR h.address = '')         AND d.address IS NOT NULL AND d.address != '' THEN d.address   ELSE h.address END,
+        city      = CASE WHEN (h.city IS NULL OR h.city = '')               AND d.city IS NOT NULL AND d.city != ''     THEN d.city      ELSE h.city END,
+        location  = CASE WHEN h.location IS NULL AND d.lat IS NOT NULL AND d.lon IS NOT NULL
+                         THEN ST_SetSRID(ST_MakePoint(d.lon, d.lat), 4326)::geography
+                         ELSE h.location END,
+        category = COALESCE(h.category, 'holiday_park'),
+        source = CASE WHEN h.source IS NULL OR h.source = '' THEN 'big4_scrape'
+                      WHEN h.source NOT LIKE '%::big4' THEN h.source || '::big4'
+                      ELSE h.source END,
+        updated_at = NOW()
+    FROM deduped_match d
+    WHERE h.id = d.existing_id
+    RETURNING d.slug
+)
+INSERT INTO sadie_gtm.hotels (
+    name, source, status, address, city, state, country,
+    phone_website, email, website, category, external_id, external_id_type, location
+)
+SELECT
+    i.name, 'big4_scrape', 1, i.address, i.city, i.state, 'Australia',
+    i.phone, i.email, i.website, 'holiday_park', 'big4_' || i.slug, 'big4',
+    CASE WHEN i.lat IS NOT NULL AND i.lon IS NOT NULL
+         THEN ST_SetSRID(ST_MakePoint(i.lon, i.lat), 4326)::geography
+         ELSE NULL END
+FROM incoming i
+WHERE i.slug NOT IN (SELECT slug FROM matched)
+ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL
+DO UPDATE SET
+    address    = CASE WHEN (sadie_gtm.hotels.address IS NULL OR sadie_gtm.hotels.address = '')
+                      THEN COALESCE(EXCLUDED.address, sadie_gtm.hotels.address) ELSE sadie_gtm.hotels.address END,
+    city       = CASE WHEN (sadie_gtm.hotels.city IS NULL OR sadie_gtm.hotels.city = '')
+                      THEN COALESCE(EXCLUDED.city, sadie_gtm.hotels.city) ELSE sadie_gtm.hotels.city END,
+    phone_website = CASE WHEN (sadie_gtm.hotels.phone_website IS NULL OR sadie_gtm.hotels.phone_website = '')
+                        THEN COALESCE(EXCLUDED.phone_website, sadie_gtm.hotels.phone_website) ELSE sadie_gtm.hotels.phone_website END,
+    email      = CASE WHEN (sadie_gtm.hotels.email IS NULL OR sadie_gtm.hotels.email = '')
+                      THEN COALESCE(EXCLUDED.email, sadie_gtm.hotels.email) ELSE sadie_gtm.hotels.email END,
+    website    = CASE WHEN (sadie_gtm.hotels.website IS NULL OR sadie_gtm.hotels.website = '')
+                      THEN COALESCE(EXCLUDED.website, sadie_gtm.hotels.website) ELSE sadie_gtm.hotels.website END,
+    category   = COALESCE(sadie_gtm.hotels.category, EXCLUDED.category),
+    location   = COALESCE(sadie_gtm.hotels.location, EXCLUDED.location);
+
+-- BATCH_BIG4_UPDATE_WEBSITES
+-- Params: ($1::int[] hotel_ids, $2::text[] websites)
+-- Overwrite website for BIG4 parks (replaces big4.com.au placeholder URLs).
+UPDATE sadie_gtm.hotels h
+SET website = v.website, updated_at = NOW()
+FROM (
+    SELECT * FROM unnest($1::integer[], $2::text[]) AS t(id, website)
+) v
+WHERE h.id = v.id
+  AND v.website IS NOT NULL AND v.website != '';

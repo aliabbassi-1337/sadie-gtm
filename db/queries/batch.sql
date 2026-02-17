@@ -52,12 +52,12 @@ WHERE NOT EXISTS (
 -- Full insert with all scraped data including email, phone, address, and location
 WITH new_hotel AS (
     INSERT INTO sadie_gtm.hotels (name, source, external_id, external_id_type, email, phone_website, address, city, state, country, location, status)
-    VALUES ($1, $2, $3, $4, $9, $10, $11, $12, $13, $14, 
-            CASE WHEN $15::float IS NOT NULL AND $16::float IS NOT NULL 
-                 THEN ST_SetSRID(ST_MakePoint($16::float, $15::float), 4326) 
+    VALUES ($1, $2, $3, $4, $9, $10, $11, $12, $13, $14,
+            CASE WHEN $15::float IS NOT NULL AND $16::float IS NOT NULL
+                 THEN ST_SetSRID(ST_MakePoint($16::float, $15::float), 4326)
                  ELSE NULL END,
             1)
-    ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL 
+    ON CONFLICT (external_id_type, external_id) WHERE external_id IS NOT NULL
     DO UPDATE SET
         name = COALESCE(EXCLUDED.name, sadie_gtm.hotels.name),
         email = COALESCE(EXCLUDED.email, sadie_gtm.hotels.email),
