@@ -24,6 +24,7 @@ from services.enrichment.owner_models import (
     DecisionMaker, DomainIntel, OwnerEnrichmentResult,
     LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
     LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
+    LAYER_GOV_DATA,
 )
 from lib.owner_discovery.rdap_client import rdap_to_decision_maker
 from lib.owner_discovery.whois_history import whois_lookup, whois_to_decision_maker
@@ -279,6 +280,54 @@ async def _run_email_verify(
     )
 
 
+async def _run_gov_data(
+    tag: str, hotel_id: int, name: str,
+    city: Optional[str], state: Optional[str],
+) -> List[DecisionMaker]:
+    """Layer 7: Government data lookup (DBPR, Texas tax, etc.)."""
+    from services.enrichment import repo
+
+    t0 = time.monotonic()
+    if not city or not state:
+        logger.info(f"{tag} [7 GOV] Skipped — no city/state")
+        return []
+
+    logger.debug(f"{tag} [7 GOV] Querying gov records for {name!r} in {city}, {state}")
+    matches = await repo.find_gov_matches(hotel_id, name, city, state)
+    elapsed = time.monotonic() - t0
+
+    if not matches:
+        logger.info(f"{tag} [7 GOV] No matching gov records [{elapsed:.1f}s]")
+        return []
+
+    dms = []
+    for m in matches:
+        gov_name = m["name"]
+        phone = m.get("phone_google") or m.get("phone_website")
+        email = m.get("email")
+        source_type = m.get("source", "gov_registry")
+        ext_id = m.get("external_id", "")
+
+        # Build a DecisionMaker from the gov record
+        dm = DecisionMaker(
+            full_name=gov_name,
+            title="Registered Business Entity",
+            email=email,
+            phone=phone,
+            sources=[f"gov_{source_type}"],
+            confidence=0.9,
+            raw_source_url=f"gov://{source_type}/{ext_id}" if ext_id else None,
+        )
+        dms.append(dm)
+        logger.info(
+            f"{tag} [7 GOV] HIT: {gov_name} | {email} | "
+            f"phone={phone} (src={source_type}, id={ext_id})"
+        )
+
+    logger.info(f"{tag} [7 GOV] {len(dms)} gov matches [{elapsed:.1f}s]")
+    return dms
+
+
 def _deduplicate(dms: List[DecisionMaker], tag: str) -> List[DecisionMaker]:
     """Deduplicate decision makers by (name, title)."""
     seen = set()
@@ -330,7 +379,7 @@ async def enrich_single_hotel(
         logger.warning(f"{tag} Skipped — no domain extracted from website: {website!r}")
         return result
 
-    logger.info(f"{tag} Starting enrichment waterfall | hotel={name!r} layers=0b{layers:06b}")
+    logger.info(f"{tag} Starting enrichment waterfall | hotel={name!r} layers=0b{layers:07b}")
     domain_intel = DomainIntel(domain=domain)
 
     try:
@@ -368,6 +417,12 @@ async def enrich_single_hotel(
             result.decision_makers.extend(dms)
             result.layers_completed |= LAYER_REVIEWS
 
+        # Layer 7: Government data (permits, licenses, tax records)
+        if layers & LAYER_GOV_DATA:
+            dms = await _run_gov_data(tag, hotel_id, name, city, state)
+            result.decision_makers.extend(dms)
+            result.layers_completed |= LAYER_GOV_DATA
+
         # Layer 6: Email Verification
         if layers & LAYER_EMAIL_VERIFY:
             candidates = [
@@ -387,7 +442,7 @@ async def enrich_single_hotel(
     total_elapsed = time.monotonic() - t_start
     logger.info(
         f"{tag} Done: {len(result.decision_makers)} contacts | "
-        f"layers=0b{result.layers_completed:06b} | {total_elapsed:.1f}s"
+        f"layers=0b{result.layers_completed:07b} | {total_elapsed:.1f}s"
     )
 
     return result
@@ -411,7 +466,7 @@ async def enrich_batch(
     t_batch_start = time.monotonic()
     logger.info(
         f"Batch starting: {len(hotels)} hotels | "
-        f"concurrency={concurrency} | layers=0b{layers:06b}"
+        f"concurrency={concurrency} | layers=0b{layers:07b}"
     )
 
     sem = asyncio.Semaphore(concurrency)

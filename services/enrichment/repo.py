@@ -1776,3 +1776,14 @@ async def get_decision_makers_for_hotel(hotel_id: int) -> List[Dict]:
             conn, hotel_id=hotel_id,
         )
         return [dict(r) for r in rows]
+
+
+async def find_gov_matches(hotel_id: int, name: str, city: str, state: str) -> List[Dict]:
+    """Find government-sourced hotel records matching by city+state and name."""
+    if not city or not state or not name:
+        return []
+    async with get_conn() as conn:
+        rows = await queries.find_gov_matches(
+            conn, hotel_id=hotel_id, name=name, city=city, state=state,
+        )
+        return [dict(r) for r in rows]
