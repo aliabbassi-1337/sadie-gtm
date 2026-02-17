@@ -1696,7 +1696,7 @@ async def insert_decision_maker(hotel_id: int, dm: DecisionMaker) -> Optional[in
             confidence=dm.confidence,
             raw_source_url=dm.raw_source_url,
         )
-        return row["id"] if row else None
+        return row if row else None
 
 
 async def batch_insert_decision_makers(
