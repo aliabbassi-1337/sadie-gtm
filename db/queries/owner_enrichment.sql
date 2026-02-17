@@ -100,3 +100,23 @@ SELECT id, full_name, title, email, email_verified, phone,
 FROM sadie_gtm.hotel_decision_makers
 WHERE hotel_id = :hotel_id
 ORDER BY confidence DESC;
+
+-- name: find_gov_matches
+-- Find government-sourced hotel records matching a hotel by city+state and name.
+-- Uses case-insensitive substring matching on name.
+SELECT id, name, email, phone_google, phone_website, address, source, external_id, external_id_type
+FROM sadie_gtm.hotels
+WHERE source IN (
+    'dbpr_license', 'dbpr_motel', 'texas_hot', 'sf_assessor',
+    'la_county', 'md_sdat_cama', 'nyc_dof', 'hawaii_vpi',
+    'chicago_license', 'nsw_liquor'
+)
+  AND LOWER(city) = LOWER(:city)
+  AND LOWER(state) = LOWER(:state)
+  AND id != :hotel_id
+  AND (
+      LOWER(name) = LOWER(:name)
+      OR LOWER(name) LIKE '%' || LOWER(:name) || '%'
+      OR LOWER(:name) LIKE '%' || LOWER(name) || '%'
+  )
+LIMIT 5;

@@ -3808,6 +3808,7 @@ class Service(IService):
         from services.enrichment.owner_models import (
             LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
             LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
+            LAYER_GOV_DATA,
         )
 
         layer_map = {
@@ -3816,6 +3817,7 @@ class Service(IService):
             "dns": LAYER_DNS,
             "website": LAYER_WEBSITE,
             "reviews": LAYER_REVIEWS,
+            "gov-data": LAYER_GOV_DATA,
             "email-verify": LAYER_EMAIL_VERIFY,
         }
 
