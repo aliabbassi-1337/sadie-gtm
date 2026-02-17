@@ -313,37 +313,61 @@ async def scrape_hotel_website(
     all_results = []
     all_personal_emails = []
     pages_text = []
+    pages_fetched = 0
+    pages_skipped = 0
 
     # Fetch about/team/contact pages
     for path in OWNER_PAGE_PATHS:
         url = urljoin(base_url, path)
         html = await _fetch_page(client, url)
         if not html:
+            pages_skipped += 1
             continue
+        pages_fetched += 1
 
         # Try JSON-LD extraction
         jsonld_results = extract_json_ld_persons(html)
+        if jsonld_results:
+            logger.debug(f"Website {domain}{path}: {len(jsonld_results)} JSON-LD persons")
         all_results.extend(jsonld_results)
 
         # Try regex extraction
         text = _html_to_text(html)
         regex_results = extract_name_title_regex(text)
+        if regex_results:
+            logger.debug(f"Website {domain}{path}: {len(regex_results)} regex matches")
         all_results.extend(regex_results)
 
         # Collect personal emails
         personal_emails = extract_emails_from_page(html, domain)
+        if personal_emails:
+            logger.debug(f"Website {domain}{path}: emails found: {personal_emails}")
         all_personal_emails.extend(personal_emails)
 
         # Save text for LLM fallback
         if text and len(text) > 100:
             pages_text.append(text)
 
+    logger.debug(
+        f"Website {domain}: fetched {pages_fetched}/{pages_fetched + pages_skipped} pages | "
+        f"{len(all_results)} contacts pre-LLM | {len(all_personal_emails)} emails"
+    )
+
     # If no results from structured/regex, try LLM on combined text
     if not all_results and pages_text:
-        combined_text = "\n\n".join(pages_text[:3])  # Limit to 3 pages
-        llm_result = await _llm_extract_owner(client, combined_text, hotel_name)
-        if llm_result:
-            all_results.append(llm_result)
+        if AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
+            logger.debug(f"Website {domain}: no regex/JSON-LD hits, trying LLM extraction on {len(pages_text)} pages")
+            combined_text = "\n\n".join(pages_text[:3])  # Limit to 3 pages
+            llm_result = await _llm_extract_owner(client, combined_text, hotel_name)
+            if llm_result:
+                logger.debug(f"Website {domain}: LLM found {llm_result.full_name} | {llm_result.title}")
+                all_results.append(llm_result)
+            else:
+                logger.debug(f"Website {domain}: LLM extraction returned nothing")
+        else:
+            logger.debug(f"Website {domain}: LLM skipped — no AZURE_OPENAI_API_KEY set")
+    elif not all_results and not pages_text:
+        logger.debug(f"Website {domain}: no usable page text found for LLM")
 
     # Attach personal emails to results that don't have one
     if all_personal_emails:
@@ -387,6 +411,7 @@ async def extract_from_google_reviews(
     if not serper_api_key:
         serper_api_key = os.getenv("SERPER_API_KEY")
     if not serper_api_key:
+        logger.debug(f"Reviews {hotel_name!r}: skipped — no SERPER_API_KEY set")
         return []
 
     # Search for the hotel's Google reviews showing owner responses
@@ -401,12 +426,15 @@ async def extract_from_google_reviews(
             timeout=15.0,
         )
         if resp.status_code != 200:
+            logger.debug(f"Reviews {hotel_name!r}: Serper returned HTTP {resp.status_code}")
             return []
 
         data = resp.json()
+        organic = data.get("organic", [])
+        logger.debug(f"Reviews {hotel_name!r}: Serper returned {len(organic)} organic results")
         results = []
 
-        for item in data.get("organic", []):
+        for item in organic:
             snippet = item.get("snippet", "")
             # Look for "Response from [Name], [Title]" patterns
             for match in re.finditer(
@@ -420,7 +448,7 @@ async def extract_from_google_reviews(
                     full_name=name,
                     title=title,
                     source="review_response",
-                    confidence=0.85,  # Review responses are very reliable
+                    confidence=0.85,
                     raw_source_url=item.get("link"),
                 ))
 
@@ -433,10 +461,15 @@ async def extract_from_google_reviews(
                 seen.add(key)
                 unique.append(dm)
 
+        if unique:
+            logger.debug(
+                f"Reviews {hotel_name!r}: found {len(unique)} owners from review responses"
+            )
+
         return unique
 
     except Exception as e:
-        logger.debug(f"Google review extraction failed for {hotel_name}: {e}")
+        logger.debug(f"Reviews {hotel_name!r}: Serper request failed — {e}")
         return []
 
 

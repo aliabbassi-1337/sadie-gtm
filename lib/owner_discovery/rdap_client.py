@@ -114,17 +114,19 @@ async def rdap_lookup(
     try:
         resp = await client.get(url, timeout=15.0, follow_redirects=True)
         if resp.status_code == 404:
+            logger.debug(f"RDAP {domain}: 404 — domain not in RDAP")
             return DomainIntel(domain=domain, whois_source="rdap")
         if resp.status_code == 429:
-            logger.warning(f"RDAP rate limited for {domain}, backing off")
+            logger.warning(f"RDAP {domain}: 429 rate limited, backing off 10s")
             await asyncio.sleep(10)
             return None
         if resp.status_code != 200:
+            logger.debug(f"RDAP {domain}: HTTP {resp.status_code}")
             return None
 
         data = resp.json()
     except Exception as e:
-        logger.debug(f"RDAP lookup failed for {domain}: {e}")
+        logger.debug(f"RDAP {domain}: request failed — {e}")
         return None
 
     intel = DomainIntel(domain=domain, whois_source="rdap")

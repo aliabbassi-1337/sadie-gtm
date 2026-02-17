@@ -61,7 +61,8 @@ def get_email_provider(domain: str) -> tuple[Optional[str], list[str]]:
         import dns.resolver
         mx_records = resolver.resolve(domain, "MX")
         mx_hosts = [str(r.exchange).lower().rstrip(".") for r in mx_records]
-    except Exception:
+    except Exception as e:
+        logger.debug(f"DNS MX lookup failed for {domain}: {e}")
         return None, []
 
     mx_str = " ".join(mx_hosts)

@@ -152,13 +152,20 @@ async def discover_emails(
     candidates = list(dict.fromkeys(candidates))  # Deduplicate preserving order
     results = []
 
+    logger.debug(
+        f"Email discovery for {domain}: {len(candidates)} candidates | "
+        f"provider={email_provider} | name={full_name}"
+    )
+
     # Determine verification method based on email provider
     if email_provider == "microsoft_365":
         # Use O365 autodiscover (most reliable, unthrottled)
+        logger.debug(f"Email {domain}: using O365 GetCredentialType verification")
         async with httpx.AsyncClient() as client:
             for email in candidates:
                 status = await verify_o365_email(client, email)
                 if status == "exists":
+                    logger.debug(f"Email {domain}: O365 verified {email}")
                     results.append({"email": email, "verified": True, "method": "o365_autodiscover"})
                 elif status == "not_found":
                     continue
@@ -172,20 +179,25 @@ async def discover_emails(
         if mx_host:
             is_catch_all = await _detect_catch_all(mx_host, domain)
             if is_catch_all:
-                # Catch-all: all emails "exist", verification is useless
-                # Just return role-based emails as unverified
-                for email in candidates[:5]:  # Limit to top 5
+                logger.debug(f"Email {domain}: catch-all domain (mx={mx_host}), skipping SMTP verification")
+                for email in candidates[:5]:
                     results.append({"email": email, "verified": False, "method": "catch_all_domain"})
             else:
+                logger.debug(f"Email {domain}: SMTP verification via {mx_host}")
                 for email in candidates:
                     status = await _smtp_verify(email, mx_host)
                     if status == "exists":
+                        logger.debug(f"Email {domain}: SMTP verified {email}")
                         results.append({"email": email, "verified": True, "method": "smtp_rcpt"})
         else:
-            # No MX record, can't verify
+            logger.debug(f"Email {domain}: no MX record, can't verify")
             for email in candidates[:3]:
                 results.append({"email": email, "verified": False, "method": "no_mx"})
 
+    logger.debug(
+        f"Email discovery for {domain}: {len(results)} results "
+        f"({sum(1 for r in results if r['verified'])} verified)"
+    )
     return results
 
 

@@ -13,6 +13,7 @@ if high-confidence results found. Caches domain intel for reuse.
 """
 
 import asyncio
+import time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -71,35 +72,64 @@ async def enrich_single_hotel(
     state = hotel.get("state")
     domain = _extract_domain(website)
 
+    tag = f"[{hotel_id}|{domain or 'no-domain'}]"
+    t_start = time.monotonic()
+
     result = OwnerEnrichmentResult(hotel_id=hotel_id, domain=domain)
 
     if not domain:
         result.error = "no_domain"
+        logger.warning(f"{tag} Skipped — no domain extracted from website: {website!r}")
         return result
 
+    logger.info(f"{tag} Starting enrichment waterfall | hotel={name!r} layers=0b{layers:06b}")
     domain_intel = DomainIntel(domain=domain)
 
     try:
         # === Layer 1: RDAP ===
         if layers & LAYER_RDAP:
+            t0 = time.monotonic()
+            logger.debug(f"{tag} [1/6 RDAP] Querying rdap.org for {domain}")
             dm, rdap_intel = await rdap_to_decision_maker(client, domain)
+            elapsed = time.monotonic() - t0
             if rdap_intel:
                 domain_intel = rdap_intel
                 await repo.cache_domain_intel(rdap_intel)
-            if dm:
-                result.decision_makers.append(dm)
-                logger.info(f"[{hotel_id}] RDAP hit: {dm.full_name}")
+                if rdap_intel.is_privacy_protected:
+                    logger.info(
+                        f"{tag} [1/6 RDAP] Privacy-protected "
+                        f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
+                    )
+                elif dm:
+                    result.decision_makers.append(dm)
+                    logger.info(
+                        f"{tag} [1/6 RDAP] HIT: {dm.full_name} | {dm.email} "
+                        f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
+                    )
+                else:
+                    logger.info(
+                        f"{tag} [1/6 RDAP] No registrant data "
+                        f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
+                    )
+            else:
+                logger.info(f"{tag} [1/6 RDAP] No response [{elapsed:.1f}s]")
             result.layers_completed |= LAYER_RDAP
 
         # === Layer 2: WHOIS (live python-whois + Wayback fallback) ===
         if layers & LAYER_WHOIS_HISTORY:
-            # Only run if RDAP didn't find registrant data
-            if not result.found_any or domain_intel.is_privacy_protected:
+            t0 = time.monotonic()
+            if result.found_any and not domain_intel.is_privacy_protected:
+                logger.info(
+                    f"{tag} [2/6 WHOIS] Skipped — RDAP already found registrant"
+                )
+            else:
+                logger.debug(
+                    f"{tag} [2/6 WHOIS] Running live WHOIS + Wayback fallback for {domain}"
+                )
                 whois_intel = await whois_lookup(client, domain)
-                if whois_intel:
-                    # Cache the WHOIS data
+                elapsed = time.monotonic() - t0
+                if whois_intel and not whois_intel.is_privacy_protected:
                     await repo.cache_domain_intel(whois_intel)
-                    # Merge into domain_intel
                     if not domain_intel.registrant_name:
                         domain_intel.registrant_name = whois_intel.registrant_name
                     if not domain_intel.registrant_org:
@@ -108,19 +138,34 @@ async def enrich_single_hotel(
                         domain_intel.registrant_email = whois_intel.registrant_email
                     if not domain_intel.registrar:
                         domain_intel.registrar = whois_intel.registrar
-                    # Convert to decision maker
                     dm = whois_to_decision_maker(whois_intel)
                     if dm:
                         result.decision_makers.append(dm)
                         logger.info(
-                            f"[{hotel_id}] WHOIS hit ({whois_intel.whois_source}): "
-                            f"{dm.full_name} | {dm.email}"
+                            f"{tag} [2/6 WHOIS] HIT via {whois_intel.whois_source}: "
+                            f"{dm.full_name} | {dm.email} [{elapsed:.1f}s]"
                         )
+                    else:
+                        logger.info(
+                            f"{tag} [2/6 WHOIS] Data found but no usable contact "
+                            f"(src={whois_intel.whois_source}) [{elapsed:.1f}s]"
+                        )
+                elif whois_intel:
+                    await repo.cache_domain_intel(whois_intel)
+                    logger.info(
+                        f"{tag} [2/6 WHOIS] Privacy-protected "
+                        f"(registrar={whois_intel.registrar}) [{elapsed:.1f}s]"
+                    )
+                else:
+                    logger.info(f"{tag} [2/6 WHOIS] No data returned [{elapsed:.1f}s]")
             result.layers_completed |= LAYER_WHOIS_HISTORY
 
         # === Layer 3: DNS Intelligence ===
         if layers & LAYER_DNS:
+            t0 = time.monotonic()
+            logger.debug(f"{tag} [3/6 DNS] Querying MX/SOA/SPF/DMARC for {domain}")
             dns_intel = await analyze_domain(domain)
+            elapsed = time.monotonic() - t0
             if dns_intel:
                 domain_intel.email_provider = dns_intel.email_provider
                 domain_intel.mx_records = dns_intel.mx_records
@@ -129,8 +174,13 @@ async def enrich_single_hotel(
                 domain_intel.dmarc_record = dns_intel.dmarc_record
                 await repo.cache_dns_intel(dns_intel)
 
-                # SOA email might be a real person
+                parts = []
+                if dns_intel.email_provider:
+                    parts.append(f"provider={dns_intel.email_provider}")
+                if dns_intel.mx_records:
+                    parts.append(f"mx={len(dns_intel.mx_records)}")
                 if dns_intel.soa_email:
+                    parts.append(f"soa={dns_intel.soa_email}")
                     result.decision_makers.append(DecisionMaker(
                         full_name=None,
                         title=None,
@@ -139,55 +189,125 @@ async def enrich_single_hotel(
                         confidence=0.3,
                         raw_source_url=f"dns://{domain}/SOA",
                     ))
+                if dns_intel.spf_record:
+                    parts.append("spf=yes")
+                if dns_intel.dmarc_record:
+                    parts.append("dmarc=yes")
+                logger.info(
+                    f"{tag} [3/6 DNS] {' | '.join(parts) or 'no records'} [{elapsed:.1f}s]"
+                )
+            else:
+                logger.info(f"{tag} [3/6 DNS] No DNS data [{elapsed:.1f}s]")
             result.layers_completed |= LAYER_DNS
 
         # === Layer 4: Website Scraping ===
         if layers & LAYER_WEBSITE:
+            t0 = time.monotonic()
+            logger.debug(f"{tag} [4/6 Website] Scraping {website}")
             try:
                 website_dms = await scrape_hotel_website(client, website, name)
-                result.decision_makers.extend(website_dms)
+                elapsed = time.monotonic() - t0
                 if website_dms:
+                    result.decision_makers.extend(website_dms)
+                    for dm in website_dms:
+                        logger.info(
+                            f"{tag} [4/6 Website] HIT: {dm.full_name} | "
+                            f"{dm.title} | {dm.email} (src={dm.source}, "
+                            f"conf={dm.confidence})"
+                        )
                     logger.info(
-                        f"[{hotel_id}] Website scrape: {len(website_dms)} contacts found"
+                        f"{tag} [4/6 Website] {len(website_dms)} contacts [{elapsed:.1f}s]"
                     )
+                else:
+                    logger.info(f"{tag} [4/6 Website] No contacts found [{elapsed:.1f}s]")
             except Exception as e:
-                logger.debug(f"[{hotel_id}] Website scrape error: {e}")
+                elapsed = time.monotonic() - t0
+                logger.warning(f"{tag} [4/6 Website] Error: {e} [{elapsed:.1f}s]")
             result.layers_completed |= LAYER_WEBSITE
 
         # === Layer 5: Google Review Responses ===
         if layers & LAYER_REVIEWS:
+            t0 = time.monotonic()
+            logger.debug(
+                f"{tag} [5/6 Reviews] Searching Google reviews for {name!r} "
+                f"in {city}, {state}"
+            )
             try:
                 review_dms = await extract_from_google_reviews(
                     client, name, city, state
                 )
-                result.decision_makers.extend(review_dms)
+                elapsed = time.monotonic() - t0
                 if review_dms:
+                    result.decision_makers.extend(review_dms)
+                    for dm in review_dms:
+                        logger.info(
+                            f"{tag} [5/6 Reviews] HIT: {dm.full_name} | "
+                            f"{dm.title} (conf={dm.confidence})"
+                        )
                     logger.info(
-                        f"[{hotel_id}] Review mining: {len(review_dms)} contacts found"
+                        f"{tag} [5/6 Reviews] {len(review_dms)} contacts [{elapsed:.1f}s]"
                     )
+                else:
+                    logger.info(f"{tag} [5/6 Reviews] No contacts found [{elapsed:.1f}s]")
             except Exception as e:
-                logger.debug(f"[{hotel_id}] Review mining error: {e}")
+                elapsed = time.monotonic() - t0
+                logger.warning(f"{tag} [5/6 Reviews] Error: {e} [{elapsed:.1f}s]")
             result.layers_completed |= LAYER_REVIEWS
 
         # === Layer 6: Email Verification ===
         if layers & LAYER_EMAIL_VERIFY:
-            for dm in result.decision_makers:
-                if dm.full_name and (not dm.email or not dm.email_verified):
+            t0 = time.monotonic()
+            candidates = [
+                dm for dm in result.decision_makers
+                if dm.full_name and (not dm.email or not dm.email_verified)
+            ]
+            if candidates:
+                logger.debug(
+                    f"{tag} [6/6 Email] Verifying emails for {len(candidates)} "
+                    f"contacts (provider={domain_intel.email_provider})"
+                )
+                for dm in candidates:
                     try:
+                        before_email = dm.email
                         await enrich_decision_maker_email(
                             dm, domain, domain_intel.email_provider
                         )
+                        if dm.email_verified:
+                            logger.info(
+                                f"{tag} [6/6 Email] Verified: {dm.full_name} → "
+                                f"{dm.email}"
+                            )
+                        elif dm.email and dm.email != before_email:
+                            logger.info(
+                                f"{tag} [6/6 Email] Guessed (unverified): "
+                                f"{dm.full_name} → {dm.email}"
+                            )
+                        else:
+                            logger.debug(
+                                f"{tag} [6/6 Email] No email found for {dm.full_name}"
+                            )
                     except Exception as e:
-                        logger.debug(f"[{hotel_id}] Email verification error: {e}")
+                        logger.warning(
+                            f"{tag} [6/6 Email] Error verifying {dm.full_name}: {e}"
+                        )
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    f"{tag} [6/6 Email] Processed {len(candidates)} contacts [{elapsed:.1f}s]"
+                )
+            else:
+                logger.info(
+                    f"{tag} [6/6 Email] Skipped — no contacts need email verification"
+                )
             result.layers_completed |= LAYER_EMAIL_VERIFY
 
     except Exception as e:
         result.error = str(e)
-        logger.error(f"[{hotel_id}] Enrichment error: {e}")
+        logger.error(f"{tag} Enrichment error: {e}", exc_info=True)
 
     result.domain_intel = domain_intel
 
     # Deduplicate decision makers by name
+    before_dedup = len(result.decision_makers)
     seen = set()
     unique = []
     for dm in result.decision_makers:
@@ -196,6 +316,15 @@ async def enrich_single_hotel(
             seen.add(key)
             unique.append(dm)
     result.decision_makers = unique
+
+    total_elapsed = time.monotonic() - t_start
+    if before_dedup != len(unique):
+        logger.debug(f"{tag} Deduped {before_dedup} → {len(unique)} contacts")
+
+    logger.info(
+        f"{tag} Done: {len(unique)} contacts | "
+        f"layers=0b{result.layers_completed:06b} | {total_elapsed:.1f}s"
+    )
 
     return result
 
@@ -215,6 +344,12 @@ async def enrich_batch(
     Returns:
         List of OwnerEnrichmentResult
     """
+    t_batch_start = time.monotonic()
+    logger.info(
+        f"Batch starting: {len(hotels)} hotels | "
+        f"concurrency={concurrency} | layers=0b{layers:06b}"
+    )
+
     sem = asyncio.Semaphore(concurrency)
     results = []
 
@@ -228,22 +363,26 @@ async def enrich_batch(
 
     # Filter out exceptions and log them
     clean_results = []
+    errors = 0
     for r in results:
         if isinstance(r, Exception):
+            errors += 1
             logger.error(f"Batch enrichment exception: {r}")
         else:
             clean_results.append(r)
 
+    if errors:
+        logger.warning(f"Batch had {errors} uncaught exceptions out of {len(hotels)} hotels")
+
     # Persist results
+    saved_count = 0
     for result in clean_results:
         if result.decision_makers:
             count = await repo.batch_insert_decision_makers(
                 result.hotel_id, result.decision_makers
             )
+            saved_count += count
             status = 1  # complete
-            logger.info(
-                f"[{result.hotel_id}] Saved {count} decision makers"
-            )
         else:
             status = 2  # no_results
 
@@ -252,12 +391,24 @@ async def enrich_batch(
         )
 
     # Summary
+    batch_elapsed = time.monotonic() - t_batch_start
     total = len(clean_results)
     found = sum(1 for r in clean_results if r.found_any)
     total_contacts = sum(len(r.decision_makers) for r in clean_results)
+
+    # Per-source breakdown
+    source_counts: dict[str, int] = {}
+    for r in clean_results:
+        for dm in r.decision_makers:
+            source_counts[dm.source] = source_counts.get(dm.source, 0) + 1
+
     logger.info(
-        f"Batch complete: {found}/{total} hotels had owner data "
-        f"({total_contacts} total contacts)"
+        f"Batch complete: {found}/{total} hotels had contacts | "
+        f"{total_contacts} contacts found | {saved_count} saved to DB | "
+        f"{batch_elapsed:.1f}s total"
     )
+    if source_counts:
+        breakdown = " | ".join(f"{src}={n}" for src, n in sorted(source_counts.items()))
+        logger.info(f"Batch source breakdown: {breakdown}")
 
     return clean_results
