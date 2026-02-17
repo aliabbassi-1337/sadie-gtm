@@ -24,22 +24,9 @@ import argparse
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment import owner_repo as repo
-from services.enrichment.owner_enricher import enrich_batch
-from lib.owner_discovery.models import (
-    LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
-    LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
-)
+from services.enrichment.service import Service
 
-LAYER_MAP = {
-    "rdap": LAYER_RDAP,
-    "whois-history": LAYER_WHOIS_HISTORY,
-    "dns": LAYER_DNS,
-    "website": LAYER_WEBSITE,
-    "reviews": LAYER_REVIEWS,
-    "email-verify": LAYER_EMAIL_VERIFY,
-    "all": 0xFF,
-}
+LAYER_CHOICES = ["rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
 
 
 async def run_enrichment(
@@ -50,44 +37,22 @@ async def run_enrichment(
     """Run owner enrichment (direct mode, no SQS)."""
     await init_db()
     try:
-        layer_mask = LAYER_MAP.get(layer, 0xFF)
-        layer_filter = layer_mask if layer != "all" else None
-
-        logger.info(f"Owner enrichment: limit={limit}, concurrency={concurrency}, layer={layer}")
-
-        hotels = await repo.get_hotels_pending_owner_enrichment(
-            limit=limit, layer=layer_filter,
-        )
-        if not hotels:
-            logger.info("No hotels pending owner enrichment")
-            return
-
-        logger.info(f"Processing {len(hotels)} hotels")
-        for h in hotels:
-            logger.info(f"  [{h['hotel_id']}] {h['name']} - {h.get('website', 'N/A')[:60]}")
-
-        results = await enrich_batch(
-            hotels=hotels,
+        svc = Service()
+        result = await svc.run_owner_enrichment(
+            limit=limit,
             concurrency=concurrency,
-            layers=layer_mask,
+            layer=layer if layer != "all" else None,
         )
 
-        found = sum(1 for r in results if r.found_any)
-        total_contacts = sum(len(r.decision_makers) for r in results)
-        verified = sum(
-            sum(1 for dm in r.decision_makers if dm.email_verified)
-            for r in results
-        )
-
-        logger.info(
-            f"\nOwner Enrichment Complete:\n"
-            f"  Hotels processed: {len(results)}\n"
-            f"  Hotels with contacts: {found}\n"
-            f"  Total contacts found: {total_contacts}\n"
-            f"  Verified emails: {verified}\n"
-            f"  Hit rate: {found/len(results)*100:.1f}%" if results else ""
-        )
-
+        if result["processed"]:
+            logger.info(
+                f"\nOwner Enrichment Complete:\n"
+                f"  Hotels processed: {result['processed']}\n"
+                f"  Hotels with contacts: {result['found']}\n"
+                f"  Total contacts found: {result['contacts']}\n"
+                f"  Verified emails: {result['verified']}\n"
+                f"  Hit rate: {result['found']/result['processed']*100:.1f}%"
+            )
     except Exception as e:
         logger.error(f"Owner enrichment failed: {e}")
         raise
@@ -99,7 +64,8 @@ async def show_status() -> None:
     """Show owner enrichment pipeline statistics."""
     await init_db()
     try:
-        stats = await repo.get_enrichment_stats()
+        svc = Service()
+        stats = await svc.get_owner_enrichment_stats()
         if not stats:
             logger.info("No enrichment data yet")
             return
@@ -126,7 +92,7 @@ def main():
     run_parser.add_argument("--limit", type=int, default=20, help="Max hotels to process")
     run_parser.add_argument("--concurrency", type=int, default=5, help="Max concurrent enrichments")
     run_parser.add_argument(
-        "--layer", choices=list(LAYER_MAP.keys()), default="all",
+        "--layer", choices=LAYER_CHOICES, default="all",
         help="Run specific layer only (default: all)",
     )
 

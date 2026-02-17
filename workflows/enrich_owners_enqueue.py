@@ -27,24 +27,16 @@ import os
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment import owner_repo as repo
+from services.enrichment.service import Service
 from infra.sqs import send_messages_batch, get_queue_attributes
-from lib.owner_discovery.models import (
-    LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
-    LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
-)
 
 QUEUE_URL = os.getenv("SQS_OWNER_ENRICHMENT_QUEUE_URL", "")
 MAX_QUEUE_DEPTH = 2000
 
+LAYER_CHOICES = ["rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
 LAYER_MAP = {
-    "rdap": LAYER_RDAP,
-    "whois-history": LAYER_WHOIS_HISTORY,
-    "dns": LAYER_DNS,
-    "website": LAYER_WEBSITE,
-    "reviews": LAYER_REVIEWS,
-    "email-verify": LAYER_EMAIL_VERIFY,
-    "all": 0xFF,
+    "rdap": 1, "whois-history": 2, "dns": 4,
+    "website": 8, "reviews": 16, "email-verify": 32, "all": 0xFF,
 }
 
 
@@ -64,10 +56,11 @@ async def enqueue(limit: int = 500, layer: str = "all", force: bool = False):
 
     await init_db()
     try:
+        svc = Service()
         layer_mask = LAYER_MAP.get(layer, 0xFF)
         layer_filter = layer_mask if layer != "all" else None
 
-        hotels = await repo.get_hotels_pending_owner_enrichment(
+        hotels = await svc.get_hotels_pending_owner_enrichment(
             limit=limit, layer=layer_filter,
         )
         if not hotels:
@@ -107,7 +100,8 @@ async def show_status():
 
     await init_db()
     try:
-        stats = await repo.get_enrichment_stats()
+        svc = Service()
+        stats = await svc.get_owner_enrichment_stats()
         print("\n=== Owner Enrichment Queue ===")
         print(f"  SQS pending:    {pending}")
         print(f"  SQS in-flight:  {in_flight}")
@@ -127,7 +121,7 @@ def main():
     parser = argparse.ArgumentParser(description="Owner enrichment enqueuer")
     parser.add_argument("--limit", type=int, default=500, help="Max hotels to enqueue")
     parser.add_argument(
-        "--layer", choices=list(LAYER_MAP.keys()), default="all",
+        "--layer", choices=LAYER_CHOICES, default="all",
         help="Enqueue for specific layer only",
     )
     parser.add_argument("--force", action="store_true", help="Force enqueue even if queue is full")

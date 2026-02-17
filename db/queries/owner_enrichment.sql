@@ -1,0 +1,101 @@
+-- Owner enrichment pipeline queries
+-- Tables: hotel_owner_enrichment, hotel_decision_makers, domain_whois_cache, domain_dns_cache
+
+-- name: get_hotels_pending_owner_enrichment
+-- Get hotels needing owner enrichment (not yet completed)
+SELECT h.id as hotel_id, h.name, h.website, h.city, h.state, h.country,
+       h.email, h.phone_website, h.phone_google
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_owner_enrichment hoe ON h.id = hoe.hotel_id
+WHERE h.website IS NOT NULL
+  AND h.website != ''
+  AND (hoe.hotel_id IS NULL OR hoe.status NOT IN (1))
+ORDER BY h.id
+LIMIT :limit;
+
+-- name: get_hotels_pending_owner_enrichment_by_layer
+-- Get hotels missing a specific enrichment layer (bitmask check)
+SELECT h.id as hotel_id, h.name, h.website, h.city, h.state, h.country,
+       h.email, h.phone_website, h.phone_google
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_owner_enrichment hoe ON h.id = hoe.hotel_id
+WHERE h.website IS NOT NULL
+  AND h.website != ''
+  AND (hoe.hotel_id IS NULL OR hoe.layers_completed & :layer = 0)
+ORDER BY h.id
+LIMIT :limit;
+
+-- name: insert_decision_maker<!
+-- Upsert a decision maker. On conflict, merge best data.
+INSERT INTO sadie_gtm.hotel_decision_makers
+    (hotel_id, full_name, title, email, email_verified, phone, source, confidence, raw_source_url)
+VALUES (:hotel_id, :full_name, :title, :email, :email_verified, :phone, :source, :confidence, :raw_source_url)
+ON CONFLICT (hotel_id, full_name, title) DO UPDATE
+SET email = COALESCE(NULLIF(EXCLUDED.email, ''), sadie_gtm.hotel_decision_makers.email),
+    email_verified = EXCLUDED.email_verified OR sadie_gtm.hotel_decision_makers.email_verified,
+    phone = COALESCE(NULLIF(EXCLUDED.phone, ''), sadie_gtm.hotel_decision_makers.phone),
+    confidence = GREATEST(EXCLUDED.confidence, sadie_gtm.hotel_decision_makers.confidence),
+    raw_source_url = COALESCE(EXCLUDED.raw_source_url, sadie_gtm.hotel_decision_makers.raw_source_url),
+    updated_at = NOW()
+RETURNING id;
+
+-- name: update_enrichment_status!
+-- Upsert enrichment status. layers_completed OR'd with existing.
+INSERT INTO sadie_gtm.hotel_owner_enrichment (hotel_id, status, layers_completed, last_attempt)
+VALUES (:hotel_id, :status, :layers_completed, NOW())
+ON CONFLICT (hotel_id) DO UPDATE
+SET status = :status,
+    layers_completed = sadie_gtm.hotel_owner_enrichment.layers_completed | :layers_completed,
+    last_attempt = NOW();
+
+-- name: cache_domain_intel!
+-- Upsert WHOIS/RDAP cache. COALESCE preserves existing non-null values.
+INSERT INTO sadie_gtm.domain_whois_cache
+    (domain, registrant_name, registrant_org, registrant_email,
+     registrar, registration_date, is_privacy_protected, source, queried_at)
+VALUES (:domain, :registrant_name, :registrant_org, :registrant_email,
+        :registrar, :registration_date, :is_privacy_protected, :source, NOW())
+ON CONFLICT (domain) DO UPDATE
+SET registrant_name = COALESCE(EXCLUDED.registrant_name, sadie_gtm.domain_whois_cache.registrant_name),
+    registrant_org = COALESCE(EXCLUDED.registrant_org, sadie_gtm.domain_whois_cache.registrant_org),
+    registrant_email = COALESCE(EXCLUDED.registrant_email, sadie_gtm.domain_whois_cache.registrant_email),
+    is_privacy_protected = EXCLUDED.is_privacy_protected,
+    queried_at = NOW();
+
+-- name: cache_dns_intel!
+-- Upsert DNS intelligence cache.
+INSERT INTO sadie_gtm.domain_dns_cache
+    (domain, email_provider, mx_records, soa_email,
+     spf_record, dmarc_record, is_catch_all, queried_at)
+VALUES (:domain, :email_provider, :mx_records, :soa_email,
+        :spf_record, :dmarc_record, :is_catch_all, NOW())
+ON CONFLICT (domain) DO UPDATE
+SET email_provider = EXCLUDED.email_provider,
+    mx_records = EXCLUDED.mx_records,
+    soa_email = EXCLUDED.soa_email,
+    spf_record = EXCLUDED.spf_record,
+    dmarc_record = EXCLUDED.dmarc_record,
+    is_catch_all = EXCLUDED.is_catch_all,
+    queried_at = NOW();
+
+-- name: get_enrichment_stats^
+-- Get owner enrichment pipeline statistics.
+SELECT
+    COUNT(*) FILTER (WHERE h.website IS NOT NULL AND h.website != '') as total_with_website,
+    COUNT(hoe.hotel_id) FILTER (WHERE hoe.status = 0) as pending,
+    COUNT(hoe.hotel_id) FILTER (WHERE hoe.status = 1) as complete,
+    COUNT(hoe.hotel_id) FILTER (WHERE hoe.status = 2) as no_results,
+    COUNT(DISTINCT hdm.hotel_id) as hotels_with_contacts,
+    COUNT(hdm.id) as total_contacts,
+    COUNT(hdm.id) FILTER (WHERE hdm.email_verified) as verified_emails
+FROM sadie_gtm.hotels h
+LEFT JOIN sadie_gtm.hotel_owner_enrichment hoe ON h.id = hoe.hotel_id
+LEFT JOIN sadie_gtm.hotel_decision_makers hdm ON h.id = hdm.hotel_id;
+
+-- name: get_decision_makers_for_hotel
+-- Get all decision makers for a hotel, ordered by confidence.
+SELECT id, full_name, title, email, email_verified, phone,
+       source, confidence, raw_source_url, created_at
+FROM sadie_gtm.hotel_decision_makers
+WHERE hotel_id = :hotel_id
+ORDER BY confidence DESC;

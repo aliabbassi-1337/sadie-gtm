@@ -30,7 +30,6 @@ from lib.owner_discovery.whois_history import whois_lookup, whois_to_decision_ma
 from lib.owner_discovery.dns_intel import analyze_domain
 from lib.owner_discovery.website_scraper import scrape_hotel_website, extract_from_google_reviews
 from lib.owner_discovery.email_discovery import enrich_decision_maker_email
-from services.enrichment import owner_repo as repo
 
 
 def _extract_domain(url: str) -> Optional[str]:
@@ -94,7 +93,6 @@ async def enrich_single_hotel(
             elapsed = time.monotonic() - t0
             if rdap_intel:
                 domain_intel = rdap_intel
-                await repo.cache_domain_intel(rdap_intel)
                 if rdap_intel.is_privacy_protected:
                     logger.info(
                         f"{tag} [1/6 RDAP] Privacy-protected "
@@ -129,7 +127,6 @@ async def enrich_single_hotel(
                 whois_intel = await whois_lookup(client, domain)
                 elapsed = time.monotonic() - t0
                 if whois_intel and not whois_intel.is_privacy_protected:
-                    await repo.cache_domain_intel(whois_intel)
                     if not domain_intel.registrant_name:
                         domain_intel.registrant_name = whois_intel.registrant_name
                     if not domain_intel.registrant_org:
@@ -151,7 +148,6 @@ async def enrich_single_hotel(
                             f"(src={whois_intel.whois_source}) [{elapsed:.1f}s]"
                         )
                 elif whois_intel:
-                    await repo.cache_domain_intel(whois_intel)
                     logger.info(
                         f"{tag} [2/6 WHOIS] Privacy-protected "
                         f"(registrar={whois_intel.registrar}) [{elapsed:.1f}s]"
@@ -172,7 +168,6 @@ async def enrich_single_hotel(
                 domain_intel.soa_email = dns_intel.soa_email
                 domain_intel.spf_record = dns_intel.spf_record
                 domain_intel.dmarc_record = dns_intel.dmarc_record
-                await repo.cache_dns_intel(dns_intel)
 
                 parts = []
                 if dns_intel.email_provider:
@@ -337,7 +332,7 @@ async def enrich_batch(
     """Run owner enrichment for a batch of hotels.
 
     Args:
-        hotels: List of hotel dicts from owner_repo.get_hotels_pending_owner_enrichment()
+        hotels: List of hotel dicts with hotel_id, name, website, city, state, country
         concurrency: Max concurrent enrichments
         layers: Bitmask of layers to run
 
@@ -374,22 +369,6 @@ async def enrich_batch(
     if errors:
         logger.warning(f"Batch had {errors} uncaught exceptions out of {len(hotels)} hotels")
 
-    # Persist results
-    saved_count = 0
-    for result in clean_results:
-        if result.decision_makers:
-            count = await repo.batch_insert_decision_makers(
-                result.hotel_id, result.decision_makers
-            )
-            saved_count += count
-            status = 1  # complete
-        else:
-            status = 2  # no_results
-
-        await repo.update_enrichment_status(
-            result.hotel_id, status, result.layers_completed
-        )
-
     # Summary
     batch_elapsed = time.monotonic() - t_batch_start
     total = len(clean_results)
@@ -404,8 +383,7 @@ async def enrich_batch(
 
     logger.info(
         f"Batch complete: {found}/{total} hotels had contacts | "
-        f"{total_contacts} contacts found | {saved_count} saved to DB | "
-        f"{batch_elapsed:.1f}s total"
+        f"{total_contacts} contacts found | {batch_elapsed:.1f}s total"
     )
     if source_counts:
         breakdown = " | ".join(f"{src}={n}" for src, n in sorted(source_counts.items()))

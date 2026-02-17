@@ -31,25 +31,17 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment import owner_repo as repo
+from services.enrichment.service import Service
 from services.enrichment.owner_enricher import enrich_batch
 from infra.sqs import receive_messages, delete_messages_batch, get_queue_attributes
-from lib.owner_discovery.models import (
-    LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
-    LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
-)
 
 QUEUE_URL = os.getenv("SQS_OWNER_ENRICHMENT_QUEUE_URL", "")
 VISIBILITY_TIMEOUT = 1800  # 30 minutes per batch
 
+LAYER_CHOICES = ["rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
 LAYER_MAP = {
-    "rdap": LAYER_RDAP,
-    "whois-history": LAYER_WHOIS_HISTORY,
-    "dns": LAYER_DNS,
-    "website": LAYER_WEBSITE,
-    "reviews": LAYER_REVIEWS,
-    "email-verify": LAYER_EMAIL_VERIFY,
-    "all": 0xFF,
+    "rdap": 1, "whois-history": 2, "dns": 4,
+    "website": 8, "reviews": 16, "email-verify": 32, "all": 0xFF,
 }
 
 shutdown_requested = False
@@ -71,6 +63,7 @@ async def run_sqs_consumer(concurrency: int = 5, layers: int = 0xFF):
     signal.signal(signal.SIGTERM, handle_shutdown)
 
     await init_db()
+    svc = Service()
     try:
         logger.info(f"Starting owner enrichment SQS consumer (concurrency={concurrency})")
         total_processed = 0
@@ -114,10 +107,13 @@ async def run_sqs_consumer(concurrency: int = 5, layers: int = 0xFF):
             if not hotels:
                 continue
 
-            # Run enrichment
+            # Run enrichment (enricher returns results, no DB writes)
             results = await enrich_batch(
                 hotels=hotels, concurrency=concurrency, layers=layers,
             )
+
+            # Persist via service layer
+            await svc.persist_owner_enrichment_results(results)
 
             # Delete successful messages
             handles_to_delete = []
@@ -149,34 +145,15 @@ async def run_direct(limit: int = 5, concurrency: int = 3, layer: str = "all"):
     """Direct mode - process hotels from DB without SQS (for local testing)."""
     await init_db()
     try:
-        layer_mask = LAYER_MAP.get(layer, 0xFF)
-        layer_filter = layer_mask if layer != "all" else None
-
-        logger.info(f"Direct mode: limit={limit}, concurrency={concurrency}, layer={layer}")
-
-        hotels = await repo.get_hotels_pending_owner_enrichment(
-            limit=limit, layer=layer_filter,
-        )
-        if not hotels:
-            logger.info("No hotels pending owner enrichment")
-            return
-
-        logger.info(f"Processing {len(hotels)} hotels...")
-        for h in hotels:
-            logger.info(f"  [{h['hotel_id']}] {h['name']} - {h.get('website', 'N/A')[:60]}")
-
-        results = await enrich_batch(
-            hotels=hotels, concurrency=concurrency, layers=layer_mask,
+        svc = Service()
+        result = await svc.run_owner_enrichment(
+            limit=limit,
+            concurrency=concurrency,
+            layer=layer if layer != "all" else None,
         )
 
         # Print results
-        found = sum(1 for r in results if r.found_any)
-        total_contacts = sum(len(r.decision_makers) for r in results)
-        verified = sum(
-            sum(1 for dm in r.decision_makers if dm.email_verified)
-            for r in results
-        )
-
+        results = result.get("results", [])
         print(f"\n{'='*50}")
         print(f"RESULTS")
         print(f"{'='*50}")
@@ -189,7 +166,7 @@ async def run_direct(limit: int = 5, concurrency: int = 3, layer: str = "all"):
             else:
                 print(f"    (no contacts)")
 
-        print(f"\n  Hotels: {len(results)} | With contacts: {found} | Contacts: {total_contacts} | Verified: {verified}")
+        print(f"\n  Hotels: {result['processed']} | With contacts: {result['found']} | Contacts: {result['contacts']} | Verified: {result['verified']}")
 
     finally:
         await close_db()
@@ -199,7 +176,8 @@ async def show_status():
     """Show enrichment pipeline status."""
     await init_db()
     try:
-        stats = await repo.get_enrichment_stats()
+        svc = Service()
+        stats = await svc.get_owner_enrichment_stats()
 
         print("\n=== Owner Enrichment Status ===")
         print(f"  Hotels w/ website:  {stats.get('total_with_website', 0):,}")
@@ -228,7 +206,7 @@ def main():
     parser.add_argument("--limit", type=int, default=5, help="Max hotels (direct mode)")
     parser.add_argument("--concurrency", type=int, default=5, help="Concurrent enrichments")
     parser.add_argument(
-        "--layer", choices=list(LAYER_MAP.keys()), default="all",
+        "--layer", choices=LAYER_CHOICES, default="all",
         help="Run specific layer only",
     )
     parser.add_argument("--status", action="store_true", help="Show enrichment status")
