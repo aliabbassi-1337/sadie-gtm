@@ -748,14 +748,17 @@ class IService(ABC):
     @abstractmethod
     async def run_owner_enrichment(
         self,
+        hotels: Optional[List[Dict]] = None,
         limit: int = 20,
         concurrency: int = 5,
         layer: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Run owner/GM enrichment waterfall on pending hotels.
+        """Run owner/GM enrichment waterfall.
 
         Args:
-            limit: Max hotels to process
+            hotels: Optional pre-fetched hotel list (e.g. from SQS).
+                    If None, fetches pending hotels from DB.
+            limit: Max hotels to process (ignored if hotels provided)
             concurrency: Max concurrent enrichments
             layer: Optional specific layer to run (e.g. 'rdap', 'website')
 
@@ -3795,11 +3798,12 @@ class Service(IService):
 
     async def run_owner_enrichment(
         self,
+        hotels: Optional[List[Dict]] = None,
         limit: int = 20,
         concurrency: int = 5,
         layer: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Run owner/GM enrichment waterfall on pending hotels."""
+        """Run owner/GM enrichment waterfall."""
         from services.enrichment.owner_enricher import enrich_batch
         from services.enrichment.owner_models import (
             LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
@@ -3816,11 +3820,13 @@ class Service(IService):
         }
 
         layer_mask = layer_map.get(layer, 0xFF) if layer else 0xFF
-        layer_filter = layer_mask if layer and layer != "all" else None
 
-        hotels = await repo.get_hotels_pending_owner_enrichment(
-            limit=limit, layer=layer_filter,
-        )
+        if hotels is None:
+            layer_filter = layer_mask if layer and layer != "all" else None
+            hotels = await repo.get_hotels_pending_owner_enrichment(
+                limit=limit, layer=layer_filter,
+            )
+
         if not hotels:
             logger.info("No hotels pending owner enrichment")
             return {"processed": 0, "found": 0, "contacts": 0, "verified": 0}
@@ -3855,15 +3861,6 @@ class Service(IService):
             "results": results,
         }
 
-    async def persist_owner_enrichment_results(
-        self,
-        results: list,
-    ) -> int:
-        """Persist enrichment results to DB. Used by SQS consumer.
-
-        Returns count of decision makers saved.
-        """
-        return await self._persist_owner_results(results)
 
     async def _persist_owner_results(self, results: list) -> int:
         """Internal: persist owner enrichment results to DB."""

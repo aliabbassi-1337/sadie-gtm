@@ -827,11 +827,11 @@ class TestGetDecisionMakersForHotel:
 
 
 class TestPersistOwnerEnrichmentResults:
-    """Tests for persist_owner_enrichment_results and _persist_owner_results."""
+    """Tests for _persist_owner_results."""
 
     @pytest.mark.asyncio
     async def test_empty_results_returns_zero(self, service):
-        saved = await service.persist_owner_enrichment_results([])
+        saved = await service._persist_owner_results([])
         assert saved == 0
 
     @pytest.mark.asyncio
@@ -876,7 +876,7 @@ class TestPersistOwnerEnrichmentResults:
                 ),
             ]
 
-            saved = await service.persist_owner_enrichment_results(results)
+            saved = await service._persist_owner_results(results)
             assert saved == 1
 
             # Verify DM was persisted
@@ -930,7 +930,7 @@ class TestPersistOwnerEnrichmentResults:
                 ),
             ]
 
-            saved = await service.persist_owner_enrichment_results(results)
+            saved = await service._persist_owner_results(results)
             assert saved == 0
 
             async with get_conn() as conn:

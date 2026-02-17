@@ -32,17 +32,12 @@ from loguru import logger
 
 from db.client import init_db, close_db
 from services.enrichment.service import Service
-from services.enrichment.owner_enricher import enrich_batch
 from infra.sqs import receive_messages, delete_messages_batch, get_queue_attributes
 
 QUEUE_URL = os.getenv("SQS_OWNER_ENRICHMENT_QUEUE_URL", "")
 VISIBILITY_TIMEOUT = 1800  # 30 minutes per batch
 
 LAYER_CHOICES = ["rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
-LAYER_MAP = {
-    "rdap": 1, "whois-history": 2, "dns": 4,
-    "website": 8, "reviews": 16, "email-verify": 32, "all": 0xFF,
-}
 
 shutdown_requested = False
 
@@ -53,7 +48,7 @@ def handle_shutdown(signum, frame):
     shutdown_requested = True
 
 
-async def run_sqs_consumer(concurrency: int = 5, layers: int = 0xFF):
+async def run_sqs_consumer(concurrency: int = 5, layer: str = "all"):
     """Run the SQS consumer loop."""
     if not QUEUE_URL:
         logger.error("SQS_OWNER_ENRICHMENT_QUEUE_URL not set. Use --direct for local testing.")
@@ -96,9 +91,6 @@ async def run_sqs_consumer(concurrency: int = 5, layers: int = 0xFF):
                 if hotel_id and website:
                     hotels.append(body)
                     msg_map[hotel_id] = msg["receipt_handle"]
-                    # Override layers if message specifies
-                    if body.get("layers_mask"):
-                        layers = body["layers_mask"]
                 else:
                     invalid_handles.append(msg["receipt_handle"])
 
@@ -107,22 +99,21 @@ async def run_sqs_consumer(concurrency: int = 5, layers: int = 0xFF):
             if not hotels:
                 continue
 
-            # Run enrichment (enricher returns results, no DB writes)
-            results = await enrich_batch(
-                hotels=hotels, concurrency=concurrency, layers=layers,
+            # Run enrichment + persist via service layer
+            result = await svc.run_owner_enrichment(
+                hotels=hotels,
+                concurrency=concurrency,
+                layer=layer if layer != "all" else None,
             )
-
-            # Persist via service layer
-            await svc.persist_owner_enrichment_results(results)
 
             # Delete successful messages
             handles_to_delete = []
-            for result in results:
+            for r in result.get("results", []):
                 total_processed += 1
-                if result.decision_makers:
+                if r.decision_makers:
                     total_found += 1
-                if result.hotel_id in msg_map:
-                    handles_to_delete.append(msg_map[result.hotel_id])
+                if r.hotel_id in msg_map:
+                    handles_to_delete.append(msg_map[r.hotel_id])
 
             if handles_to_delete:
                 delete_messages_batch(QUEUE_URL, handles_to_delete)
@@ -222,9 +213,8 @@ def main():
             limit=args.limit, concurrency=args.concurrency, layer=args.layer,
         ))
     else:
-        layer_mask = LAYER_MAP.get(args.layer, 0xFF)
         asyncio.run(run_sqs_consumer(
-            concurrency=args.concurrency, layers=layer_mask,
+            concurrency=args.concurrency, layer=args.layer,
         ))
 
 
