@@ -1692,7 +1692,7 @@ async def insert_decision_maker(hotel_id: int, dm: DecisionMaker) -> Optional[in
             email=dm.email,
             email_verified=dm.email_verified,
             phone=dm.phone,
-            source=dm.source,
+            sources=dm.sources,
             confidence=dm.confidence,
             raw_source_url=dm.raw_source_url,
         )

@@ -177,7 +177,7 @@ async def rdap_to_decision_maker(
             full_name=intel.registrant_name,
             title="Domain Registrant" if not intel.registrant_org else "Owner",
             email=intel.registrant_email,
-            source="rdap",
+            sources=["rdap"],
             confidence=0.6,  # Domain registrant is likely the owner but not guaranteed
             raw_source_url=f"rdap://{domain}",
         )

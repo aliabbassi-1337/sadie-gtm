@@ -63,7 +63,7 @@ async def test_insert_decision_maker():
             full_name="John Smith",
             title="Owner",
             email="john@owner-testdm1.com",
-            source="test",
+            sources=["test"],
             confidence=0.9,
         )
         result = await insert_decision_maker(hotel_id, dm)
@@ -81,7 +81,7 @@ async def test_insert_decision_maker_upsert_merges():
             full_name="Jane Doe",
             title="GM",
             email=None,
-            source="rdap",
+            sources=["rdap"],
             confidence=0.5,
         )
         await insert_decision_maker(hotel_id, dm1)
@@ -90,7 +90,7 @@ async def test_insert_decision_maker_upsert_merges():
             full_name="Jane Doe",
             title="GM",
             email="jane@owner-testupsert.com",
-            source="website_scrape",
+            sources=["website_scrape"],
             confidence=0.8,
         )
         await insert_decision_maker(hotel_id, dm2)
@@ -108,8 +108,8 @@ async def test_batch_insert_decision_makers():
     hotel_id = await _create_test_hotel("batch")
     try:
         dms = [
-            DecisionMaker(full_name="Alice", title="Owner", source="rdap", confidence=0.9),
-            DecisionMaker(full_name="Bob", title="GM", source="website_scrape", confidence=0.7),
+            DecisionMaker(full_name="Alice", title="Owner", sources=["rdap"], confidence=0.9),
+            DecisionMaker(full_name="Bob", title="GM", sources=["website_scrape"], confidence=0.7),
         ]
         count = await batch_insert_decision_makers(hotel_id, dms)
         assert count == 2
@@ -127,9 +127,9 @@ async def test_get_decision_makers_ordered_by_confidence():
     hotel_id = await _create_test_hotel("order")
     try:
         dms = [
-            DecisionMaker(full_name="Low", title="Staff", source="test", confidence=0.2),
-            DecisionMaker(full_name="High", title="Owner", source="test", confidence=0.95),
-            DecisionMaker(full_name="Mid", title="GM", source="test", confidence=0.6),
+            DecisionMaker(full_name="Low", title="Staff", sources=["test"], confidence=0.2),
+            DecisionMaker(full_name="High", title="Owner", sources=["test"], confidence=0.95),
+            DecisionMaker(full_name="Mid", title="GM", sources=["test"], confidence=0.6),
         ]
         await batch_insert_decision_makers(hotel_id, dms)
 
@@ -189,7 +189,7 @@ async def test_cache_domain_intel():
             registrant_org="Test LLC",
             registrant_email="owner@test.com",
             is_privacy_protected=False,
-            whois_source="test",
+            whois_sources=["test"],
         )
         await cache_domain_intel(intel)
 

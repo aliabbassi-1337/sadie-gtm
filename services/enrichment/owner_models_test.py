@@ -14,8 +14,8 @@ from services.enrichment.owner_models import (
 class TestDecisionMaker:
 
     def test_create_minimal(self):
-        dm = DecisionMaker(source="test")
-        assert dm.source == "test"
+        dm = DecisionMaker(sources=["test"])
+        assert dm.sources == ["test"]
         assert dm.full_name is None
         assert dm.email is None
         assert dm.email_verified is False
@@ -28,7 +28,7 @@ class TestDecisionMaker:
             email="john@hotel.com",
             email_verified=True,
             phone="555-1234",
-            source="website_scrape",
+            sources=["website_scrape"],
             confidence=0.85,
             raw_source_url="https://hotel.com/about",
         )
@@ -68,7 +68,7 @@ class TestOwnerEnrichmentResult:
         assert result.found_any is False
 
     def test_found_any_with_dm(self):
-        dm = DecisionMaker(source="test", full_name="Test")
+        dm = DecisionMaker(sources=["test"], full_name="Test")
         result = OwnerEnrichmentResult(hotel_id=1, decision_makers=[dm])
         assert result.found_any is True
 

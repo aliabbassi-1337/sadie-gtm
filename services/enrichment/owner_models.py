@@ -12,7 +12,7 @@ class DecisionMaker(BaseModel):
     email: Optional[str] = None
     email_verified: bool = False
     phone: Optional[str] = None
-    source: str  # rdap, whois_history, dns_soa, website_scrape, review_response, llm_extract, gov_registry
+    sources: list[str]  # rdap, whois_history, dns_soa, website_scrape, review_response, llm_extract, gov_registry
     confidence: float = 0.0  # 0.0-1.0
     raw_source_url: Optional[str] = None
 

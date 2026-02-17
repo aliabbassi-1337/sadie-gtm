@@ -159,7 +159,7 @@ async def _run_dns(
                 full_name=None,
                 title=None,
                 email=dns_intel.soa_email,
-                source="dns_soa",
+                sources=["dns_soa"],
                 confidence=0.3,
                 raw_source_url=f"dns://{domain}/SOA",
             ))
@@ -189,7 +189,7 @@ async def _run_website(
             for dm in website_dms:
                 logger.info(
                     f"{tag} [4/6 Website] HIT: {dm.full_name} | "
-                    f"{dm.title} | {dm.email} (src={dm.source}, "
+                    f"{dm.title} | {dm.email} (src={dm.sources}, "
                     f"conf={dm.confidence})"
                 )
             logger.info(
@@ -448,7 +448,8 @@ async def enrich_batch(
     source_counts: dict[str, int] = {}
     for r in clean_results:
         for dm in r.decision_makers:
-            source_counts[dm.source] = source_counts.get(dm.source, 0) + 1
+            for src in dm.sources:
+                source_counts[src] = source_counts.get(src, 0) + 1
 
     logger.info(
         f"Batch complete: {found}/{total} hotels had contacts | "

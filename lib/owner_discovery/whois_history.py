@@ -377,7 +377,7 @@ def whois_to_decision_maker(intel: Optional[DomainIntel]) -> Optional[DecisionMa
         full_name=intel.registrant_name,
         title="Domain Owner" if not intel.registrant_org else "Owner",
         email=intel.registrant_email,
-        source=intel.whois_source or "whois",
+        sources=[intel.whois_source or "whois"],
         confidence=0.7,
         raw_source_url=f"whois://{intel.domain}",
     )

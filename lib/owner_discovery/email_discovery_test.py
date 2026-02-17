@@ -73,7 +73,7 @@ class TestEnrichDecisionMakerEmail:
             full_name="John Smith",
             email="john@hotel.com",
             email_verified=True,
-            source="test",
+            sources=["test"],
         )
         result = await enrich_decision_maker_email(dm, "hotel.com")
         assert result.email == "john@hotel.com"

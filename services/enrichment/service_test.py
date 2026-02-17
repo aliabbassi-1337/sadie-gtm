@@ -860,7 +860,7 @@ class TestPersistOwnerEnrichmentResults:
                             full_name="Alice Owner",
                             title="Owner",
                             email="alice@persist-test-svc.com",
-                            source="rdap",
+                            sources=["rdap"],
                             confidence=0.85,
                         ),
                     ],
@@ -868,7 +868,7 @@ class TestPersistOwnerEnrichmentResults:
                         domain="persist-test-svc.com",
                         registrant_name="Alice Owner",
                         is_privacy_protected=False,
-                        whois_source="rdap",
+                        whois_sources=["rdap"],
                         email_provider="google_workspace",
                         mx_records=["aspmx.l.google.com"],
                     ),
@@ -979,7 +979,7 @@ class TestRunOwnerEnrichmentMocked:
             OwnerEnrichmentResult(
                 hotel_id=1, domain="a.com",
                 decision_makers=[
-                    DecisionMaker(full_name="Owner A", source="rdap", confidence=0.9),
+                    DecisionMaker(full_name="Owner A", sources=["rdap"], confidence=0.9),
                 ],
                 layers_completed=LAYER_RDAP,
             ),

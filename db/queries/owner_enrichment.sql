@@ -26,14 +26,15 @@ ORDER BY h.id
 LIMIT :limit;
 
 -- name: insert_decision_maker<!
--- Upsert a decision maker. On conflict, merge best data.
+-- Upsert a decision maker. On conflict, merge best data and append sources.
 INSERT INTO sadie_gtm.hotel_decision_makers
-    (hotel_id, full_name, title, email, email_verified, phone, source, confidence, raw_source_url)
-VALUES (:hotel_id, :full_name, :title, :email, :email_verified, :phone, :source, :confidence, :raw_source_url)
+    (hotel_id, full_name, title, email, email_verified, phone, sources, confidence, raw_source_url)
+VALUES (:hotel_id, :full_name, :title, :email, :email_verified, :phone, :sources, :confidence, :raw_source_url)
 ON CONFLICT (hotel_id, full_name, title) DO UPDATE
 SET email = COALESCE(NULLIF(EXCLUDED.email, ''), sadie_gtm.hotel_decision_makers.email),
     email_verified = EXCLUDED.email_verified OR sadie_gtm.hotel_decision_makers.email_verified,
     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), sadie_gtm.hotel_decision_makers.phone),
+    sources = (SELECT array_agg(DISTINCT s) FROM unnest(array_cat(sadie_gtm.hotel_decision_makers.sources, EXCLUDED.sources)) s),
     confidence = GREATEST(EXCLUDED.confidence, sadie_gtm.hotel_decision_makers.confidence),
     raw_source_url = COALESCE(EXCLUDED.raw_source_url, sadie_gtm.hotel_decision_makers.raw_source_url),
     updated_at = NOW()
@@ -95,7 +96,7 @@ LEFT JOIN sadie_gtm.hotel_decision_makers hdm ON h.id = hdm.hotel_id;
 -- name: get_decision_makers_for_hotel
 -- Get all decision makers for a hotel, ordered by confidence.
 SELECT id, full_name, title, email, email_verified, phone,
-       source, confidence, raw_source_url, created_at
+       sources, confidence, raw_source_url, created_at
 FROM sadie_gtm.hotel_decision_makers
 WHERE hotel_id = :hotel_id
 ORDER BY confidence DESC;

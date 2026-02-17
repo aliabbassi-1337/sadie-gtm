@@ -70,7 +70,7 @@ class TestWhoisToDecisionMaker:
         assert dm is not None
         assert dm.full_name == "Carlos Diaz"
         assert dm.email == "carlos@hotel.com"
-        assert dm.source == "live_whois"
+        assert dm.sources == ["live_whois"]
 
     def test_privacy_protected_returns_none(self):
         intel = DomainIntel(

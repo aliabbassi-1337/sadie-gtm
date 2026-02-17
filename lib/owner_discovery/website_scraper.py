@@ -147,7 +147,7 @@ def _extract_persons_from_jsonld(data: dict, results: list[DecisionMaker]):
                     title=title,
                     email=email,
                     phone=phone,
-                    source="website_scrape",
+                    sources=["website_scrape"],
                     confidence=0.9,  # Structured data is high confidence
                 ))
 
@@ -184,7 +184,7 @@ def extract_name_title_regex(text: str) -> list[DecisionMaker]:
                     results.append(DecisionMaker(
                         full_name=name,
                         title=title,
-                        source="website_scrape",
+                        sources=["website_scrape"],
                         confidence=0.7,
                     ))
     return results
@@ -276,7 +276,7 @@ Only include fields you actually find in the text. Do not guess or make up infor
                 title=data.get("title"),
                 email=data.get("email"),
                 phone=data.get("phone"),
-                source="llm_extract",
+                sources=["llm_extract"],
                 confidence=0.6,
             )
     except Exception as e:
@@ -447,7 +447,7 @@ async def extract_from_google_reviews(
                 results.append(DecisionMaker(
                     full_name=name,
                     title=title,
-                    source="review_response",
+                    sources=["review_response"],
                     confidence=0.85,
                     raw_source_url=item.get("link"),
                 ))
