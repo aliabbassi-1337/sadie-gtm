@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from loguru import logger
 
-from lib.owner_discovery.models import DomainIntel
+from services.enrichment.owner_models import DomainIntel
 
 # Lazy import dns.resolver - may not be installed
 _resolver = None

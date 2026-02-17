@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 import httpx
 from loguru import logger
 
-from lib.owner_discovery.models import (
+from services.enrichment.owner_models import (
     DecisionMaker, DomainIntel, OwnerEnrichmentResult,
     LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
     LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,

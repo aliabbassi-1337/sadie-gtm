@@ -3801,7 +3801,7 @@ class Service(IService):
     ) -> Dict[str, Any]:
         """Run owner/GM enrichment waterfall on pending hotels."""
         from services.enrichment.owner_enricher import enrich_batch
-        from lib.owner_discovery.models import (
+        from services.enrichment.owner_models import (
             LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
             LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
         )

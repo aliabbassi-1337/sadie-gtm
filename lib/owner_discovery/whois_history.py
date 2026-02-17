@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 import httpx
 from loguru import logger
 
-from lib.owner_discovery.models import DecisionMaker, DomainIntel
+from services.enrichment.owner_models import DecisionMaker, DomainIntel
 
 # ── Privacy / junk detection ─────────────────────────────────────────
 

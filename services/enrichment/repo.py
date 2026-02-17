@@ -10,7 +10,7 @@ from db.models.hotel_room_count import HotelRoomCount
 from db.models.existing_customer import ExistingCustomer
 from db.models.hotel_customer_proximity import HotelCustomerProximity
 from db.queries import enrichment_batch as batch_sql
-from lib.owner_discovery.models import DecisionMaker, DomainIntel
+from services.enrichment.owner_models import DecisionMaker, DomainIntel
 
 
 async def get_hotels_pending_enrichment(

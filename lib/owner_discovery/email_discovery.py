@@ -15,7 +15,7 @@ from typing import Optional
 import httpx
 from loguru import logger
 
-from lib.owner_discovery.models import DecisionMaker
+from services.enrichment.owner_models import DecisionMaker
 
 # Common email patterns for hotels
 ROLE_EMAILS = ["gm", "owner", "manager", "director", "management"]

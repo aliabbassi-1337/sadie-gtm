@@ -20,7 +20,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from loguru import logger
 
-from lib.owner_discovery.models import DecisionMaker
+from services.enrichment.owner_models import DecisionMaker
 
 # Azure OpenAI config (reuse existing setup from room_count_enricher)
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
