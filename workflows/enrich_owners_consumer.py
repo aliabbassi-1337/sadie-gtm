@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
-"""Owner enrichment consumer - polls SQS and runs owner/GM discovery waterfall.
-
-Two modes:
-1. SQS mode (default): Polls SQS queue for hotel enrichment tasks
-2. Direct mode (--direct): Processes hotels directly from DB (for testing)
+"""Owner enrichment SQS consumer - polls queue and runs owner/GM discovery.
 
 Usage:
-    # SQS consumer mode (production)
     uv run python workflows/enrich_owners_consumer.py
     uv run python workflows/enrich_owners_consumer.py --concurrency 5
-
-    # Direct mode (testing, no SQS needed)
-    uv run python workflows/enrich_owners_consumer.py --direct --limit 5
-    uv run python workflows/enrich_owners_consumer.py --direct --limit 5 --layer rdap
-
-    # Check status
-    uv run python workflows/enrich_owners_consumer.py --status
+    uv run python workflows/enrich_owners_consumer.py --layer rdap
 """
 
 import sys
@@ -51,7 +40,7 @@ def handle_shutdown(signum, frame):
 async def run_sqs_consumer(concurrency: int = 5, layer: str = "all"):
     """Run the SQS consumer loop."""
     if not QUEUE_URL:
-        logger.error("SQS_OWNER_ENRICHMENT_QUEUE_URL not set. Use --direct for local testing.")
+        logger.error("SQS_OWNER_ENRICHMENT_QUEUE_URL not set.")
         return
 
     signal.signal(signal.SIGINT, handle_shutdown)
@@ -132,90 +121,18 @@ async def run_sqs_consumer(concurrency: int = 5, layer: str = "all"):
         await close_db()
 
 
-async def run_direct(limit: int = 5, concurrency: int = 3, layer: str = "all"):
-    """Direct mode - process hotels from DB without SQS (for local testing)."""
-    await init_db()
-    try:
-        svc = Service()
-        result = await svc.run_owner_enrichment(
-            limit=limit,
-            concurrency=concurrency,
-            layer=layer if layer != "all" else None,
-        )
-
-        # Print results
-        results = result.get("results", [])
-        lines = ["\n" + "=" * 50, "RESULTS", "=" * 50]
-        for r in results:
-            lines.append(f"\n  [{r.hotel_id}] {r.domain}:")
-            if r.decision_makers:
-                for dm in r.decision_makers:
-                    v = " [VERIFIED]" if dm.email_verified else ""
-                    lines.append(f"    -> {dm.full_name or '?'} | {dm.title or '?'} | {dm.email or '?'}{v} | src={dm.source}")
-            else:
-                lines.append(f"    (no contacts)")
-
-        lines.append(f"\n  Hotels: {result['processed']} | With contacts: {result['found']} | Contacts: {result['contacts']} | Verified: {result['verified']}")
-        logger.info("\n".join(lines))
-
-    finally:
-        await close_db()
-
-
-async def show_status():
-    """Show enrichment pipeline status."""
-    await init_db()
-    try:
-        svc = Service()
-        stats = await svc.get_owner_enrichment_stats()
-
-        lines = [
-            "\n=== Owner Enrichment Status ===",
-            f"  Hotels w/ website:  {stats.get('total_with_website', 0):,}",
-            f"  Complete:           {stats.get('complete', 0):,}",
-            f"  No results:         {stats.get('no_results', 0):,}",
-            f"  ---",
-            f"  With contacts:      {stats.get('hotels_with_contacts', 0):,}",
-            f"  Total contacts:     {stats.get('total_contacts', 0):,}",
-            f"  Verified emails:    {stats.get('verified_emails', 0):,}",
-        ]
-
-        if QUEUE_URL:
-            attrs = get_queue_attributes(QUEUE_URL)
-            pending = int(attrs.get("ApproximateNumberOfMessages", 0))
-            in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
-            lines.extend([
-                f"  ---",
-                f"  SQS pending:        {pending}",
-                f"  SQS in-flight:      {in_flight}",
-            ])
-        logger.info("\n".join(lines))
-    finally:
-        await close_db()
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Owner enrichment consumer")
-    parser.add_argument("--direct", action="store_true", help="Direct DB mode (no SQS, for testing)")
-    parser.add_argument("--limit", type=int, default=5, help="Max hotels (direct mode)")
+    parser = argparse.ArgumentParser(description="Owner enrichment SQS consumer")
     parser.add_argument("--concurrency", type=int, default=5, help="Concurrent enrichments")
     parser.add_argument(
         "--layer", choices=LAYER_CHOICES, default="all",
         help="Run specific layer only",
     )
-    parser.add_argument("--status", action="store_true", help="Show enrichment status")
     args = parser.parse_args()
 
-    if args.status:
-        asyncio.run(show_status())
-    elif args.direct:
-        asyncio.run(run_direct(
-            limit=args.limit, concurrency=args.concurrency, layer=args.layer,
-        ))
-    else:
-        asyncio.run(run_sqs_consumer(
-            concurrency=args.concurrency, layer=args.layer,
-        ))
+    asyncio.run(run_sqs_consumer(
+        concurrency=args.concurrency, layer=args.layer,
+    ))
 
 
 if __name__ == "__main__":
