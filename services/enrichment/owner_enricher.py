@@ -14,7 +14,7 @@ if high-confidence results found. Caches domain intel for reuse.
 
 import asyncio
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -47,10 +47,259 @@ def _extract_domain(url: str) -> Optional[str]:
         return None
 
 
+# ── Layer functions ─────────────────────────────────────────────────
+
+
+async def _run_rdap(
+    client: httpx.AsyncClient, tag: str, domain: str,
+) -> Tuple[List[DecisionMaker], Optional[DomainIntel]]:
+    """Layer 1: RDAP domain lookup."""
+    t0 = time.monotonic()
+    logger.debug(f"{tag} [1/6 RDAP] Querying rdap.org for {domain}")
+    dm, rdap_intel = await rdap_to_decision_maker(client, domain)
+    elapsed = time.monotonic() - t0
+
+    dms = []
+    if rdap_intel:
+        if rdap_intel.is_privacy_protected:
+            logger.info(
+                f"{tag} [1/6 RDAP] Privacy-protected "
+                f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
+            )
+        elif dm:
+            dms.append(dm)
+            logger.info(
+                f"{tag} [1/6 RDAP] HIT: {dm.full_name} | {dm.email} "
+                f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
+            )
+        else:
+            logger.info(
+                f"{tag} [1/6 RDAP] No registrant data "
+                f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
+            )
+    else:
+        logger.info(f"{tag} [1/6 RDAP] No response [{elapsed:.1f}s]")
+
+    return dms, rdap_intel
+
+
+async def _run_whois(
+    client: httpx.AsyncClient, tag: str, domain: str,
+    already_found: bool, domain_intel: DomainIntel,
+) -> Tuple[List[DecisionMaker], DomainIntel]:
+    """Layer 2: WHOIS (live python-whois + Wayback fallback)."""
+    t0 = time.monotonic()
+    dms = []
+
+    if already_found and not domain_intel.is_privacy_protected:
+        logger.info(f"{tag} [2/6 WHOIS] Skipped — RDAP already found registrant")
+        return dms, domain_intel
+
+    logger.debug(f"{tag} [2/6 WHOIS] Running live WHOIS + Wayback fallback for {domain}")
+    whois_intel = await whois_lookup(client, domain)
+    elapsed = time.monotonic() - t0
+
+    if whois_intel and not whois_intel.is_privacy_protected:
+        if not domain_intel.registrant_name:
+            domain_intel.registrant_name = whois_intel.registrant_name
+        if not domain_intel.registrant_org:
+            domain_intel.registrant_org = whois_intel.registrant_org
+        if not domain_intel.registrant_email:
+            domain_intel.registrant_email = whois_intel.registrant_email
+        if not domain_intel.registrar:
+            domain_intel.registrar = whois_intel.registrar
+        dm = whois_to_decision_maker(whois_intel)
+        if dm:
+            dms.append(dm)
+            logger.info(
+                f"{tag} [2/6 WHOIS] HIT via {whois_intel.whois_source}: "
+                f"{dm.full_name} | {dm.email} [{elapsed:.1f}s]"
+            )
+        else:
+            logger.info(
+                f"{tag} [2/6 WHOIS] Data found but no usable contact "
+                f"(src={whois_intel.whois_source}) [{elapsed:.1f}s]"
+            )
+    elif whois_intel:
+        logger.info(
+            f"{tag} [2/6 WHOIS] Privacy-protected "
+            f"(registrar={whois_intel.registrar}) [{elapsed:.1f}s]"
+        )
+    else:
+        logger.info(f"{tag} [2/6 WHOIS] No data returned [{elapsed:.1f}s]")
+
+    return dms, domain_intel
+
+
+async def _run_dns(
+    tag: str, domain: str, domain_intel: DomainIntel,
+) -> Tuple[List[DecisionMaker], DomainIntel]:
+    """Layer 3: DNS intelligence (MX, SOA, SPF, DMARC)."""
+    t0 = time.monotonic()
+    logger.debug(f"{tag} [3/6 DNS] Querying MX/SOA/SPF/DMARC for {domain}")
+    dns_intel = await analyze_domain(domain)
+    elapsed = time.monotonic() - t0
+    dms = []
+
+    if dns_intel:
+        domain_intel.email_provider = dns_intel.email_provider
+        domain_intel.mx_records = dns_intel.mx_records
+        domain_intel.soa_email = dns_intel.soa_email
+        domain_intel.spf_record = dns_intel.spf_record
+        domain_intel.dmarc_record = dns_intel.dmarc_record
+
+        parts = []
+        if dns_intel.email_provider:
+            parts.append(f"provider={dns_intel.email_provider}")
+        if dns_intel.mx_records:
+            parts.append(f"mx={len(dns_intel.mx_records)}")
+        if dns_intel.soa_email:
+            parts.append(f"soa={dns_intel.soa_email}")
+            dms.append(DecisionMaker(
+                full_name=None,
+                title=None,
+                email=dns_intel.soa_email,
+                source="dns_soa",
+                confidence=0.3,
+                raw_source_url=f"dns://{domain}/SOA",
+            ))
+        if dns_intel.spf_record:
+            parts.append("spf=yes")
+        if dns_intel.dmarc_record:
+            parts.append("dmarc=yes")
+        logger.info(
+            f"{tag} [3/6 DNS] {' | '.join(parts) or 'no records'} [{elapsed:.1f}s]"
+        )
+    else:
+        logger.info(f"{tag} [3/6 DNS] No DNS data [{elapsed:.1f}s]")
+
+    return dms, domain_intel
+
+
+async def _run_website(
+    client: httpx.AsyncClient, tag: str, website: str, name: str,
+) -> List[DecisionMaker]:
+    """Layer 4: Website scraping (/about, /team, /contact + LLM)."""
+    t0 = time.monotonic()
+    logger.debug(f"{tag} [4/6 Website] Scraping {website}")
+    try:
+        website_dms = await scrape_hotel_website(client, website, name)
+        elapsed = time.monotonic() - t0
+        if website_dms:
+            for dm in website_dms:
+                logger.info(
+                    f"{tag} [4/6 Website] HIT: {dm.full_name} | "
+                    f"{dm.title} | {dm.email} (src={dm.source}, "
+                    f"conf={dm.confidence})"
+                )
+            logger.info(
+                f"{tag} [4/6 Website] {len(website_dms)} contacts [{elapsed:.1f}s]"
+            )
+            return website_dms
+        else:
+            logger.info(f"{tag} [4/6 Website] No contacts found [{elapsed:.1f}s]")
+            return []
+    except Exception as e:
+        elapsed = time.monotonic() - t0
+        logger.warning(f"{tag} [4/6 Website] Error: {e} [{elapsed:.1f}s]")
+        return []
+
+
+async def _run_reviews(
+    client: httpx.AsyncClient, tag: str,
+    name: str, city: Optional[str], state: Optional[str],
+) -> List[DecisionMaker]:
+    """Layer 5: Google review owner responses (Serper)."""
+    t0 = time.monotonic()
+    logger.debug(
+        f"{tag} [5/6 Reviews] Searching Google reviews for {name!r} "
+        f"in {city}, {state}"
+    )
+    try:
+        review_dms = await extract_from_google_reviews(client, name, city, state)
+        elapsed = time.monotonic() - t0
+        if review_dms:
+            for dm in review_dms:
+                logger.info(
+                    f"{tag} [5/6 Reviews] HIT: {dm.full_name} | "
+                    f"{dm.title} (conf={dm.confidence})"
+                )
+            logger.info(
+                f"{tag} [5/6 Reviews] {len(review_dms)} contacts [{elapsed:.1f}s]"
+            )
+            return review_dms
+        else:
+            logger.info(f"{tag} [5/6 Reviews] No contacts found [{elapsed:.1f}s]")
+            return []
+    except Exception as e:
+        elapsed = time.monotonic() - t0
+        logger.warning(f"{tag} [5/6 Reviews] Error: {e} [{elapsed:.1f}s]")
+        return []
+
+
+async def _run_email_verify(
+    tag: str, candidates: List[DecisionMaker],
+    domain: str, email_provider: Optional[str],
+) -> None:
+    """Layer 6: Email verification (SMTP/O365). Mutates candidates in place."""
+    t0 = time.monotonic()
+    if not candidates:
+        logger.info(f"{tag} [6/6 Email] Skipped — no contacts need email verification")
+        return
+
+    logger.debug(
+        f"{tag} [6/6 Email] Verifying emails for {len(candidates)} "
+        f"contacts (provider={email_provider})"
+    )
+    for dm in candidates:
+        try:
+            before_email = dm.email
+            await enrich_decision_maker_email(dm, domain, email_provider)
+            if dm.email_verified:
+                logger.info(
+                    f"{tag} [6/6 Email] Verified: {dm.full_name} → {dm.email}"
+                )
+            elif dm.email and dm.email != before_email:
+                logger.info(
+                    f"{tag} [6/6 Email] Guessed (unverified): "
+                    f"{dm.full_name} → {dm.email}"
+                )
+            else:
+                logger.debug(
+                    f"{tag} [6/6 Email] No email found for {dm.full_name}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"{tag} [6/6 Email] Error verifying {dm.full_name}: {e}"
+            )
+
+    elapsed = time.monotonic() - t0
+    logger.info(
+        f"{tag} [6/6 Email] Processed {len(candidates)} contacts [{elapsed:.1f}s]"
+    )
+
+
+def _deduplicate(dms: List[DecisionMaker], tag: str) -> List[DecisionMaker]:
+    """Deduplicate decision makers by (name, title)."""
+    seen = set()
+    unique = []
+    for dm in dms:
+        key = ((dm.full_name or "").lower(), (dm.title or "").lower())
+        if key not in seen:
+            seen.add(key)
+            unique.append(dm)
+    if len(dms) != len(unique):
+        logger.debug(f"{tag} Deduped {len(dms)} → {len(unique)} contacts")
+    return unique
+
+
+# ── Orchestrator ────────────────────────────────────────────────────
+
+
 async def enrich_single_hotel(
     client: httpx.AsyncClient,
     hotel: dict,
-    layers: int = 0xFF,  # All layers by default
+    layers: int = 0xFF,
     skip_cache: bool = False,
 ) -> OwnerEnrichmentResult:
     """Run the owner enrichment waterfall for a single hotel.
@@ -85,214 +334,47 @@ async def enrich_single_hotel(
     domain_intel = DomainIntel(domain=domain)
 
     try:
-        # === Layer 1: RDAP ===
+        # Layer 1: RDAP
         if layers & LAYER_RDAP:
-            t0 = time.monotonic()
-            logger.debug(f"{tag} [1/6 RDAP] Querying rdap.org for {domain}")
-            dm, rdap_intel = await rdap_to_decision_maker(client, domain)
-            elapsed = time.monotonic() - t0
+            dms, rdap_intel = await _run_rdap(client, tag, domain)
             if rdap_intel:
                 domain_intel = rdap_intel
-                if rdap_intel.is_privacy_protected:
-                    logger.info(
-                        f"{tag} [1/6 RDAP] Privacy-protected "
-                        f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
-                    )
-                elif dm:
-                    result.decision_makers.append(dm)
-                    logger.info(
-                        f"{tag} [1/6 RDAP] HIT: {dm.full_name} | {dm.email} "
-                        f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
-                    )
-                else:
-                    logger.info(
-                        f"{tag} [1/6 RDAP] No registrant data "
-                        f"(registrar={rdap_intel.registrar}) [{elapsed:.1f}s]"
-                    )
-            else:
-                logger.info(f"{tag} [1/6 RDAP] No response [{elapsed:.1f}s]")
+            result.decision_makers.extend(dms)
             result.layers_completed |= LAYER_RDAP
 
-        # === Layer 2: WHOIS (live python-whois + Wayback fallback) ===
+        # Layer 2: WHOIS
         if layers & LAYER_WHOIS_HISTORY:
-            t0 = time.monotonic()
-            if result.found_any and not domain_intel.is_privacy_protected:
-                logger.info(
-                    f"{tag} [2/6 WHOIS] Skipped — RDAP already found registrant"
-                )
-            else:
-                logger.debug(
-                    f"{tag} [2/6 WHOIS] Running live WHOIS + Wayback fallback for {domain}"
-                )
-                whois_intel = await whois_lookup(client, domain)
-                elapsed = time.monotonic() - t0
-                if whois_intel and not whois_intel.is_privacy_protected:
-                    if not domain_intel.registrant_name:
-                        domain_intel.registrant_name = whois_intel.registrant_name
-                    if not domain_intel.registrant_org:
-                        domain_intel.registrant_org = whois_intel.registrant_org
-                    if not domain_intel.registrant_email:
-                        domain_intel.registrant_email = whois_intel.registrant_email
-                    if not domain_intel.registrar:
-                        domain_intel.registrar = whois_intel.registrar
-                    dm = whois_to_decision_maker(whois_intel)
-                    if dm:
-                        result.decision_makers.append(dm)
-                        logger.info(
-                            f"{tag} [2/6 WHOIS] HIT via {whois_intel.whois_source}: "
-                            f"{dm.full_name} | {dm.email} [{elapsed:.1f}s]"
-                        )
-                    else:
-                        logger.info(
-                            f"{tag} [2/6 WHOIS] Data found but no usable contact "
-                            f"(src={whois_intel.whois_source}) [{elapsed:.1f}s]"
-                        )
-                elif whois_intel:
-                    logger.info(
-                        f"{tag} [2/6 WHOIS] Privacy-protected "
-                        f"(registrar={whois_intel.registrar}) [{elapsed:.1f}s]"
-                    )
-                else:
-                    logger.info(f"{tag} [2/6 WHOIS] No data returned [{elapsed:.1f}s]")
+            dms, domain_intel = await _run_whois(
+                client, tag, domain, result.found_any, domain_intel,
+            )
+            result.decision_makers.extend(dms)
             result.layers_completed |= LAYER_WHOIS_HISTORY
 
-        # === Layer 3: DNS Intelligence ===
+        # Layer 3: DNS
         if layers & LAYER_DNS:
-            t0 = time.monotonic()
-            logger.debug(f"{tag} [3/6 DNS] Querying MX/SOA/SPF/DMARC for {domain}")
-            dns_intel = await analyze_domain(domain)
-            elapsed = time.monotonic() - t0
-            if dns_intel:
-                domain_intel.email_provider = dns_intel.email_provider
-                domain_intel.mx_records = dns_intel.mx_records
-                domain_intel.soa_email = dns_intel.soa_email
-                domain_intel.spf_record = dns_intel.spf_record
-                domain_intel.dmarc_record = dns_intel.dmarc_record
-
-                parts = []
-                if dns_intel.email_provider:
-                    parts.append(f"provider={dns_intel.email_provider}")
-                if dns_intel.mx_records:
-                    parts.append(f"mx={len(dns_intel.mx_records)}")
-                if dns_intel.soa_email:
-                    parts.append(f"soa={dns_intel.soa_email}")
-                    result.decision_makers.append(DecisionMaker(
-                        full_name=None,
-                        title=None,
-                        email=dns_intel.soa_email,
-                        source="dns_soa",
-                        confidence=0.3,
-                        raw_source_url=f"dns://{domain}/SOA",
-                    ))
-                if dns_intel.spf_record:
-                    parts.append("spf=yes")
-                if dns_intel.dmarc_record:
-                    parts.append("dmarc=yes")
-                logger.info(
-                    f"{tag} [3/6 DNS] {' | '.join(parts) or 'no records'} [{elapsed:.1f}s]"
-                )
-            else:
-                logger.info(f"{tag} [3/6 DNS] No DNS data [{elapsed:.1f}s]")
+            dms, domain_intel = await _run_dns(tag, domain, domain_intel)
+            result.decision_makers.extend(dms)
             result.layers_completed |= LAYER_DNS
 
-        # === Layer 4: Website Scraping ===
+        # Layer 4: Website
         if layers & LAYER_WEBSITE:
-            t0 = time.monotonic()
-            logger.debug(f"{tag} [4/6 Website] Scraping {website}")
-            try:
-                website_dms = await scrape_hotel_website(client, website, name)
-                elapsed = time.monotonic() - t0
-                if website_dms:
-                    result.decision_makers.extend(website_dms)
-                    for dm in website_dms:
-                        logger.info(
-                            f"{tag} [4/6 Website] HIT: {dm.full_name} | "
-                            f"{dm.title} | {dm.email} (src={dm.source}, "
-                            f"conf={dm.confidence})"
-                        )
-                    logger.info(
-                        f"{tag} [4/6 Website] {len(website_dms)} contacts [{elapsed:.1f}s]"
-                    )
-                else:
-                    logger.info(f"{tag} [4/6 Website] No contacts found [{elapsed:.1f}s]")
-            except Exception as e:
-                elapsed = time.monotonic() - t0
-                logger.warning(f"{tag} [4/6 Website] Error: {e} [{elapsed:.1f}s]")
+            dms = await _run_website(client, tag, website, name)
+            result.decision_makers.extend(dms)
             result.layers_completed |= LAYER_WEBSITE
 
-        # === Layer 5: Google Review Responses ===
+        # Layer 5: Reviews
         if layers & LAYER_REVIEWS:
-            t0 = time.monotonic()
-            logger.debug(
-                f"{tag} [5/6 Reviews] Searching Google reviews for {name!r} "
-                f"in {city}, {state}"
-            )
-            try:
-                review_dms = await extract_from_google_reviews(
-                    client, name, city, state
-                )
-                elapsed = time.monotonic() - t0
-                if review_dms:
-                    result.decision_makers.extend(review_dms)
-                    for dm in review_dms:
-                        logger.info(
-                            f"{tag} [5/6 Reviews] HIT: {dm.full_name} | "
-                            f"{dm.title} (conf={dm.confidence})"
-                        )
-                    logger.info(
-                        f"{tag} [5/6 Reviews] {len(review_dms)} contacts [{elapsed:.1f}s]"
-                    )
-                else:
-                    logger.info(f"{tag} [5/6 Reviews] No contacts found [{elapsed:.1f}s]")
-            except Exception as e:
-                elapsed = time.monotonic() - t0
-                logger.warning(f"{tag} [5/6 Reviews] Error: {e} [{elapsed:.1f}s]")
+            dms = await _run_reviews(client, tag, name, city, state)
+            result.decision_makers.extend(dms)
             result.layers_completed |= LAYER_REVIEWS
 
-        # === Layer 6: Email Verification ===
+        # Layer 6: Email Verification
         if layers & LAYER_EMAIL_VERIFY:
-            t0 = time.monotonic()
             candidates = [
                 dm for dm in result.decision_makers
                 if dm.full_name and (not dm.email or not dm.email_verified)
             ]
-            if candidates:
-                logger.debug(
-                    f"{tag} [6/6 Email] Verifying emails for {len(candidates)} "
-                    f"contacts (provider={domain_intel.email_provider})"
-                )
-                for dm in candidates:
-                    try:
-                        before_email = dm.email
-                        await enrich_decision_maker_email(
-                            dm, domain, domain_intel.email_provider
-                        )
-                        if dm.email_verified:
-                            logger.info(
-                                f"{tag} [6/6 Email] Verified: {dm.full_name} → "
-                                f"{dm.email}"
-                            )
-                        elif dm.email and dm.email != before_email:
-                            logger.info(
-                                f"{tag} [6/6 Email] Guessed (unverified): "
-                                f"{dm.full_name} → {dm.email}"
-                            )
-                        else:
-                            logger.debug(
-                                f"{tag} [6/6 Email] No email found for {dm.full_name}"
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            f"{tag} [6/6 Email] Error verifying {dm.full_name}: {e}"
-                        )
-                elapsed = time.monotonic() - t0
-                logger.info(
-                    f"{tag} [6/6 Email] Processed {len(candidates)} contacts [{elapsed:.1f}s]"
-                )
-            else:
-                logger.info(
-                    f"{tag} [6/6 Email] Skipped — no contacts need email verification"
-                )
+            await _run_email_verify(tag, candidates, domain, domain_intel.email_provider)
             result.layers_completed |= LAYER_EMAIL_VERIFY
 
     except Exception as e:
@@ -300,24 +382,11 @@ async def enrich_single_hotel(
         logger.error(f"{tag} Enrichment error: {e}", exc_info=True)
 
     result.domain_intel = domain_intel
-
-    # Deduplicate decision makers by name
-    before_dedup = len(result.decision_makers)
-    seen = set()
-    unique = []
-    for dm in result.decision_makers:
-        key = ((dm.full_name or "").lower(), (dm.title or "").lower())
-        if key not in seen:
-            seen.add(key)
-            unique.append(dm)
-    result.decision_makers = unique
+    result.decision_makers = _deduplicate(result.decision_makers, tag)
 
     total_elapsed = time.monotonic() - t_start
-    if before_dedup != len(unique):
-        logger.debug(f"{tag} Deduped {before_dedup} → {len(unique)} contacts")
-
     logger.info(
-        f"{tag} Done: {len(unique)} contacts | "
+        f"{tag} Done: {len(result.decision_makers)} contacts | "
         f"layers=0b{result.layers_completed:06b} | {total_elapsed:.1f}s"
     )
 
