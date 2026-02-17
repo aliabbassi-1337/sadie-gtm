@@ -102,17 +102,18 @@ async def show_status():
     try:
         svc = Service()
         stats = await svc.get_owner_enrichment_stats()
-        print("\n=== Owner Enrichment Queue ===")
-        print(f"  SQS pending:    {pending}")
-        print(f"  SQS in-flight:  {in_flight}")
-        print(f"\n=== DB Status ===")
-        print(f"  Hotels w/ website:  {stats.get('total_with_website', 0):,}")
-        print(f"  Complete:           {stats.get('complete', 0):,}")
-        print(f"  No results:         {stats.get('no_results', 0):,}")
-        print(f"  With contacts:      {stats.get('hotels_with_contacts', 0):,}")
-        print(f"  Total contacts:     {stats.get('total_contacts', 0):,}")
-        print(f"  Verified emails:    {stats.get('verified_emails', 0):,}")
-        print()
+        logger.info(
+            "\n=== Owner Enrichment Queue ===\n"
+            f"  SQS pending:    {pending}\n"
+            f"  SQS in-flight:  {in_flight}\n"
+            f"\n=== DB Status ===\n"
+            f"  Hotels w/ website:  {stats.get('total_with_website', 0):,}\n"
+            f"  Complete:           {stats.get('complete', 0):,}\n"
+            f"  No results:         {stats.get('no_results', 0):,}\n"
+            f"  With contacts:      {stats.get('hotels_with_contacts', 0):,}\n"
+            f"  Total contacts:     {stats.get('total_contacts', 0):,}\n"
+            f"  Verified emails:    {stats.get('verified_emails', 0):,}"
+        )
     finally:
         await close_db()
 

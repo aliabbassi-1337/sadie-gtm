@@ -154,19 +154,18 @@ async def run_direct(limit: int = 5, concurrency: int = 3, layer: str = "all"):
 
         # Print results
         results = result.get("results", [])
-        print(f"\n{'='*50}")
-        print(f"RESULTS")
-        print(f"{'='*50}")
+        lines = ["\n" + "=" * 50, "RESULTS", "=" * 50]
         for r in results:
-            print(f"\n  [{r.hotel_id}] {r.domain}:")
+            lines.append(f"\n  [{r.hotel_id}] {r.domain}:")
             if r.decision_makers:
                 for dm in r.decision_makers:
                     v = " [VERIFIED]" if dm.email_verified else ""
-                    print(f"    -> {dm.full_name or '?'} | {dm.title or '?'} | {dm.email or '?'}{v} | src={dm.source}")
+                    lines.append(f"    -> {dm.full_name or '?'} | {dm.title or '?'} | {dm.email or '?'}{v} | src={dm.source}")
             else:
-                print(f"    (no contacts)")
+                lines.append(f"    (no contacts)")
 
-        print(f"\n  Hotels: {result['processed']} | With contacts: {result['found']} | Contacts: {result['contacts']} | Verified: {result['verified']}")
+        lines.append(f"\n  Hotels: {result['processed']} | With contacts: {result['found']} | Contacts: {result['contacts']} | Verified: {result['verified']}")
+        logger.info("\n".join(lines))
 
     finally:
         await close_db()
@@ -179,23 +178,27 @@ async def show_status():
         svc = Service()
         stats = await svc.get_owner_enrichment_stats()
 
-        print("\n=== Owner Enrichment Status ===")
-        print(f"  Hotels w/ website:  {stats.get('total_with_website', 0):,}")
-        print(f"  Complete:           {stats.get('complete', 0):,}")
-        print(f"  No results:         {stats.get('no_results', 0):,}")
-        print(f"  ---")
-        print(f"  With contacts:      {stats.get('hotels_with_contacts', 0):,}")
-        print(f"  Total contacts:     {stats.get('total_contacts', 0):,}")
-        print(f"  Verified emails:    {stats.get('verified_emails', 0):,}")
+        lines = [
+            "\n=== Owner Enrichment Status ===",
+            f"  Hotels w/ website:  {stats.get('total_with_website', 0):,}",
+            f"  Complete:           {stats.get('complete', 0):,}",
+            f"  No results:         {stats.get('no_results', 0):,}",
+            f"  ---",
+            f"  With contacts:      {stats.get('hotels_with_contacts', 0):,}",
+            f"  Total contacts:     {stats.get('total_contacts', 0):,}",
+            f"  Verified emails:    {stats.get('verified_emails', 0):,}",
+        ]
 
         if QUEUE_URL:
             attrs = get_queue_attributes(QUEUE_URL)
             pending = int(attrs.get("ApproximateNumberOfMessages", 0))
             in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
-            print(f"  ---")
-            print(f"  SQS pending:        {pending}")
-            print(f"  SQS in-flight:      {in_flight}")
-        print()
+            lines.extend([
+                f"  ---",
+                f"  SQS pending:        {pending}",
+                f"  SQS in-flight:      {in_flight}",
+            ])
+        logger.info("\n".join(lines))
     finally:
         await close_db()
 

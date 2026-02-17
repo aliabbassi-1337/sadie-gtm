@@ -70,15 +70,16 @@ async def show_status() -> None:
             logger.info("No enrichment data yet")
             return
 
-        print("\n=== Owner Enrichment Status ===")
-        print(f"  Hotels with website:    {stats.get('total_with_website', 0):,}")
-        print(f"  Complete:               {stats.get('complete', 0):,}")
-        print(f"  No results:             {stats.get('no_results', 0):,}")
-        print(f"  ---")
-        print(f"  Hotels with contacts:   {stats.get('hotels_with_contacts', 0):,}")
-        print(f"  Total contacts:         {stats.get('total_contacts', 0):,}")
-        print(f"  Verified emails:        {stats.get('verified_emails', 0):,}")
-        print()
+        logger.info(
+            "\n=== Owner Enrichment Status ===\n"
+            f"  Hotels with website:    {stats.get('total_with_website', 0):,}\n"
+            f"  Complete:               {stats.get('complete', 0):,}\n"
+            f"  No results:             {stats.get('no_results', 0):,}\n"
+            f"  ---\n"
+            f"  Hotels with contacts:   {stats.get('hotels_with_contacts', 0):,}\n"
+            f"  Total contacts:         {stats.get('total_contacts', 0):,}\n"
+            f"  Verified emails:        {stats.get('verified_emails', 0):,}"
+        )
 
     finally:
         await close_db()
