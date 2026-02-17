@@ -3800,7 +3800,6 @@ class Service(IService):
         layer: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run owner/GM enrichment waterfall on pending hotels."""
-        from services.enrichment import owner_repo
         from services.enrichment.owner_enricher import enrich_batch
         from lib.owner_discovery.models import (
             LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
@@ -3819,7 +3818,7 @@ class Service(IService):
         layer_mask = layer_map.get(layer, 0xFF) if layer else 0xFF
         layer_filter = layer_mask if layer and layer != "all" else None
 
-        hotels = await owner_repo.get_hotels_pending_owner_enrichment(
+        hotels = await repo.get_hotels_pending_owner_enrichment(
             limit=limit, layer=layer_filter,
         )
         if not hotels:
@@ -3833,28 +3832,7 @@ class Service(IService):
         )
 
         # Persist results (service layer handles all DB writes)
-        saved_count = 0
-        for result in results:
-            # Cache domain intel
-            if result.domain_intel:
-                if result.domain_intel.registrant_name or result.domain_intel.registrant_org:
-                    await owner_repo.cache_domain_intel(result.domain_intel)
-                if result.domain_intel.email_provider or result.domain_intel.mx_records:
-                    await owner_repo.cache_dns_intel(result.domain_intel)
-
-            # Insert decision makers
-            if result.decision_makers:
-                count = await owner_repo.batch_insert_decision_makers(
-                    result.hotel_id, result.decision_makers,
-                )
-                saved_count += count
-                status = 1  # complete
-            else:
-                status = 2  # no_results
-
-            await owner_repo.update_enrichment_status(
-                result.hotel_id, status, result.layers_completed,
-            )
+        saved_count = await self._persist_owner_results(results)
 
         found = sum(1 for r in results if r.found_any)
         total_contacts = sum(len(r.decision_makers) for r in results)
@@ -3885,20 +3863,22 @@ class Service(IService):
 
         Returns count of decision makers saved.
         """
-        from services.enrichment import owner_repo
+        return await self._persist_owner_results(results)
 
+    async def _persist_owner_results(self, results: list) -> int:
+        """Internal: persist owner enrichment results to DB."""
         saved_count = 0
         for result in results:
             # Cache domain intel
             if result.domain_intel:
                 if result.domain_intel.registrant_name or result.domain_intel.registrant_org:
-                    await owner_repo.cache_domain_intel(result.domain_intel)
+                    await repo.cache_domain_intel(result.domain_intel)
                 if result.domain_intel.email_provider or result.domain_intel.mx_records:
-                    await owner_repo.cache_dns_intel(result.domain_intel)
+                    await repo.cache_dns_intel(result.domain_intel)
 
             # Insert decision makers
             if result.decision_makers:
-                count = await owner_repo.batch_insert_decision_makers(
+                count = await repo.batch_insert_decision_makers(
                     result.hotel_id, result.decision_makers,
                 )
                 saved_count += count
@@ -3906,7 +3886,7 @@ class Service(IService):
             else:
                 status = 2  # no_results
 
-            await owner_repo.update_enrichment_status(
+            await repo.update_owner_enrichment_status(
                 result.hotel_id, status, result.layers_completed,
             )
 
@@ -3914,17 +3894,14 @@ class Service(IService):
 
     async def get_owner_enrichment_stats(self) -> Dict[str, Any]:
         """Get owner enrichment pipeline statistics."""
-        from services.enrichment import owner_repo
-        return await owner_repo.get_enrichment_stats()
+        return await repo.get_owner_enrichment_stats()
 
     async def get_hotels_pending_owner_enrichment(
         self, limit: int = 100, layer: Optional[int] = None,
     ) -> List[Dict]:
         """Get hotels that need owner enrichment."""
-        from services.enrichment import owner_repo
-        return await owner_repo.get_hotels_pending_owner_enrichment(limit=limit, layer=layer)
+        return await repo.get_hotels_pending_owner_enrichment(limit=limit, layer=layer)
 
     async def get_decision_makers_for_hotel(self, hotel_id: int) -> List[Dict]:
         """Get all discovered decision makers for a hotel."""
-        from services.enrichment import owner_repo
-        return await owner_repo.get_decision_makers_for_hotel(hotel_id)
+        return await repo.get_decision_makers_for_hotel(hotel_id)
