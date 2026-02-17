@@ -26,7 +26,7 @@ from loguru import logger
 from db.client import init_db, close_db
 from services.enrichment.service import Service
 
-LAYER_CHOICES = ["rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
+LAYER_CHOICES = ["ct-certs", "rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
 
 
 async def run_enrichment(

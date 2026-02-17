@@ -24,8 +24,9 @@ from services.enrichment.owner_models import (
     DecisionMaker, DomainIntel, OwnerEnrichmentResult,
     LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
     LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
-    LAYER_GOV_DATA,
+    LAYER_GOV_DATA, LAYER_CT_CERTS,
 )
+from lib.owner_discovery.ct_intelligence import ct_to_decision_makers
 from lib.owner_discovery.rdap_client import rdap_to_decision_maker
 from lib.owner_discovery.whois_history import whois_lookup, whois_to_decision_maker
 from lib.owner_discovery.dns_intel import analyze_domain
@@ -49,6 +50,40 @@ def _extract_domain(url: str) -> Optional[str]:
 
 
 # ── Layer functions ─────────────────────────────────────────────────
+
+
+async def _run_ct(
+    client: httpx.AsyncClient, tag: str, domain: str,
+) -> Tuple[List[DecisionMaker], Optional[DomainIntel]]:
+    """Layer 0: CT Certificate Intelligence."""
+    t0 = time.monotonic()
+    logger.debug(f"{tag} [0/7 CT] Querying crt.sh for {domain}")
+    dms, ct_intel = await ct_to_decision_makers(client, domain)
+    elapsed = time.monotonic() - t0
+
+    domain_intel_partial = None
+    if ct_intel:
+        domain_intel_partial = DomainIntel(
+            domain=domain,
+            ct_org_name=ct_intel.org_name,
+            ct_alt_domains=ct_intel.alt_domains,
+            ct_cert_count=ct_intel.cert_count,
+        )
+        if ct_intel.org_name:
+            logger.info(
+                f"{tag} [0/7 CT] HIT: org={ct_intel.org_name} | "
+                f"{ct_intel.cert_count} certs | "
+                f"{len(ct_intel.alt_domains)} alt domains [{elapsed:.1f}s]"
+            )
+        else:
+            logger.info(
+                f"{tag} [0/7 CT] {ct_intel.cert_count} certs, "
+                f"no OV/EV org found [{elapsed:.1f}s]"
+            )
+    else:
+        logger.info(f"{tag} [0/7 CT] No response [{elapsed:.1f}s]")
+
+    return dms, domain_intel_partial
 
 
 async def _run_rdap(
@@ -379,10 +414,20 @@ async def enrich_single_hotel(
         logger.warning(f"{tag} Skipped — no domain extracted from website: {website!r}")
         return result
 
-    logger.info(f"{tag} Starting enrichment waterfall | hotel={name!r} layers=0b{layers:07b}")
+    logger.info(f"{tag} Starting enrichment waterfall | hotel={name!r} layers=0b{layers:08b}")
     domain_intel = DomainIntel(domain=domain)
 
     try:
+        # Layer 0: CT Certificate Intelligence
+        if layers & LAYER_CT_CERTS:
+            dms, ct_partial = await _run_ct(client, tag, domain)
+            if ct_partial:
+                domain_intel.ct_org_name = ct_partial.ct_org_name
+                domain_intel.ct_alt_domains = ct_partial.ct_alt_domains
+                domain_intel.ct_cert_count = ct_partial.ct_cert_count
+            result.decision_makers.extend(dms)
+            result.layers_completed |= LAYER_CT_CERTS
+
         # Layer 1: RDAP
         if layers & LAYER_RDAP:
             dms, rdap_intel = await _run_rdap(client, tag, domain)
@@ -442,7 +487,7 @@ async def enrich_single_hotel(
     total_elapsed = time.monotonic() - t_start
     logger.info(
         f"{tag} Done: {len(result.decision_makers)} contacts | "
-        f"layers=0b{result.layers_completed:07b} | {total_elapsed:.1f}s"
+        f"layers=0b{result.layers_completed:08b} | {total_elapsed:.1f}s"
     )
 
     return result
@@ -466,7 +511,7 @@ async def enrich_batch(
     t_batch_start = time.monotonic()
     logger.info(
         f"Batch starting: {len(hotels)} hotels | "
-        f"concurrency={concurrency} | layers=0b{layers:07b}"
+        f"concurrency={concurrency} | layers=0b{layers:08b}"
     )
 
     sem = asyncio.Semaphore(concurrency)

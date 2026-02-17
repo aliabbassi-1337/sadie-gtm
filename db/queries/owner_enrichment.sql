@@ -101,6 +101,30 @@ FROM sadie_gtm.hotel_decision_makers
 WHERE hotel_id = :hotel_id
 ORDER BY confidence DESC;
 
+-- name: cache_cert_intel!
+-- Upsert CT certificate intelligence cache.
+INSERT INTO sadie_gtm.domain_cert_cache
+    (domain, org_name, alt_domains, cert_count,
+     earliest_cert, latest_cert, has_ov_ev, raw_data, queried_at)
+VALUES (:domain, :org_name, :alt_domains, :cert_count,
+        :earliest_cert, :latest_cert, :has_ov_ev, :raw_data, NOW())
+ON CONFLICT (domain) DO UPDATE
+SET org_name = COALESCE(EXCLUDED.org_name, sadie_gtm.domain_cert_cache.org_name),
+    alt_domains = EXCLUDED.alt_domains,
+    cert_count = EXCLUDED.cert_count,
+    earliest_cert = EXCLUDED.earliest_cert,
+    latest_cert = EXCLUDED.latest_cert,
+    has_ov_ev = EXCLUDED.has_ov_ev,
+    raw_data = EXCLUDED.raw_data,
+    queried_at = NOW();
+
+-- name: get_cached_cert_intel^
+-- Get cached CT certificate intelligence for a domain.
+SELECT domain, org_name, alt_domains, cert_count,
+       earliest_cert, latest_cert, has_ov_ev, raw_data, queried_at
+FROM sadie_gtm.domain_cert_cache
+WHERE domain = :domain;
+
 -- name: find_gov_matches
 -- Find government-sourced hotel records matching a hotel by city+state and name.
 -- Uses case-insensitive substring matching on name.

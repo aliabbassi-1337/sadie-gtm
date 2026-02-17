@@ -26,7 +26,7 @@ from infra.sqs import receive_messages, delete_messages_batch, get_queue_attribu
 QUEUE_URL = os.getenv("SQS_OWNER_ENRICHMENT_QUEUE_URL", "")
 VISIBILITY_TIMEOUT = 1800  # 30 minutes per batch
 
-LAYER_CHOICES = ["rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
+LAYER_CHOICES = ["ct-certs", "rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
 
 shutdown_requested = False
 

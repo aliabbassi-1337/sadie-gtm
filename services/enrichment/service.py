@@ -3808,10 +3808,11 @@ class Service(IService):
         from services.enrichment.owner_models import (
             LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
             LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
-            LAYER_GOV_DATA,
+            LAYER_GOV_DATA, LAYER_CT_CERTS,
         )
 
         layer_map = {
+            "ct-certs": LAYER_CT_CERTS,
             "rdap": LAYER_RDAP,
             "whois-history": LAYER_WHOIS_HISTORY,
             "dns": LAYER_DNS,
@@ -3874,6 +3875,8 @@ class Service(IService):
                     await repo.cache_domain_intel(result.domain_intel)
                 if result.domain_intel.email_provider or result.domain_intel.mx_records:
                     await repo.cache_dns_intel(result.domain_intel)
+                if result.domain_intel.ct_org_name or result.domain_intel.ct_cert_count:
+                    await repo.cache_cert_intel(result.domain_intel)
 
             # Insert decision makers
             if result.decision_makers:

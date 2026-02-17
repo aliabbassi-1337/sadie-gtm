@@ -1762,6 +1762,24 @@ async def cache_dns_intel(intel: DomainIntel) -> None:
         )
 
 
+async def cache_cert_intel(intel: DomainIntel) -> None:
+    """Cache CT certificate intelligence for a domain."""
+    import json
+
+    async with get_conn() as conn:
+        await queries.cache_cert_intel(
+            conn,
+            domain=intel.domain,
+            org_name=intel.ct_org_name,
+            alt_domains=intel.ct_alt_domains or [],
+            cert_count=intel.ct_cert_count,
+            earliest_cert=None,
+            latest_cert=None,
+            has_ov_ev=bool(intel.ct_org_name),
+            raw_data=None,
+        )
+
+
 async def get_owner_enrichment_stats() -> Dict:
     """Get owner enrichment pipeline statistics."""
     async with get_conn() as conn:

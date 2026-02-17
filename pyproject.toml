@@ -22,6 +22,7 @@ dependencies = [
     "openai>=2.20.0",
     "dnspython>=2.6.0",
     "python-whois>=0.9.6",
+    "cryptography>=46.0.5",
 ]
 
 [dependency-groups]
