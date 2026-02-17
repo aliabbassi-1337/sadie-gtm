@@ -22,6 +22,8 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
     "openai>=2.20.0",
+    "dnspython>=2.6.0",
+    "python-whois>=0.9.6",
 ]
 
 [dependency-groups]

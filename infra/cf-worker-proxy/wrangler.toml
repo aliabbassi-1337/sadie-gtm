@@ -1,0 +1,18 @@
+name = "sadie-scraper-proxy"
+main = "src/worker.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Workers Paid plan ($5/mo) required for reasonable CPU time limits
+# Free plan has 10ms CPU time limit which is too tight for proxying
+
+[vars]
+# Set AUTH_SECRET via `wrangler secret put AUTH_SECRET`
+# AUTH_SECRET = "" # Do NOT put secrets here, use wrangler secret
+
+# Optional: KV namespace for caching scraped pages
+# Create with: wrangler kv:namespace create SCRAPE_CACHE
+# Then uncomment and update the id below:
+# [[kv_namespaces]]
+# binding = "SCRAPE_CACHE"
+# id = "your-kv-namespace-id"

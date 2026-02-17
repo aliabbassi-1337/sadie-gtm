@@ -787,5 +787,238 @@ class TestScrapeBig4ParksWithMocks:
         )
 
 
+# ============================================================================
+# OWNER ENRICHMENT TESTS
+# ============================================================================
+
+
+class TestGetOwnerEnrichmentStats:
+    """Tests for get_owner_enrichment_stats."""
+
+    @pytest.mark.asyncio
+    async def test_returns_stats_dict(self, service):
+        stats = await service.get_owner_enrichment_stats()
+        assert isinstance(stats, dict)
+        assert "total_with_website" in stats
+        assert "total_contacts" in stats
+
+
+class TestGetHotelsPendingOwnerEnrichment:
+    """Tests for get_hotels_pending_owner_enrichment."""
+
+    @pytest.mark.asyncio
+    async def test_returns_list(self, service):
+        hotels = await service.get_hotels_pending_owner_enrichment(limit=5)
+        assert isinstance(hotels, list)
+
+    @pytest.mark.asyncio
+    async def test_respects_limit(self, service):
+        hotels = await service.get_hotels_pending_owner_enrichment(limit=3)
+        assert len(hotels) <= 3
+
+
+class TestGetDecisionMakersForHotel:
+    """Tests for get_decision_makers_for_hotel."""
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_hotel_returns_empty(self, service):
+        dms = await service.get_decision_makers_for_hotel(999999999)
+        assert dms == []
+
+
+class TestPersistOwnerEnrichmentResults:
+    """Tests for _persist_owner_results."""
+
+    @pytest.mark.asyncio
+    async def test_empty_results_returns_zero(self, service):
+        saved = await service._persist_owner_results([])
+        assert saved == 0
+
+    @pytest.mark.asyncio
+    async def test_persists_decision_makers(self, service):
+        from services.enrichment.owner_models import (
+            DecisionMaker, DomainIntel, OwnerEnrichmentResult,
+            LAYER_RDAP, LAYER_DNS,
+        )
+        from services.leadgen.repo import insert_hotel, delete_hotel
+        from services.enrichment import repo
+        from db.client import get_conn
+
+        hotel_id = await insert_hotel(
+            name="Persist Test Hotel",
+            website="https://persist-test-svc.com",
+            city="Miami", state="Florida",
+            status=0, source="test",
+        )
+        try:
+            results = [
+                OwnerEnrichmentResult(
+                    hotel_id=hotel_id,
+                    domain="persist-test-svc.com",
+                    decision_makers=[
+                        DecisionMaker(
+                            full_name="Alice Owner",
+                            title="Owner",
+                            email="alice@persist-test-svc.com",
+                            sources=["rdap"],
+                            confidence=0.85,
+                        ),
+                    ],
+                    domain_intel=DomainIntel(
+                        domain="persist-test-svc.com",
+                        registrant_name="Alice Owner",
+                        is_privacy_protected=False,
+                        whois_sources=["rdap"],
+                        email_provider="google_workspace",
+                        mx_records=["aspmx.l.google.com"],
+                    ),
+                    layers_completed=LAYER_RDAP | LAYER_DNS,
+                ),
+            ]
+
+            saved = await service._persist_owner_results(results)
+            assert saved == 1
+
+            # Verify DM was persisted
+            dms = await service.get_decision_makers_for_hotel(hotel_id)
+            assert len(dms) == 1
+            assert dms[0]["full_name"] == "Alice Owner"
+
+            # Verify enrichment status was written
+            async with get_conn() as conn:
+                row = await conn.fetchrow(
+                    "SELECT status, layers_completed FROM sadie_gtm.hotel_owner_enrichment WHERE hotel_id = $1",
+                    hotel_id,
+                )
+            assert row["status"] == 1  # complete
+            assert row["layers_completed"] == LAYER_RDAP | LAYER_DNS
+        finally:
+            async with get_conn() as conn:
+                await conn.execute(
+                    "DELETE FROM sadie_gtm.hotel_decision_makers WHERE hotel_id = $1", hotel_id,
+                )
+                await conn.execute(
+                    "DELETE FROM sadie_gtm.hotel_owner_enrichment WHERE hotel_id = $1", hotel_id,
+                )
+                await conn.execute(
+                    "DELETE FROM sadie_gtm.domain_whois_cache WHERE domain = $1", "persist-test-svc.com",
+                )
+                await conn.execute(
+                    "DELETE FROM sadie_gtm.domain_dns_cache WHERE domain = $1", "persist-test-svc.com",
+                )
+            await delete_hotel(hotel_id)
+
+    @pytest.mark.asyncio
+    async def test_no_contacts_sets_status_no_results(self, service):
+        from services.enrichment.owner_models import OwnerEnrichmentResult, LAYER_RDAP
+        from services.leadgen.repo import insert_hotel, delete_hotel
+        from db.client import get_conn
+
+        hotel_id = await insert_hotel(
+            name="No Results Hotel",
+            website="https://no-results-svc.com",
+            city="Tampa", state="Florida",
+            status=0, source="test",
+        )
+        try:
+            results = [
+                OwnerEnrichmentResult(
+                    hotel_id=hotel_id,
+                    domain="no-results-svc.com",
+                    decision_makers=[],
+                    layers_completed=LAYER_RDAP,
+                ),
+            ]
+
+            saved = await service._persist_owner_results(results)
+            assert saved == 0
+
+            async with get_conn() as conn:
+                row = await conn.fetchrow(
+                    "SELECT status FROM sadie_gtm.hotel_owner_enrichment WHERE hotel_id = $1",
+                    hotel_id,
+                )
+            assert row["status"] == 2  # no_results
+        finally:
+            async with get_conn() as conn:
+                await conn.execute(
+                    "DELETE FROM sadie_gtm.hotel_owner_enrichment WHERE hotel_id = $1", hotel_id,
+                )
+            await delete_hotel(hotel_id)
+
+
+@pytest.mark.no_db
+class TestRunOwnerEnrichmentMocked:
+    """Tests for run_owner_enrichment with mocked enricher."""
+
+    @pytest.mark.asyncio
+    async def test_returns_zeros_when_no_pending(self):
+        from unittest.mock import patch, AsyncMock
+
+        service = Service(rms_repo=None, rms_queue=MockQueue())
+        with patch("services.enrichment.repo.get_hotels_pending_owner_enrichment",
+                    new_callable=AsyncMock, return_value=[]):
+            result = await service.run_owner_enrichment(limit=10)
+
+        assert result["processed"] == 0
+        assert result["found"] == 0
+        assert result["contacts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_processes_hotels_and_persists(self):
+        from unittest.mock import patch, AsyncMock
+        from services.enrichment.owner_models import (
+            DecisionMaker, OwnerEnrichmentResult, LAYER_RDAP,
+        )
+
+        fake_hotels = [
+            {"hotel_id": 1, "website": "https://a.com"},
+            {"hotel_id": 2, "website": "https://b.com"},
+        ]
+        fake_results = [
+            OwnerEnrichmentResult(
+                hotel_id=1, domain="a.com",
+                decision_makers=[
+                    DecisionMaker(full_name="Owner A", sources=["rdap"], confidence=0.9),
+                ],
+                layers_completed=LAYER_RDAP,
+            ),
+            OwnerEnrichmentResult(
+                hotel_id=2, domain="b.com",
+                decision_makers=[],
+                layers_completed=LAYER_RDAP,
+            ),
+        ]
+
+        service = Service(rms_repo=None, rms_queue=MockQueue())
+
+        with patch("services.enrichment.repo.get_hotels_pending_owner_enrichment",
+                    new_callable=AsyncMock, return_value=fake_hotels):
+            with patch("services.enrichment.owner_enricher.enrich_batch",
+                        new_callable=AsyncMock, return_value=fake_results):
+                with patch.object(service, "_persist_owner_results",
+                                  new_callable=AsyncMock, return_value=1):
+                    result = await service.run_owner_enrichment(limit=10)
+
+        assert result["processed"] == 2
+        assert result["found"] == 1
+        assert result["contacts"] == 1
+        assert result["verified"] == 0
+        assert result["saved"] == 1
+
+    @pytest.mark.asyncio
+    async def test_layer_filter_maps_correctly(self):
+        from unittest.mock import patch, AsyncMock
+        from services.enrichment.owner_models import LAYER_WEBSITE
+
+        service = Service(rms_repo=None, rms_queue=MockQueue())
+
+        with patch("services.enrichment.repo.get_hotels_pending_owner_enrichment",
+                    new_callable=AsyncMock, return_value=[]) as mock_pending:
+            await service.run_owner_enrichment(limit=5, layer="website")
+
+        mock_pending.assert_called_once_with(limit=5, layer=LAYER_WEBSITE)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

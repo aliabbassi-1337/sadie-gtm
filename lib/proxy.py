@@ -5,6 +5,7 @@ Supports:
   - BrightData DC/residential via env vars
   - Arbitrary HTTP proxy URLs via RMS_PROXY_URLS env var
   - Free public proxies from ProxyScrape (auto-tested)
+  - Cloudflare Worker proxy via CF_WORKER_PROXY_URL env var ($5/mo for 10M requests)
 """
 
 import asyncio
@@ -162,3 +163,90 @@ class ProxyPool:
             kwargs["proxy"] = proxy_url
             kwargs["verify"] = False
         return httpx.AsyncClient(**kwargs)
+
+
+class CfWorkerProxy:
+    """Cloudflare Worker proxy client.
+
+    Routes requests through a CF Worker deployed on Cloudflare's edge network.
+    $5/mo for 10M requests vs Brightdata residential at $8-12/GB.
+    Datacenter IPs (not residential) - fine for WHOIS, hotel sites, gov APIs.
+
+    Usage:
+        proxy = CfWorkerProxy()
+        async with httpx.AsyncClient() as client:
+            html = await proxy.fetch(client, "https://example.com/about")
+    """
+
+    def __init__(
+        self,
+        worker_url: Optional[str] = None,
+        auth_key: Optional[str] = None,
+    ):
+        self.worker_url = worker_url or os.getenv("CF_WORKER_PROXY_URL", "")
+        self.auth_key = auth_key or os.getenv("CF_WORKER_AUTH_KEY", "")
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.worker_url)
+
+    async def fetch(
+        self,
+        client: httpx.AsyncClient,
+        target_url: str,
+        timeout: float = 20.0,
+    ) -> Optional[str]:
+        """Fetch a URL through the CF Worker proxy.
+
+        Returns HTML content or None on failure.
+        """
+        if not self.worker_url:
+            logger.warning("CF Worker proxy not configured (set CF_WORKER_PROXY_URL)")
+            return None
+
+        headers = {}
+        if self.auth_key:
+            headers["X-Auth-Key"] = self.auth_key
+
+        try:
+            resp = await client.get(
+                self.worker_url,
+                params={"url": target_url},
+                headers=headers,
+                timeout=timeout,
+            )
+            colo = resp.headers.get("X-Worker-Colo", "?")
+            cache = resp.headers.get("X-Cache", "?")
+            logger.debug(f"CF Worker [{colo}] {cache} {resp.status_code} {target_url}")
+
+            if resp.status_code == 200:
+                return resp.text
+            return None
+        except Exception as e:
+            logger.debug(f"CF Worker fetch failed: {e}")
+            return None
+
+    async def fetch_with_fallback(
+        self,
+        client: httpx.AsyncClient,
+        target_url: str,
+        timeout: float = 20.0,
+    ) -> Optional[str]:
+        """Try CF Worker first, fall back to direct fetch."""
+        if self.is_configured:
+            result = await self.fetch(client, target_url, timeout)
+            if result:
+                return result
+
+        # Direct fallback
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+            }
+            resp = await client.get(target_url, headers=headers, timeout=timeout, follow_redirects=True)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception:
+            pass
+        return None
