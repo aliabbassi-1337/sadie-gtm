@@ -172,10 +172,13 @@ class CfWorkerProxy:
     $5/mo for 10M requests vs Brightdata residential at $8-12/GB.
     Datacenter IPs (not residential) - fine for WHOIS, hotel sites, gov APIs.
 
+    Supports both HTML and JSON APIs (RDAP, crt.sh) via Accept header forwarding.
+
     Usage:
         proxy = CfWorkerProxy()
         async with httpx.AsyncClient() as client:
             html = await proxy.fetch(client, "https://example.com/about")
+            data = await proxy.fetch_json(client, "https://rdap.org/domain/example.com")
     """
 
     def __init__(
@@ -195,10 +198,17 @@ class CfWorkerProxy:
         client: httpx.AsyncClient,
         target_url: str,
         timeout: float = 20.0,
+        accept: Optional[str] = None,
     ) -> Optional[str]:
         """Fetch a URL through the CF Worker proxy.
 
-        Returns HTML content or None on failure.
+        Args:
+            client: httpx async client
+            target_url: URL to fetch
+            timeout: Request timeout in seconds
+            accept: Custom Accept header (e.g. "application/json" for JSON APIs)
+
+        Returns text content or None on failure.
         """
         if not self.worker_url:
             logger.warning("CF Worker proxy not configured (set CF_WORKER_PROXY_URL)")
@@ -207,6 +217,8 @@ class CfWorkerProxy:
         headers = {}
         if self.auth_key:
             headers["X-Auth-Key"] = self.auth_key
+        if accept:
+            headers["X-Forward-Accept"] = accept
 
         try:
             resp = await client.get(
@@ -221,9 +233,35 @@ class CfWorkerProxy:
 
             if resp.status_code == 200:
                 return resp.text
+            if resp.status_code == 429:
+                logger.warning(f"CF Worker: target returned 429 for {target_url}")
             return None
         except Exception as e:
             logger.debug(f"CF Worker fetch failed: {e}")
+            return None
+
+    async def fetch_json(
+        self,
+        client: httpx.AsyncClient,
+        target_url: str,
+        timeout: float = 20.0,
+    ) -> Optional[object]:
+        """Fetch a JSON API through the CF Worker proxy.
+
+        Returns parsed JSON (dict or list) or None on failure.
+        """
+        import json as _json
+
+        text = await self.fetch(
+            client, target_url, timeout=timeout,
+            accept="application/json, application/rdap+json",
+        )
+        if not text:
+            return None
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError as e:
+            logger.debug(f"CF Worker JSON parse failed for {target_url}: {e}")
             return None
 
     async def fetch_with_fallback(

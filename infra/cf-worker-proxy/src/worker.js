@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker proxy for web scraping with IP rotation.
+ * Cloudflare Worker proxy for web scraping + API requests with IP rotation.
  *
  * Deployed to Cloudflare's edge network (300+ cities).
  * Outbound requests originate from the nearest Cloudflare data center IP.
@@ -7,8 +7,9 @@
  * Features:
  * - Auth via X-Auth-Key header
  * - User-Agent rotation
- * - KV caching (optional, reduces redundant fetches)
+ * - KV caching (optional, reduces redundant fetches, preserves content type)
  * - Returns X-Worker-Colo header showing which data center handled the request
+ * - Supports JSON APIs (RDAP, crt.sh) via X-Forward-Accept header
  *
  * Cost: $5/mo for 10M requests (vs Brightdata $8-12/GB residential).
  * Limitation: Datacenter IPs, not residential. Fine for WHOIS, hotel sites, gov APIs.
@@ -55,20 +56,41 @@ export default {
     if (env.SCRAPE_CACHE) {
       const cached = await env.SCRAPE_CACHE.get(cacheKey);
       if (cached) {
-        return new Response(cached, {
-          headers: {
-            'Content-Type': 'text/html; charset=utf-8',
-            'X-Cache': 'HIT',
-            'X-Worker-Colo': request.cf?.colo || 'unknown',
-          },
-        });
+        // Cache stores JSON envelope with body + contentType
+        try {
+          const envelope = JSON.parse(cached);
+          return new Response(envelope.body, {
+            headers: {
+              'Content-Type': envelope.contentType || 'text/html; charset=utf-8',
+              'X-Cache': 'HIT',
+              'X-Worker-Colo': request.cf?.colo || 'unknown',
+            },
+          });
+        } catch {
+          // Legacy plain-text cache entry
+          return new Response(cached, {
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'X-Cache': 'HIT',
+              'X-Worker-Colo': request.cf?.colo || 'unknown',
+            },
+          });
+        }
       }
     }
 
-    // Build outbound request
+    // Build outbound request headers
     const headers = new Headers();
     headers.set('User-Agent', randomUA());
-    headers.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+
+    // Use forwarded Accept header if provided, otherwise default to HTML
+    const forwardAccept = request.headers.get('X-Forward-Accept');
+    if (forwardAccept) {
+      headers.set('Accept', forwardAccept);
+    } else {
+      headers.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+    }
+
     headers.set('Accept-Language', 'en-US,en;q=0.5');
     headers.set('Accept-Encoding', 'gzip');
 
@@ -86,16 +108,18 @@ export default {
       });
 
       const body = await response.text();
+      const contentType = response.headers.get('Content-Type') || 'text/html';
 
       // Cache successful responses in KV (1 hour TTL)
       if (response.ok && env.SCRAPE_CACHE && body.length > 100) {
-        await env.SCRAPE_CACHE.put(cacheKey, body, { expirationTtl: 3600 });
+        const envelope = JSON.stringify({ body, contentType });
+        await env.SCRAPE_CACHE.put(cacheKey, envelope, { expirationTtl: 3600 });
       }
 
       return new Response(body, {
         status: response.status,
         headers: {
-          'Content-Type': response.headers.get('Content-Type') || 'text/html',
+          'Content-Type': contentType,
           'X-Cache': 'MISS',
           'X-Worker-Colo': request.cf?.colo || 'unknown',
           'X-Target-Status': String(response.status),

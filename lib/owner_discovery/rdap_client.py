@@ -8,13 +8,16 @@ Expected hit rate: ~10-15% (most domains have privacy protection post-GDPR).
 """
 
 import asyncio
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
 import httpx
 from loguru import logger
 
 from services.enrichment.owner_models import DecisionMaker, DomainIntel
+
+if TYPE_CHECKING:
+    from lib.proxy import CfWorkerProxy
 
 RDAP_PROXY = "https://rdap.org/domain"
 
@@ -96,12 +99,14 @@ def _extract_vcard_fields(vcard_array: list) -> dict:
 async def rdap_lookup(
     client: httpx.AsyncClient,
     domain: str,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
 ) -> Optional[DomainIntel]:
     """Query RDAP for domain registration data.
 
     Args:
         client: httpx async client
         domain: Domain name (e.g., "grandhotel.com")
+        cf_proxy: Optional CF Worker proxy to avoid rate limiting
 
     Returns:
         DomainIntel with registrant info, or None on failure.
@@ -112,19 +117,38 @@ async def rdap_lookup(
 
     url = f"{RDAP_PROXY}/{domain}"
     try:
-        resp = await client.get(url, timeout=15.0, follow_redirects=True)
-        if resp.status_code == 404:
-            logger.debug(f"RDAP {domain}: 404 — domain not in RDAP")
-            return DomainIntel(domain=domain, whois_source="rdap")
-        if resp.status_code == 429:
-            logger.warning(f"RDAP {domain}: 429 rate limited, backing off 10s")
-            await asyncio.sleep(10)
-            return None
-        if resp.status_code != 200:
-            logger.debug(f"RDAP {domain}: HTTP {resp.status_code}")
-            return None
-
-        data = resp.json()
+        # Try CF Worker proxy first to avoid rate limiting
+        if cf_proxy and cf_proxy.is_configured:
+            data = await cf_proxy.fetch_json(client, url, timeout=15.0)
+            if data is None:
+                # Fallback to direct
+                logger.debug(f"RDAP {domain}: CF Worker failed, trying direct")
+                resp = await client.get(url, timeout=15.0, follow_redirects=True)
+                if resp.status_code == 404:
+                    return DomainIntel(domain=domain, whois_source="rdap")
+                if resp.status_code == 429:
+                    logger.warning(f"RDAP {domain}: 429 rate limited")
+                    await asyncio.sleep(10)
+                    return None
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+            elif isinstance(data, dict) and data.get("errorCode") == 404:
+                logger.debug(f"RDAP {domain}: 404 — domain not in RDAP")
+                return DomainIntel(domain=domain, whois_source="rdap")
+        else:
+            resp = await client.get(url, timeout=15.0, follow_redirects=True)
+            if resp.status_code == 404:
+                logger.debug(f"RDAP {domain}: 404 — domain not in RDAP")
+                return DomainIntel(domain=domain, whois_source="rdap")
+            if resp.status_code == 429:
+                logger.warning(f"RDAP {domain}: 429 rate limited, backing off 10s")
+                await asyncio.sleep(10)
+                return None
+            if resp.status_code != 200:
+                logger.debug(f"RDAP {domain}: HTTP {resp.status_code}")
+                return None
+            data = resp.json()
     except Exception as e:
         logger.debug(f"RDAP {domain}: request failed — {e}")
         return None
@@ -162,13 +186,14 @@ async def rdap_lookup(
 async def rdap_to_decision_maker(
     client: httpx.AsyncClient,
     domain: str,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
 ) -> tuple[Optional[DecisionMaker], Optional[DomainIntel]]:
     """Run RDAP lookup and convert to a DecisionMaker if registrant data found.
 
     Returns:
         (DecisionMaker or None, DomainIntel or None)
     """
-    intel = await rdap_lookup(client, domain)
+    intel = await rdap_lookup(client, domain, cf_proxy=cf_proxy)
     if not intel or intel.is_privacy_protected:
         return None, intel
 
@@ -190,6 +215,7 @@ async def batch_rdap_lookup(
     domains: list[str],
     concurrency: int = 5,
     delay: float = 1.2,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
 ) -> list[tuple[str, Optional[DecisionMaker], Optional[DomainIntel]]]:
     """Run RDAP lookups for multiple domains with rate limiting.
 
@@ -197,17 +223,23 @@ async def batch_rdap_lookup(
         domains: List of domain names or URLs
         concurrency: Max concurrent requests (keep low for rdap.org)
         delay: Delay between requests in seconds
+        cf_proxy: Optional CF Worker proxy to avoid rate limiting
 
     Returns:
         List of (domain, DecisionMaker or None, DomainIntel or None)
     """
+    # With CF Worker proxy, we can be more aggressive on concurrency/delay
+    if cf_proxy and cf_proxy.is_configured:
+        concurrency = max(concurrency, 10)
+        delay = min(delay, 0.3)
+
     results = []
     sem = asyncio.Semaphore(concurrency)
 
     async with httpx.AsyncClient(http2=True) as client:
         async def lookup_one(domain: str):
             async with sem:
-                dm, intel = await rdap_to_decision_maker(client, domain)
+                dm, intel = await rdap_to_decision_maker(client, domain, cf_proxy=cf_proxy)
                 await asyncio.sleep(delay)
                 return domain, dm, intel
 

@@ -14,12 +14,15 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import httpx
 from loguru import logger
 
 from services.enrichment.owner_models import DecisionMaker
+
+if TYPE_CHECKING:
+    from lib.proxy import CfWorkerProxy
 
 CRT_SH_JSON = "https://crt.sh/"
 
@@ -158,32 +161,47 @@ def _parse_org_from_pem_text(pem_text: str) -> Optional[str]:
 async def ct_lookup(
     client: httpx.AsyncClient,
     domain: str,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
 ) -> Optional[CertIntel]:
     """Query crt.sh for CT log entries for a domain.
 
     Args:
         client: httpx async client
         domain: Domain name (e.g. "big4.com.au")
+        cf_proxy: Optional CF Worker proxy to avoid rate limiting
 
     Returns:
         CertIntel with org name, alt domains, cert stats.
     """
-    params = {"q": domain, "output": "json", "exclude": "expired"}
+    target_url = f"{CRT_SH_JSON}?q={domain}&output=json&exclude=expired"
     try:
-        resp = await client.get(CRT_SH_JSON, params=params, timeout=20.0)
-        if resp.status_code == 429:
-            logger.warning(f"crt.sh {domain}: 429 rate limited, backing off 5s")
-            await asyncio.sleep(5)
-            return None
-        if resp.status_code != 200:
-            logger.debug(f"crt.sh {domain}: HTTP {resp.status_code}")
-            return None
+        data = None
+        # Try CF Worker proxy first for JSON API
+        if cf_proxy and cf_proxy.is_configured:
+            data = await cf_proxy.fetch_json(client, target_url, timeout=20.0)
+            if data is None:
+                # Fallback to direct
+                logger.debug(f"crt.sh {domain}: CF Worker failed, trying direct")
 
-        text = resp.text.strip()
-        if not text or text == "[]":
+        if data is None:
+            params = {"q": domain, "output": "json", "exclude": "expired"}
+            resp = await client.get(CRT_SH_JSON, params=params, timeout=20.0)
+            if resp.status_code == 429:
+                logger.warning(f"crt.sh {domain}: 429 rate limited, backing off 5s")
+                await asyncio.sleep(5)
+                return None
+            if resp.status_code != 200:
+                logger.debug(f"crt.sh {domain}: HTTP {resp.status_code}")
+                return None
+            text = resp.text.strip()
+            if not text or text == "[]":
+                logger.debug(f"crt.sh {domain}: empty response")
+                return CertIntel(domain=domain)
+            data = resp.json()
+
+        if isinstance(data, list) and len(data) == 0:
             logger.debug(f"crt.sh {domain}: empty response")
             return CertIntel(domain=domain)
-        data = resp.json()
         if not isinstance(data, list):
             logger.debug(f"crt.sh {domain}: unexpected response type")
             return None
@@ -243,15 +261,23 @@ async def ct_lookup(
     org_names = set()
     for cert_id in ov_ev_cert_ids[:3]:
         try:
-            pem_resp = await client.get(
-                f"https://crt.sh/?d={cert_id}",
-                timeout=15.0,
-            )
-            if pem_resp.status_code == 200:
-                org = _parse_org_from_pem_text(pem_resp.text)
+            pem_url = f"https://crt.sh/?d={cert_id}"
+            pem_text = None
+
+            # Try CF Worker for PEM fetches too
+            if cf_proxy and cf_proxy.is_configured:
+                pem_text = await cf_proxy.fetch(client, pem_url, timeout=15.0)
+
+            if pem_text is None:
+                pem_resp = await client.get(pem_url, timeout=15.0)
+                if pem_resp.status_code == 200:
+                    pem_text = pem_resp.text
+                await asyncio.sleep(1)  # Rate limit between direct PEM fetches
+
+            if pem_text:
+                org = _parse_org_from_pem_text(pem_text)
                 if org:
                     org_names.add(org)
-            await asyncio.sleep(1)  # Rate limit between PEM fetches
         except Exception as e:
             logger.debug(f"crt.sh PEM fetch {cert_id}: {e}")
 
@@ -278,17 +304,19 @@ async def ct_lookup(
 async def ct_to_decision_makers(
     client: httpx.AsyncClient,
     domain: str,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
 ) -> tuple[list[DecisionMaker], Optional[CertIntel]]:
     """Run CT lookup and convert to DecisionMakers if org name found.
 
     Args:
         client: httpx async client
         domain: Domain name
+        cf_proxy: Optional CF Worker proxy to avoid rate limiting
 
     Returns:
         (list of DecisionMaker, CertIntel or None)
     """
-    intel = await ct_lookup(client, domain)
+    intel = await ct_lookup(client, domain, cf_proxy=cf_proxy)
     if not intel:
         return [], None
 

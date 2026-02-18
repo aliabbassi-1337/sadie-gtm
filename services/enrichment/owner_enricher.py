@@ -26,6 +26,7 @@ from services.enrichment.owner_models import (
     LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
     LAYER_GOV_DATA, LAYER_CT_CERTS, LAYER_ABN_ASIC,
 )
+from lib.proxy import CfWorkerProxy
 from lib.owner_discovery.ct_intelligence import ct_to_decision_makers
 from lib.owner_discovery.rdap_client import rdap_to_decision_maker
 from lib.owner_discovery.whois_history import whois_lookup, whois_to_decision_maker
@@ -54,11 +55,12 @@ def _extract_domain(url: str) -> Optional[str]:
 
 async def _run_ct(
     client: httpx.AsyncClient, tag: str, domain: str,
+    cf_proxy: Optional[CfWorkerProxy] = None,
 ) -> Tuple[List[DecisionMaker], Optional[DomainIntel]]:
     """Layer 0: CT Certificate Intelligence."""
     t0 = time.monotonic()
     logger.debug(f"{tag} [0/7 CT] Querying crt.sh for {domain}")
-    dms, ct_intel = await ct_to_decision_makers(client, domain)
+    dms, ct_intel = await ct_to_decision_makers(client, domain, cf_proxy=cf_proxy)
     elapsed = time.monotonic() - t0
 
     domain_intel_partial = None
@@ -88,11 +90,12 @@ async def _run_ct(
 
 async def _run_rdap(
     client: httpx.AsyncClient, tag: str, domain: str,
+    cf_proxy: Optional[CfWorkerProxy] = None,
 ) -> Tuple[List[DecisionMaker], Optional[DomainIntel]]:
     """Layer 1: RDAP domain lookup."""
     t0 = time.monotonic()
     logger.debug(f"{tag} [1/6 RDAP] Querying rdap.org for {domain}")
-    dm, rdap_intel = await rdap_to_decision_maker(client, domain)
+    dm, rdap_intel = await rdap_to_decision_maker(client, domain, cf_proxy=cf_proxy)
     elapsed = time.monotonic() - t0
 
     dms = []
@@ -122,6 +125,7 @@ async def _run_rdap(
 async def _run_whois(
     client: httpx.AsyncClient, tag: str, domain: str,
     already_found: bool, domain_intel: DomainIntel,
+    cf_proxy: Optional[CfWorkerProxy] = None,
 ) -> Tuple[List[DecisionMaker], DomainIntel]:
     """Layer 2: WHOIS (live python-whois + Wayback fallback)."""
     t0 = time.monotonic()
@@ -132,7 +136,7 @@ async def _run_whois(
         return dms, domain_intel
 
     logger.debug(f"{tag} [2/6 WHOIS] Running live WHOIS + Wayback fallback for {domain}")
-    whois_intel = await whois_lookup(client, domain)
+    whois_intel = await whois_lookup(client, domain, cf_proxy=cf_proxy)
     elapsed = time.monotonic() - t0
 
     if whois_intel and not whois_intel.is_privacy_protected:
@@ -490,6 +494,7 @@ async def enrich_single_hotel(
     hotel: dict,
     layers: int = 0x1FF,
     skip_cache: bool = False,
+    cf_proxy: Optional[CfWorkerProxy] = None,
 ) -> OwnerEnrichmentResult:
     """Run the owner enrichment waterfall for a single hotel.
 
@@ -498,6 +503,7 @@ async def enrich_single_hotel(
         hotel: Dict with hotel_id, name, website, city, state, country
         layers: Bitmask of which layers to run
         skip_cache: If True, re-run even if cached results exist
+        cf_proxy: Optional CF Worker proxy to avoid rate limiting on RDAP/crt.sh/Wayback
 
     Returns:
         OwnerEnrichmentResult with all discovered decision makers
@@ -526,7 +532,7 @@ async def enrich_single_hotel(
     try:
         # Layer 0: CT Certificate Intelligence
         if layers & LAYER_CT_CERTS:
-            dms, ct_partial = await _run_ct(client, tag, domain)
+            dms, ct_partial = await _run_ct(client, tag, domain, cf_proxy=cf_proxy)
             if ct_partial:
                 domain_intel.ct_org_name = ct_partial.ct_org_name
                 domain_intel.ct_alt_domains = ct_partial.ct_alt_domains
@@ -536,7 +542,7 @@ async def enrich_single_hotel(
 
         # Layer 1: RDAP
         if layers & LAYER_RDAP:
-            dms, rdap_intel = await _run_rdap(client, tag, domain)
+            dms, rdap_intel = await _run_rdap(client, tag, domain, cf_proxy=cf_proxy)
             if rdap_intel:
                 domain_intel = rdap_intel
             result.decision_makers.extend(dms)
@@ -546,6 +552,7 @@ async def enrich_single_hotel(
         if layers & LAYER_WHOIS_HISTORY:
             dms, domain_intel = await _run_whois(
                 client, tag, domain, result.found_any, domain_intel,
+                cf_proxy=cf_proxy,
             )
             result.decision_makers.extend(dms)
             result.layers_completed |= LAYER_WHOIS_HISTORY
@@ -621,6 +628,17 @@ async def enrich_batch(
         List of OwnerEnrichmentResult
     """
     t_batch_start = time.monotonic()
+
+    # Create CF Worker proxy (auto-configures from env vars)
+    cf_proxy = CfWorkerProxy()
+    if cf_proxy.is_configured:
+        logger.info(
+            f"CF Worker proxy enabled — routing RDAP/crt.sh/Wayback through "
+            f"{cf_proxy.worker_url}"
+        )
+    else:
+        logger.info("CF Worker proxy not configured — using direct requests (set CF_WORKER_PROXY_URL)")
+
     logger.info(
         f"Batch starting: {len(hotels)} hotels | "
         f"concurrency={concurrency} | layers=0b{layers:09b}"
@@ -632,7 +650,9 @@ async def enrich_batch(
     async with httpx.AsyncClient(timeout=30.0) as client:
         async def process_one(hotel: dict):
             async with sem:
-                return await enrich_single_hotel(client, hotel, layers=layers)
+                return await enrich_single_hotel(
+                    client, hotel, layers=layers, cf_proxy=cf_proxy,
+                )
 
         tasks = [process_one(h) for h in hotels]
         results = await asyncio.gather(*tasks, return_exceptions=True)
