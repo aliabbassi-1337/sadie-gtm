@@ -33,10 +33,11 @@ from infra.sqs import send_messages_batch, get_queue_attributes
 QUEUE_URL = os.getenv("SQS_OWNER_ENRICHMENT_QUEUE_URL", "")
 MAX_QUEUE_DEPTH = 2000
 
-LAYER_CHOICES = ["ct-certs", "rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
+LAYER_CHOICES = ["ct-certs", "rdap", "whois-history", "dns", "website", "reviews", "email-verify", "gov-data", "abn-asic", "all"]
 LAYER_MAP = {
     "ct-certs": 128, "rdap": 1, "whois-history": 2, "dns": 4,
-    "website": 8, "reviews": 16, "email-verify": 32, "all": 0xFF,
+    "website": 8, "reviews": 16, "email-verify": 32,
+    "gov-data": 64, "abn-asic": 256, "all": 0x1FF,
 }
 
 

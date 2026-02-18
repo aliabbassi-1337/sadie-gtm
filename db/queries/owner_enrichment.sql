@@ -144,3 +144,40 @@ WHERE source IN (
       OR LOWER(:name) LIKE '%' || LOWER(name) || '%'
   )
 LIMIT 5;
+
+-- name: cache_abn_entity!
+-- Upsert ABN Lookup + ASIC director cache.
+INSERT INTO sadie_gtm.abn_lookup_cache
+    (abn, entity_name, entity_type, status, state, postcode,
+     business_names, acn, directors, raw_data, queried_at)
+VALUES (:abn, :entity_name, :entity_type, :status, :state, :postcode,
+        :business_names, :acn, :directors, :raw_data, NOW())
+ON CONFLICT (abn) DO UPDATE
+SET entity_name = EXCLUDED.entity_name,
+    entity_type = EXCLUDED.entity_type,
+    status = EXCLUDED.status,
+    state = EXCLUDED.state,
+    postcode = EXCLUDED.postcode,
+    business_names = EXCLUDED.business_names,
+    acn = COALESCE(EXCLUDED.acn, sadie_gtm.abn_lookup_cache.acn),
+    directors = COALESCE(EXCLUDED.directors, sadie_gtm.abn_lookup_cache.directors),
+    raw_data = EXCLUDED.raw_data,
+    queried_at = NOW();
+
+-- name: get_cached_abn_entity^
+-- Get cached ABN entity by ABN number.
+SELECT abn, entity_name, entity_type, status, state, postcode,
+       business_names, acn, directors, raw_data, queried_at
+FROM sadie_gtm.abn_lookup_cache
+WHERE abn = :abn;
+
+-- name: find_cached_abn_by_name
+-- Find cached ABN entities matching a business name (case-insensitive).
+SELECT abn, entity_name, entity_type, status, state, postcode,
+       business_names, acn, directors, queried_at
+FROM sadie_gtm.abn_lookup_cache
+WHERE (LOWER(entity_name) LIKE '%' || LOWER(:name) || '%'
+       OR EXISTS (SELECT 1 FROM unnest(business_names) bn WHERE LOWER(bn) LIKE '%' || LOWER(:name) || '%'))
+  AND queried_at > NOW() - INTERVAL '30 days'
+ORDER BY queried_at DESC
+LIMIT 5;

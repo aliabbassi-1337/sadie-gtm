@@ -3808,7 +3808,7 @@ class Service(IService):
         from services.enrichment.owner_models import (
             LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
             LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
-            LAYER_GOV_DATA, LAYER_CT_CERTS,
+            LAYER_GOV_DATA, LAYER_CT_CERTS, LAYER_ABN_ASIC,
         )
 
         layer_map = {
@@ -3820,9 +3820,10 @@ class Service(IService):
             "reviews": LAYER_REVIEWS,
             "gov-data": LAYER_GOV_DATA,
             "email-verify": LAYER_EMAIL_VERIFY,
+            "abn-asic": LAYER_ABN_ASIC,
         }
 
-        layer_mask = layer_map.get(layer, 0xFF) if layer else 0xFF
+        layer_mask = layer_map.get(layer, 0x1FF) if layer else 0x1FF
 
         if hotels is None:
             layer_filter = layer_mask if layer and layer != "all" else None

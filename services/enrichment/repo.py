@@ -1796,6 +1796,51 @@ async def get_decision_makers_for_hotel(hotel_id: int) -> List[Dict]:
         return [dict(r) for r in rows]
 
 
+async def cache_abn_entity(
+    abn: str,
+    entity_name: str,
+    entity_type: str = None,
+    status: str = None,
+    state: str = None,
+    postcode: str = None,
+    business_names: list = None,
+    acn: str = None,
+    directors: list = None,
+    raw_data: dict = None,
+) -> None:
+    """Cache an ABN Lookup + ASIC result."""
+    import json
+
+    async with get_conn() as conn:
+        await queries.cache_abn_entity(
+            conn,
+            abn=abn,
+            entity_name=entity_name,
+            entity_type=entity_type,
+            status=status,
+            state=state,
+            postcode=postcode,
+            business_names=business_names or [],
+            acn=acn,
+            directors=directors or [],
+            raw_data=json.dumps(raw_data) if raw_data else None,
+        )
+
+
+async def get_cached_abn_entity(abn: str) -> Optional[Dict]:
+    """Get cached ABN entity by ABN number."""
+    async with get_conn() as conn:
+        row = await queries.get_cached_abn_entity(conn, abn=abn)
+        return dict(row) if row else None
+
+
+async def find_cached_abn_by_name(name: str) -> List[Dict]:
+    """Find cached ABN entities matching a business name."""
+    async with get_conn() as conn:
+        rows = await queries.find_cached_abn_by_name(conn, name=name)
+        return [dict(r) for r in rows]
+
+
 async def find_gov_matches(hotel_id: int, name: str, city: str, state: str) -> List[Dict]:
     """Find government-sourced hotel records matching by city+state and name."""
     if not city or not state or not name:

@@ -24,7 +24,7 @@ from services.enrichment.owner_models import (
     DecisionMaker, DomainIntel, OwnerEnrichmentResult,
     LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
     LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
-    LAYER_GOV_DATA, LAYER_CT_CERTS,
+    LAYER_GOV_DATA, LAYER_CT_CERTS, LAYER_ABN_ASIC,
 )
 from lib.owner_discovery.ct_intelligence import ct_to_decision_makers
 from lib.owner_discovery.rdap_client import rdap_to_decision_maker
@@ -363,6 +363,111 @@ async def _run_gov_data(
     return dms
 
 
+async def _run_abn_asic(
+    client: httpx.AsyncClient, tag: str,
+    name: str, state: Optional[str], country: Optional[str],
+    domain: Optional[str],
+) -> List[DecisionMaker]:
+    """Layer 8: ABN Lookup + ASIC director enrichment (Australian hotels only)."""
+    from lib.owner_discovery.abn_lookup import abn_to_decision_makers
+    from lib.owner_discovery.asic_lookup import asic_to_decision_makers
+    from services.enrichment import repo
+
+    t0 = time.monotonic()
+
+    # Only run for Australian hotels
+    is_au = (
+        (country and country.upper() in {"AU", "AUS", "AUSTRALIA"})
+        or (domain and domain.endswith(".com.au"))
+        or (domain and domain.endswith(".au"))
+    )
+    if not is_au:
+        logger.debug(f"{tag} [8 ABN/ASIC] Skipped — not Australian (country={country}, domain={domain})")
+        return []
+
+    # Map Australian state names to codes for ABN search
+    au_state = _normalize_au_state(state) if state else None
+
+    logger.debug(f"{tag} [8 ABN/ASIC] Searching ABN for {name!r} (state={au_state})")
+
+    dms, entity = await abn_to_decision_makers(client, name, state=au_state)
+    elapsed = time.monotonic() - t0
+
+    if not entity:
+        logger.info(f"{tag} [8 ABN/ASIC] No ABN match for {name!r} [{elapsed:.1f}s]")
+        return []
+
+    # Cache the ABN entity
+    try:
+        await repo.cache_abn_entity(
+            abn=entity.abn,
+            entity_name=entity.entity_name,
+            entity_type=entity.entity_type,
+            status=entity.status,
+            state=entity.state,
+            postcode=entity.postcode,
+            business_names=entity.business_names,
+            acn=entity.acn,
+        )
+    except Exception as e:
+        logger.warning(f"{tag} [8 ABN/ASIC] Cache write failed: {e}")
+
+    # If company with ACN, try ASIC director lookup
+    if entity.is_company and entity.acn:
+        logger.debug(
+            f"{tag} [8 ABN/ASIC] Company detected: {entity.entity_name} "
+            f"(ACN={entity.acn}), querying ASIC for directors"
+        )
+        try:
+            asic_dms = await asic_to_decision_makers(
+                client, entity.acn, abn_entity_name=entity.entity_name,
+            )
+            if asic_dms:
+                dms.extend(asic_dms)
+                # Update cache with director names
+                director_names = [d.full_name for d in asic_dms if d.full_name]
+                try:
+                    await repo.cache_abn_entity(
+                        abn=entity.abn,
+                        entity_name=entity.entity_name,
+                        entity_type=entity.entity_type,
+                        acn=entity.acn,
+                        directors=director_names,
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"{tag} [8 ABN/ASIC] ASIC lookup failed for ACN {entity.acn}: {e}")
+
+    elapsed = time.monotonic() - t0
+    if dms:
+        for dm in dms:
+            logger.info(
+                f"{tag} [8 ABN/ASIC] HIT: {dm.full_name} | {dm.title} "
+                f"(conf={dm.confidence})"
+            )
+    logger.info(f"{tag} [8 ABN/ASIC] {len(dms)} contacts [{elapsed:.1f}s]")
+    return dms
+
+
+def _normalize_au_state(state: str) -> Optional[str]:
+    """Normalize Australian state names to abbreviations."""
+    if not state:
+        return None
+    s = state.strip().upper()
+    mapping = {
+        "NEW SOUTH WALES": "NSW", "NSW": "NSW",
+        "VICTORIA": "VIC", "VIC": "VIC",
+        "QUEENSLAND": "QLD", "QLD": "QLD",
+        "SOUTH AUSTRALIA": "SA", "SA": "SA",
+        "WESTERN AUSTRALIA": "WA", "WA": "WA",
+        "TASMANIA": "TAS", "TAS": "TAS",
+        "NORTHERN TERRITORY": "NT", "NT": "NT",
+        "AUSTRALIAN CAPITAL TERRITORY": "ACT", "ACT": "ACT",
+    }
+    return mapping.get(s, s if len(s) <= 3 else None)
+
+
 def _deduplicate(dms: List[DecisionMaker], tag: str) -> List[DecisionMaker]:
     """Deduplicate decision makers by (name, title)."""
     seen = set()
@@ -383,7 +488,7 @@ def _deduplicate(dms: List[DecisionMaker], tag: str) -> List[DecisionMaker]:
 async def enrich_single_hotel(
     client: httpx.AsyncClient,
     hotel: dict,
-    layers: int = 0xFF,
+    layers: int = 0x1FF,
     skip_cache: bool = False,
 ) -> OwnerEnrichmentResult:
     """Run the owner enrichment waterfall for a single hotel.
@@ -414,7 +519,8 @@ async def enrich_single_hotel(
         logger.warning(f"{tag} Skipped — no domain extracted from website: {website!r}")
         return result
 
-    logger.info(f"{tag} Starting enrichment waterfall | hotel={name!r} layers=0b{layers:08b}")
+    country = hotel.get("country")
+    logger.info(f"{tag} Starting enrichment waterfall | hotel={name!r} layers=0b{layers:09b}")
     domain_intel = DomainIntel(domain=domain)
 
     try:
@@ -468,6 +574,12 @@ async def enrich_single_hotel(
             result.decision_makers.extend(dms)
             result.layers_completed |= LAYER_GOV_DATA
 
+        # Layer 8: ABN Lookup + ASIC directors (Australian hotels)
+        if layers & LAYER_ABN_ASIC:
+            dms = await _run_abn_asic(client, tag, name, state, country, domain)
+            result.decision_makers.extend(dms)
+            result.layers_completed |= LAYER_ABN_ASIC
+
         # Layer 6: Email Verification
         if layers & LAYER_EMAIL_VERIFY:
             candidates = [
@@ -487,7 +599,7 @@ async def enrich_single_hotel(
     total_elapsed = time.monotonic() - t_start
     logger.info(
         f"{tag} Done: {len(result.decision_makers)} contacts | "
-        f"layers=0b{result.layers_completed:08b} | {total_elapsed:.1f}s"
+        f"layers=0b{result.layers_completed:09b} | {total_elapsed:.1f}s"
     )
 
     return result
@@ -496,7 +608,7 @@ async def enrich_single_hotel(
 async def enrich_batch(
     hotels: list[dict],
     concurrency: int = 5,
-    layers: int = 0xFF,
+    layers: int = 0x1FF,
 ) -> list[OwnerEnrichmentResult]:
     """Run owner enrichment for a batch of hotels.
 
@@ -511,7 +623,7 @@ async def enrich_batch(
     t_batch_start = time.monotonic()
     logger.info(
         f"Batch starting: {len(hotels)} hotels | "
-        f"concurrency={concurrency} | layers=0b{layers:08b}"
+        f"concurrency={concurrency} | layers=0b{layers:09b}"
     )
 
     sem = asyncio.Semaphore(concurrency)
