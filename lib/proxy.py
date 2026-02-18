@@ -214,16 +214,15 @@ class CfWorkerProxy:
             logger.warning("CF Worker proxy not configured (set CF_WORKER_PROXY_URL)")
             return None
 
-        headers = {}
+        headers = {"X-Target-URL": target_url}
         if self.auth_key:
-            headers["X-Auth-Key"] = self.auth_key
+            headers["X-Proxy-Key"] = self.auth_key
         if accept:
             headers["X-Forward-Accept"] = accept
 
         try:
             resp = await client.get(
                 self.worker_url,
-                params={"url": target_url},
                 headers=headers,
                 timeout=timeout,
             )
@@ -233,6 +232,12 @@ class CfWorkerProxy:
 
             if resp.status_code == 200:
                 return resp.text
+            if resp.status_code in (301, 302, 307, 308):
+                # Deployed worker may not follow redirects — follow manually
+                location = resp.headers.get("Location") or resp.headers.get("location")
+                if location:
+                    logger.debug(f"CF Worker: following redirect to {location}")
+                    return await self.fetch(client, location, timeout=timeout, accept=accept)
             if resp.status_code == 429:
                 logger.warning(f"CF Worker: target returned 429 for {target_url}")
             return None

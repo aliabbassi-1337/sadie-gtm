@@ -26,6 +26,18 @@ if TYPE_CHECKING:
 
 CRT_SH_JSON = "https://crt.sh/"
 
+# Limit concurrent crt.sh requests to prevent httpx connection pool exhaustion.
+# crt.sh is slow (~1-5s per request) so 20 concurrent hotels will queue 80+ requests
+# against httpx's 20-connection-per-host keepalive limit, causing timeouts.
+_CT_SEM: Optional[asyncio.Semaphore] = None
+
+
+def _get_ct_sem() -> asyncio.Semaphore:
+    global _CT_SEM
+    if _CT_SEM is None:
+        _CT_SEM = asyncio.Semaphore(3)
+    return _CT_SEM
+
 # DV CAs that never have meaningful org names in the subject
 DV_CA_PATTERNS = frozenset({
     "let's encrypt",
@@ -173,6 +185,16 @@ async def ct_lookup(
     Returns:
         CertIntel with org name, alt domains, cert stats.
     """
+    sem = _get_ct_sem()
+    async with sem:
+        return await _ct_lookup_inner(client, domain, cf_proxy)
+
+
+async def _ct_lookup_inner(
+    client: httpx.AsyncClient,
+    domain: str,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
+) -> Optional[CertIntel]:
     target_url = f"{CRT_SH_JSON}?q={domain}&output=json&exclude=expired"
     try:
         data = None
