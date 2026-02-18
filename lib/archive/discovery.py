@@ -1,10 +1,11 @@
-"""Archive slug discovery from Wayback Machine, Common Crawl, AlienVault OTX, URLScan.io, VirusTotal, crt.sh, and Arquivo.pt."""
+"""Archive slug discovery from Wayback Machine, Common Crawl, AlienVault OTX, URLScan.io, VirusTotal, Arquivo.pt, and Mews sitemap."""
 
 import asyncio
 import json
 import os
 import re
 import logging
+import ssl
 from typing import Optional, Set
 
 import httpx
@@ -63,7 +64,7 @@ class DiscoveredSlug(BaseModel):
     engine: str
     slug: str
     source_url: str
-    archive_source: str  # "wayback" or "commoncrawl"
+    archive_source: str  # "wayback", "commoncrawl", "arquivo", "alienvault", "mews_sitemap"
     timestamp: Optional[str] = None
 
 
@@ -237,7 +238,7 @@ BOOKING_ENGINE_PATTERNS = [
 
 
 class ArchiveSlugDiscovery(BaseModel):
-    """Discover booking engine slugs from web archives."""
+    """Discover booking engine slugs from web archives and OSINT sources."""
 
     timeout: float = 60.0
     max_results_per_query: int = 50000
@@ -250,6 +251,7 @@ class ArchiveSlugDiscovery(BaseModel):
     enable_urlscan: bool = True
     enable_virustotal: bool = True
     enable_arquivo: bool = True
+    enable_mews_sitemap: bool = True
     proxy_url: Optional[str] = None  # Brightdata proxy URL for OSINT sources
 
     model_config = {"arbitrary_types_allowed": True}
@@ -315,6 +317,12 @@ class ArchiveSlugDiscovery(BaseModel):
                 arq_slugs = await self.query_arquivo(pattern)
                 engine_slugs.extend(arq_slugs)
                 logger.info(f"  Arquivo.pt: {len(arq_slugs)} slugs")
+
+            # Mews sitemap hotel website scraping (Mews-only)
+            if self.enable_mews_sitemap and pattern.name == "mews":
+                sitemap_slugs = await self.query_mews_sitemap()
+                engine_slugs.extend(sitemap_slugs)
+                logger.info(f"  Mews sitemap: {len(sitemap_slugs)} slugs")
 
             # Dedupe by slug (case-insensitive)
             unique_slugs = self._dedupe_slugs(engine_slugs)
@@ -847,6 +855,113 @@ class ArchiveSlugDiscovery(BaseModel):
             return indexes[0].get("cdx-api")
         return None
 
+    async def query_mews_sitemap(self) -> list[DiscoveredSlug]:
+        """
+        Discover Mews UUIDs by scraping hotel websites found in the Mews customer sitemap.
+
+        Steps:
+        1. Fetch Mews sitemap.xml, extract customer case study URLs
+        2. Scrape each case study page for hotel website domains
+        3. Fetch hotel homepages and extract Mews widget configurationId UUIDs
+        """
+        slugs = []
+        uuid_pat = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
+        )
+        mews_markers = ["mews", "distributor", "configurationid", "configurationids",
+                        "booking-engine.services.mews"]
+        skip_domains = {
+            "mews.com", "hubspot", "google", "facebook", "twitter", "linkedin",
+            "youtube", "instagram", "cookielaw", "abtasty", "hubspotusercontent",
+            "hsforms", "gstatic", "schema.org", "w3.org", "unpkg.com",
+            "integrityline", "hotjar.com", "amazonaws.com", "cloudflare",
+            "jsdelivr", "bootstrapcdn", "jquery", "fontawesome", "recaptcha",
+            "googletagmanager", "doubleclick", "hoteltechreport.com", "wistia.com",
+        }
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0, verify=False, follow_redirects=True
+            ) as client:
+                # Step 1: Get customer slugs from sitemap
+                resp = await client.get("https://www.mews.com/sitemap.xml")
+                resp.raise_for_status()
+                customer_slugs = set(
+                    re.findall(r"/customers/([^/<]+)", resp.text)
+                )
+                logger.info(f"  Mews sitemap: {len(customer_slugs)} customer pages")
+
+                # Step 2: Scrape customer pages for hotel domains
+                hotel_domains = set()
+                for i, slug in enumerate(sorted(customer_slugs)):
+                    try:
+                        page_resp = await client.get(
+                            f"https://www.mews.com/en/customers/{slug}"
+                        )
+                        if page_resp.status_code != 200:
+                            continue
+
+                        html = page_resp.text
+                        hrefs = re.findall(
+                            r'href="(https?://(?:www\.)?[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-z]{2,6}[^"]*)"',
+                            html,
+                        )
+                        for href in hrefs:
+                            dm = re.search(
+                                r"https?://(?:www\.)?([a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-z]{2,6})",
+                                href,
+                            )
+                            if dm:
+                                d = dm.group(1).lower()
+                                if not any(s in d for s in skip_domains):
+                                    hotel_domains.add(d)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.3)
+
+                logger.info(f"  Mews sitemap: {len(hotel_domains)} hotel domains found")
+
+                # Step 3: Scrape hotel homepages for Mews UUIDs
+                for domain in sorted(hotel_domains):
+                    url = f"https://www.{domain}" if not domain.startswith("en.") else f"https://{domain}"
+                    try:
+                        page_resp = await client.get(url)
+                        if page_resp.status_code != 200:
+                            continue
+
+                        html = page_resp.text
+                        html_lower = html.lower()
+                        if not any(m in html_lower for m in mews_markers):
+                            continue
+
+                        uuids = uuid_pat.findall(html)
+                        for uid in uuids:
+                            uid_lower = uid.lower()
+                            idx = html_lower.find(uid_lower)
+                            if idx >= 0:
+                                context = html_lower[max(0, idx - 200) : idx + 200]
+                                if any(m in context for m in mews_markers):
+                                    slugs.append(
+                                        DiscoveredSlug(
+                                            engine="mews",
+                                            slug=uid_lower,
+                                            source_url=url,
+                                            archive_source="mews_sitemap",
+                                        )
+                                    )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.2)
+
+        except Exception as e:
+            logger.error(f"Mews sitemap scraping error: {e}")
+
+        return slugs
+
     def _extract_slug(self, url: str, regex: str) -> Optional[str]:
         """Extract slug from URL using regex."""
         try:
@@ -880,6 +995,7 @@ async def discover_slugs_for_engine(
     enable_urlscan: bool = True,
     enable_virustotal: bool = True,
     enable_arquivo: bool = True,
+    enable_mews_sitemap: bool = True,
     proxy_url: Optional[str] = None,
 ) -> list[DiscoveredSlug]:
     """
@@ -894,6 +1010,7 @@ async def discover_slugs_for_engine(
         enable_urlscan: Query URLScan.io
         enable_virustotal: Query VirusTotal
         enable_arquivo: Query Arquivo.pt
+        enable_mews_sitemap: Query Mews sitemap for hotel websites
         proxy_url: Optional proxy URL for all requests
     """
     discovery = ArchiveSlugDiscovery(
@@ -903,6 +1020,7 @@ async def discover_slugs_for_engine(
         enable_urlscan=enable_urlscan,
         enable_virustotal=enable_virustotal,
         enable_arquivo=enable_arquivo,
+        enable_mews_sitemap=enable_mews_sitemap,
         proxy_url=proxy_url,
     )
     pattern = next((p for p in BOOKING_ENGINE_PATTERNS if p.name == engine_name), None)
@@ -923,6 +1041,8 @@ async def discover_slugs_for_engine(
         all_slugs.extend(await discovery.query_virustotal(pattern))
     if enable_arquivo:
         all_slugs.extend(await discovery.query_arquivo(pattern))
+    if enable_mews_sitemap and pattern.name == "mews":
+        all_slugs.extend(await discovery.query_mews_sitemap())
 
     unique_slugs = discovery._dedupe_slugs(all_slugs)
 
