@@ -142,17 +142,12 @@ async def abn_search_by_name(
     Returns:
         List of AbnEntity results
     """
-    form_data = {
-        "SearchText": name,
-        "SearchType": "BusinessNameSearch",
-    }
-    if state:
-        form_data["State"] = state.upper()
+    params = {"SearchText": name}
 
     try:
-        resp = await client.post(
+        resp = await client.get(
             ABR_SEARCH_URL,
-            data=form_data,
+            params=params,
             headers=_HEADERS,
             follow_redirects=True,
             timeout=15.0,
@@ -164,25 +159,46 @@ async def abn_search_by_name(
 
     html = resp.text
 
-    # Parse search results table — each row has ABN link + entity name + state
-    # Pattern: <a href="/ABN/View?abn=XXXXXXXXXXX">XX XXX XXX XXX</a>
+    # Parse search results table rows.
+    # Each <tr> has 4 <td>s:
+    #   1. ABN link + status span
+    #   2. Entity/business name
+    #   3. Name type (Entity Name, Trading Name, Business Name)
+    #   4. Postcode + state (e.g., "5068  SA")
     results = []
-    abn_links = re.findall(
-        r'<a\s+href="(/ABN/View\?abn=\d{11})"[^>]*>\s*'
-        r'(\d{2}\s*\d{3}\s*\d{3}\s*\d{3})\s*</a>',
-        html,
+    # Extract ABN links and surrounding row data
+    row_pattern = re.compile(
+        r'<td[^>]*>\s*<a\s+href="/ABN/View\?abn=(\d{11})"[^>]*>'
+        r'.*?</a>.*?</td>\s*'
+        r'<td[^>]*>\s*(.*?)\s*</td>\s*'
+        r'<td[^>]*>\s*(.*?)\s*</td>\s*'
+        r'<td[^>]*>\s*(.*?)\s*</td>',
+        re.DOTALL,
     )
+    inline_results = []
+    for m in row_pattern.finditer(html):
+        abn = m.group(1)
+        row_name = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+        name_type = re.sub(r'<[^>]+>', '', m.group(3)).strip()
+        location = re.sub(r'<[^>]+>', '', m.group(4)).strip()
+        inline_results.append((abn, row_name, name_type, location))
 
-    if not abn_links:
+    if not inline_results:
         logger.debug(f"ABN search for {name!r}: no results in HTML")
         return []
 
-    logger.debug(f"ABN search for {name!r}: {len(abn_links)} results found")
+    logger.debug(f"ABN search for {name!r}: {len(inline_results)} results found")
+
+    # Pre-filter by state if requested
+    if state:
+        state_upper = state.upper()
+        filtered = [r for r in inline_results if state_upper in r[3].upper()]
+        if filtered:
+            inline_results = filtered
 
     # Fetch details for top results
     seen_abns = set()
-    for href, abn_display in abn_links[:max_results]:
-        abn = re.sub(r'\s+', '', abn_display)
+    for abn, row_name, name_type, location in inline_results[:max_results]:
         if abn in seen_abns:
             continue
         seen_abns.add(abn)
@@ -237,19 +253,31 @@ async def _fetch_abn_detail(client: httpx.AsyncClient, abn: str) -> Optional[Abn
         status = "Cancelled"
 
     # Extract state/postcode from "Main business location"
+    # ABR shows this as "SA 5068" or "5068 SA"
     location = _extract_field(html, r'(?:Main\s+business\s+location|Location)') or ""
     state = None
     postcode = None
-    loc_match = re.search(r'(\d{4})\s+([A-Z]{2,3})\b', location)
+    # Try "SA 5068" format
+    loc_match = re.search(r'([A-Z]{2,3})\s+(\d{4})\b', location)
     if loc_match:
-        postcode = loc_match.group(1)
-        state = loc_match.group(2)
+        state = loc_match.group(1)
+        postcode = loc_match.group(2)
+    else:
+        # Try "5068 SA" format
+        loc_match = re.search(r'(\d{4})\s+([A-Z]{2,3})\b', location)
+        if loc_match:
+            postcode = loc_match.group(1)
+            state = loc_match.group(2)
 
-    # Extract ACN if present
+    # Extract ACN — for Australian companies, ACN = last 9 digits of ABN
     acn = None
+    # First check if ACN is explicitly on the page
     acn_match = re.search(r'ACN[:\s]*(\d{3}\s*\d{3}\s*\d{3})', html)
     if acn_match:
         acn = re.sub(r'\s+', '', acn_match.group(1))
+    elif entity_type in ("PRV", "PUB") and len(abn) == 11:
+        # Derive ACN from ABN (strip first 2 check digits)
+        acn = abn[2:]
 
     # Extract business/trading names
     business_names = _extract_business_names(html)
@@ -298,9 +326,16 @@ def _extract_business_names(html: str) -> list[str]:
         for m in re.finditer(r'<td[^>]*>\s*([^<]+?)\s*</td>', bn_section.group(1)):
             name = m.group(1).strip()
             # Skip dates, statuses, and empty values
-            if name and not re.match(r'^\d{2}\s+\w+\s+\d{4}$', name) and name.lower() not in {
-                'current', 'cancelled', 'active', 'from', 'to', 'status',
-            }:
+            if (
+                name
+                and not re.match(r'^\d{2}\s+\w+\s+\d{4}$', name)
+                and name.lower() not in {
+                    'current', 'cancelled', 'active', 'from', 'to', 'status',
+                }
+                and 'not entitled' not in name.lower()
+                and 'tax deductible' not in name.lower()
+                and len(name) < 100
+            ):
                 names.append(name)
 
     return names
@@ -356,26 +391,85 @@ async def abn_to_decision_makers(
 
     dms = []
 
+    abn_url = f"https://abr.business.gov.au/ABN/View?abn={best.abn}"
+    # Clean HTML entities from entity name
+    clean_name = best.entity_name.replace("&amp;", "&").replace("&nbsp;", " ")
+
     if best.is_individual:
         # Sole trader — the entity name IS the person's name
-        person_name = _flip_surname_first(best.entity_name)
+        person_name = _flip_surname_first(clean_name)
         dms.append(DecisionMaker(
             full_name=person_name,
             title="Owner (Sole Trader)",
             sources=["abn_lookup"],
             confidence=0.85,
-            raw_source_url=f"https://abr.business.gov.au/ABN/View?abn={best.abn}",
+            raw_source_url=abn_url,
         ))
+    elif best.entity_type == "PARTNERSHIP":
+        # Partnership — entity name often contains partner names
+        # Pattern: "RN MURPHY & BI WHITEFORD" or "A SMITH & B JONES"
+        partner_names = _parse_partnership_names(clean_name)
+        for pn in partner_names:
+            dms.append(DecisionMaker(
+                full_name=pn,
+                title="Owner (Partner)",
+                sources=["abn_lookup"],
+                confidence=0.80,
+                raw_source_url=abn_url,
+            ))
+        if not partner_names:
+            # Couldn't parse individual names, use the whole entity name
+            dms.append(DecisionMaker(
+                full_name=clean_name,
+                title="Registered Partnership",
+                sources=["abn_lookup"],
+                confidence=0.5,
+                raw_source_url=abn_url,
+            ))
     elif best.is_company:
         # Pty Ltd / company — entity name is the company, not a person
         # Create a low-confidence org-level record
         dms.append(DecisionMaker(
-            full_name=best.entity_name,
+            full_name=clean_name,
             title="Registered Entity",
             sources=["abn_lookup"],
             confidence=0.5,
-            raw_source_url=f"https://abr.business.gov.au/ABN/View?abn={best.abn}",
+            raw_source_url=abn_url,
         ))
         # ACN available for ASIC director follow-up (handled by caller)
+    elif "trust" in best.entity_type.lower():
+        # Trust — trustee name may contain useful info
+        dms.append(DecisionMaker(
+            full_name=clean_name,
+            title="Trustee Entity",
+            sources=["abn_lookup"],
+            confidence=0.45,
+            raw_source_url=abn_url,
+        ))
 
     return dms, best
+
+
+def _parse_partnership_names(entity_name: str) -> list[str]:
+    """Parse individual names from a partnership entity name.
+
+    ABR partnership names look like:
+      "RN MURPHY & BI WHITEFORD"
+      "A SMITH & B JONES & C DOE"
+      "SMITH, JOHN & JONES, MARY"
+    """
+    # Split on & or AND
+    parts = re.split(r'\s*&\s*|\s+AND\s+', entity_name, flags=re.IGNORECASE)
+    names = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        # Check if this looks like a person name (not a company)
+        if any(kw in part.upper() for kw in ["PTY", "LTD", "INC", "TRUST", "CORP"]):
+            continue
+        # Flip "SURNAME, FIRSTNAME" if needed
+        name = _flip_surname_first(part)
+        if name and len(name) > 2:
+            names.append(name)
+    return names

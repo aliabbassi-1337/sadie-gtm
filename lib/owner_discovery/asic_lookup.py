@@ -3,12 +3,14 @@
 Given an ACN (Australian Company Number) from ABN Lookup, retrieve the company's
 current directors/officeholders from ASIC Connect.
 
-ASIC Connect uses Oracle ADF (Application Development Framework) which makes
-direct HTTP scraping complex. This module uses a two-stage approach:
-  1. Search ASIC Connect company search page
-  2. Parse the resulting HTML for director/officeholder names
+STATUS: ASIC Connect uses Oracle ADF which requires full JavaScript execution.
+The httpx-based approach cannot work without a browser engine. Current options:
+  1. Playwright-based browser automation (not yet implemented)
+  2. Vigil.sh paid API (https://developer.vigil.sh/api/asic/company/)
+  3. Bulk data from data.gov.au (company register dataset)
 
-Free company extracts were introduced Sep 2023 (fees abolished).
+For now, this module will gracefully return empty results. The ABN Lookup
+module alone still provides value — sole trader names and company entity names.
 
 Rate limit: 2s between requests to be respectful.
 """
