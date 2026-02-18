@@ -37,11 +37,14 @@ LAYER_CHOICES = ["ct-certs", "rdap", "whois-history", "dns", "website", "reviews
 LAYER_MAP = {
     "ct-certs": 128, "rdap": 1, "whois-history": 2, "dns": 4,
     "website": 8, "reviews": 16, "email-verify": 32,
-    "gov-data": 64, "abn-asic": 256, "all": 0x1FF,
+    "gov-data": 64, "abn-asic": 256, "all": 383,
 }
 
 
-async def enqueue(limit: int = 500, layer: str = "all", force: bool = False):
+BATCH_SIZE = 10  # Hotels per SQS message
+
+
+async def enqueue(limit: int = 500, layer: str = "all", force: bool = False, source: str = None):
     """Enqueue hotels needing owner enrichment to SQS."""
     if not QUEUE_URL:
         logger.error("SQS_OWNER_ENRICHMENT_QUEUE_URL not set")
@@ -57,33 +60,58 @@ async def enqueue(limit: int = 500, layer: str = "all", force: bool = False):
 
     await init_db()
     try:
-        svc = Service()
         layer_mask = LAYER_MAP.get(layer, 0xFF)
-        layer_filter = layer_mask if layer != "all" else None
 
-        hotels = await svc.get_hotels_pending_owner_enrichment(
-            limit=limit, layer=layer_filter,
-        )
+        if source:
+            from db.client import get_conn
+            async with get_conn() as conn:
+                rows = await conn.fetch("""
+                    SELECT id, name, website, city, state, country
+                    FROM sadie_gtm.hotels
+                    WHERE (external_id_type = $1 OR source LIKE '%::' || $1)
+                      AND website IS NOT NULL AND website != ''
+                    ORDER BY id
+                    LIMIT $2
+                """, source, limit)
+            hotels = [{"hotel_id": r["id"], "name": r["name"], "website": r["website"],
+                       "city": r["city"], "state": r["state"], "country": r["country"]} for r in rows]
+            logger.info(f"Filtered to {len(hotels)} hotels with source={source!r}")
+        else:
+            svc = Service()
+            layer_filter = layer_mask if layer != "all" else None
+            hotels = await svc.get_hotels_pending_owner_enrichment(
+                limit=limit, layer=layer_filter,
+            )
+
         if not hotels:
             logger.info("No hotels pending owner enrichment")
             return
 
-        # Build SQS messages (one hotel per message for simple retry)
+        # Build SQS messages — batch BATCH_SIZE hotels per message
         messages = []
-        for h in hotels:
+        for i in range(0, len(hotels), BATCH_SIZE):
+            chunk = hotels[i:i + BATCH_SIZE]
             messages.append({
-                "hotel_id": h["hotel_id"],
-                "name": h["name"],
-                "website": h.get("website", ""),
-                "city": h.get("city"),
-                "state": h.get("state"),
-                "country": h.get("country"),
+                "hotels": [
+                    {
+                        "hotel_id": h["hotel_id"],
+                        "name": h["name"],
+                        "website": h.get("website", ""),
+                        "city": h.get("city"),
+                        "state": h.get("state"),
+                        "country": h.get("country"),
+                    }
+                    for h in chunk
+                ],
                 "layer": layer,
                 "layers_mask": layer_mask,
             })
 
         sent = send_messages_batch(QUEUE_URL, messages)
-        logger.info(f"Enqueued {sent}/{len(hotels)} hotels for owner enrichment (layer={layer})")
+        logger.info(
+            f"Enqueued {sent} messages ({len(hotels)} hotels, "
+            f"{BATCH_SIZE}/msg) for owner enrichment (layer={layer})"
+        )
 
     finally:
         await close_db()
@@ -128,12 +156,16 @@ def main():
     )
     parser.add_argument("--force", action="store_true", help="Force enqueue even if queue is full")
     parser.add_argument("--status", action="store_true", help="Show queue and enrichment status")
+    parser.add_argument(
+        "--source", type=str, default=None,
+        help="Filter hotels by source (e.g. 'big4', 'rms')",
+    )
     args = parser.parse_args()
 
     if args.status:
         asyncio.run(show_status())
     else:
-        asyncio.run(enqueue(limit=args.limit, layer=args.layer, force=args.force))
+        asyncio.run(enqueue(limit=args.limit, layer=args.layer, force=args.force, source=args.source))
 
 
 if __name__ == "__main__":

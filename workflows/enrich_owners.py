@@ -44,7 +44,7 @@ async def run_enrichment(
                 rows = await conn.fetch("""
                     SELECT id, name, website, city, state, country
                     FROM sadie_gtm.hotels
-                    WHERE (external_id_type = $1 OR source LIKE '%::' || $1)
+                    WHERE (external_id_type = $1 OR source LIKE '%::' || $1 OR source LIKE $1 || '_%')
                       AND website IS NOT NULL AND website != ''
                     ORDER BY id
                     LIMIT $2

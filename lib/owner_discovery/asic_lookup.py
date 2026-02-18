@@ -87,7 +87,7 @@ async def asic_company_lookup(
             logger.debug("ASIC: could not extract viewstate from search page")
             return None
 
-        await asyncio.sleep(2.0)  # Rate limit
+        await asyncio.sleep(0.5)  # Rate limit
 
         # Step 2: POST the search form with ACN
         # The ADF form structure varies but generally has a search input field
@@ -109,7 +109,7 @@ async def asic_company_lookup(
         )
         resp2.raise_for_status()
 
-        await asyncio.sleep(2.0)  # Rate limit
+        await asyncio.sleep(0.5)  # Rate limit
 
         # Step 3: Parse results
         result_html = resp2.text

@@ -206,7 +206,7 @@ async def abn_search_by_name(
         entity = await _fetch_abn_detail(client, abn)
         if entity:
             results.append(entity)
-        await asyncio.sleep(1.0)  # Rate limit
+        await asyncio.sleep(0.3)  # Rate limit
 
     return results
 
@@ -393,7 +393,8 @@ async def abn_to_decision_makers(
 
     abn_url = f"https://abr.business.gov.au/ABN/View?abn={best.abn}"
     # Clean HTML entities from entity name
-    clean_name = best.entity_name.replace("&amp;", "&").replace("&nbsp;", " ")
+    import html as _html
+    clean_name = _html.unescape(best.entity_name).strip()
 
     if best.is_individual:
         # Sole trader — the entity name IS the person's name
@@ -438,7 +439,17 @@ async def abn_to_decision_makers(
         ))
         # ACN available for ASIC director follow-up (handled by caller)
     elif "trust" in best.entity_type.lower():
-        # Trust — trustee name may contain useful info
+        # Trust — try to extract person names from trust name
+        person_names = _parse_trust_names(clean_name)
+        for pn in person_names:
+            dms.append(DecisionMaker(
+                full_name=pn,
+                title="Owner (Trustee)",
+                sources=["abn_lookup"],
+                confidence=0.75,
+                raw_source_url=abn_url,
+            ))
+        # Always also store the entity record (for company-level tracking)
         dms.append(DecisionMaker(
             full_name=clean_name,
             title="Trustee Entity",
@@ -465,11 +476,99 @@ def _parse_partnership_names(entity_name: str) -> list[str]:
         part = part.strip()
         if not part:
             continue
-        # Check if this looks like a person name (not a company)
-        if any(kw in part.upper() for kw in ["PTY", "LTD", "INC", "TRUST", "CORP"]):
+        # Check if this looks like a person name (not a company/place)
+        part_upper = part.upper()
+        if any(kw in part_upper for kw in [
+            "PTY", "LTD", "INC", "TRUST", "CORP", "PARK", "HOLIDAY",
+            "RESORT", "CARAVAN", "CAMPING", "TOURISM", "MOTEL",
+        ]):
             continue
         # Flip "SURNAME, FIRSTNAME" if needed
         name = _flip_surname_first(part)
         if name and len(name) > 2:
             names.append(name)
     return names
+
+
+def _parse_trust_names(trust_name: str) -> list[str]:
+    """Extract person names from Australian trust entity names.
+
+    Common patterns:
+      "THE TRUSTEE FOR D J & M A WATTS FAMILY TRUST"  → ["D J Watts", "M A Watts"]
+      "THE TRUSTEE FOR G & C HELLINGS FAMILY TRUST"   → ["G Hellings", "C Hellings"]
+      "The Trustee for LES LINDSAY FAMILY BUILDING TRUST" → ["Les Lindsay"]
+      "The trustee for Moordys Family Trust"           → ["Moordys"]
+      "THE TRUSTEE FOR MEECH TRUST TRADING AS ..."     → ["Meech"]
+
+    Business-named trusts (no person names) return []:
+      "The Trustee for Bundaberg Park Unit Trust"      → []
+      "The Trustee for Tasman Tourism Trust"           → []
+    """
+    # Strip "The Trustee for" / "THE TRUSTEE FOR" prefix
+    m = re.match(r'(?:the\s+)?trustee\s+for\s+(?:the\s+)?(.+)', trust_name, re.IGNORECASE)
+    if not m:
+        return []
+    body = m.group(1).strip()
+
+    # Strip trailing trust type keywords
+    body = re.sub(
+        r'\s+(FAMILY\s+)?(UNIT\s+|BUILDING\s+|DISCRETIONARY\s+)?TRUST(\s+NO\.?\s*\d+)?'
+        r'(\s+TRADING\s+AS\s+.+)?$',
+        '', body, flags=re.IGNORECASE
+    ).strip()
+
+    if not body:
+        return []
+
+    # Skip if remaining text looks like a business name (contains park, holiday, tourism, etc.)
+    business_words = [
+        "PARK", "HOLIDAY", "TOURIST", "TOURISM", "RESORT", "BEACH", "RIVER",
+        "VILLAGE", "CARAVAN", "CAMPING", "COASTAL", "OPERATIONS", "COVE",
+        "PARADISE", "GOLDEN", "PHOBOS", "RAINBOW", "VALLEY", "WEIR",
+        "GORGE", "ISLAND", "HARBOUR", "PORT", "WYE", "PUTT", "MILDURA",
+    ]
+    body_upper = body.upper()
+    if any(bw in body_upper for bw in business_words):
+        return []
+
+    # Pattern 1: "D J & M A WATTS" — initials + shared surname
+    # Multiple people sharing a surname, separated by &
+    m_multi = re.match(
+        r'^([A-Z]\s+(?:[A-Z]\s+)?)'  # first person initials: "D J "
+        r'&\s*'
+        r'([A-Z]\s+(?:[A-Z]\s+)?)'   # second person initials: "M A "
+        r'([A-Z][a-zA-Z]+)',          # shared surname: "WATTS"
+        body, re.IGNORECASE,
+    )
+    if m_multi:
+        surname = m_multi.group(3).strip().title()
+        names = []
+        for g in [m_multi.group(1), m_multi.group(2)]:
+            initials = g.strip().title()
+            names.append(f"{initials} {surname}")
+        return names
+
+    # Pattern 2: "G & C HELLINGS" — single initials + shared surname
+    m_gc = re.match(
+        r'^([A-Z])\s*&\s*([A-Z])\s+([A-Z][a-zA-Z]+)',
+        body, re.IGNORECASE,
+    )
+    if m_gc:
+        surname = m_gc.group(3).strip().title()
+        return [
+            f"{m_gc.group(1).upper()} {surname}",
+            f"{m_gc.group(2).upper()} {surname}",
+        ]
+
+    # Pattern 3: "LES LINDSAY" or "MEECH" — a name (1-3 words, no business words)
+    words = body.split()
+    if 1 <= len(words) <= 3:
+        # Check each word looks like a name (capitalized, no numbers, etc.)
+        looks_like_name = all(
+            re.match(r"^[A-Za-z][A-Za-z.'\\-]+$", w) and len(w) >= 2
+            for w in words
+        )
+        if looks_like_name:
+            return [" ".join(w.title() for w in words)]
+
+    return []

@@ -1703,13 +1703,18 @@ async def batch_insert_decision_makers(
     hotel_id: int,
     dms: List[DecisionMaker],
 ) -> int:
-    """Insert multiple decision makers for a hotel. Returns count inserted."""
-    count = 0
-    for dm in dms:
-        result = await insert_decision_maker(hotel_id, dm)
-        if result:
-            count += 1
-    return count
+    """Insert decision makers for a single hotel. Delegates to batch_persist_results."""
+    if not dms:
+        return 0
+    # Minimal wrapper for backward compat — build a fake result-like object
+    class _R:
+        pass
+    r = _R()
+    r.hotel_id = hotel_id
+    r.decision_makers = dms
+    r.domain_intel = None
+    r.layers_completed = 0
+    return await batch_persist_results([r])
 
 
 async def update_owner_enrichment_status(
@@ -1717,18 +1722,209 @@ async def update_owner_enrichment_status(
     status: int,
     layers_completed: int,
 ) -> None:
-    """Update the enrichment status for a hotel.
-
-    Status: 0=pending, 1=complete, 2=no_results
-    layers_completed: bitmask OR'd with existing value
-    """
+    """Update the enrichment status for a hotel."""
     async with get_conn() as conn:
         await queries.update_enrichment_status(
-            conn,
-            hotel_id=hotel_id,
-            status=status,
+            conn, hotel_id=hotel_id, status=status,
             layers_completed=layers_completed,
         )
+
+
+async def batch_persist_results(results: list) -> int:
+    """Persist a batch of enrichment results using bulk SQL queries.
+
+    Does 5 queries total (not 5 × N):
+      1. Batch upsert domain/WHOIS cache (unnest)
+      2. Batch upsert DNS cache (unnest)
+      3. Batch upsert cert cache (unnest)
+      4. Batch upsert decision makers (unnest + jsonb for sources)
+      5. Batch upsert enrichment status (unnest)
+
+    Returns total DM count inserted/updated.
+    """
+    import json
+
+    if not results:
+        return 0
+
+    async with get_conn() as conn:
+        # ── 1. Batch domain/WHOIS cache ────────────────────────────
+        d_domains, d_names, d_orgs, d_emails = [], [], [], []
+        d_registrars, d_dates, d_privacy, d_sources = [], [], [], []
+        seen_whois_domains = set()
+        for r in results:
+            di = r.domain_intel
+            if di and (di.registrant_name or di.registrant_org) and di.domain not in seen_whois_domains:
+                seen_whois_domains.add(di.domain)
+                d_domains.append(di.domain)
+                d_names.append(di.registrant_name)
+                d_orgs.append(di.registrant_org)
+                d_emails.append(di.registrant_email)
+                d_registrars.append(di.registrar)
+                d_dates.append(_parse_date(di.registration_date))
+                d_privacy.append(di.is_privacy_protected)
+                d_sources.append(di.whois_source)
+        if d_domains:
+            await conn.execute("""
+                INSERT INTO sadie_gtm.domain_whois_cache
+                    (domain, registrant_name, registrant_org, registrant_email,
+                     registrar, registration_date, is_privacy_protected, source, queried_at)
+                SELECT * FROM unnest(
+                    $1::text[], $2::text[], $3::text[], $4::text[],
+                    $5::text[], $6::timestamptz[], $7::bool[], $8::text[]
+                ) AS v(domain, registrant_name, registrant_org, registrant_email,
+                       registrar, registration_date, is_privacy_protected, source),
+                LATERAL (SELECT NOW()) AS t(queried_at)
+                ON CONFLICT (domain) DO UPDATE
+                SET registrant_name = COALESCE(EXCLUDED.registrant_name, sadie_gtm.domain_whois_cache.registrant_name),
+                    registrant_org = COALESCE(EXCLUDED.registrant_org, sadie_gtm.domain_whois_cache.registrant_org),
+                    registrant_email = COALESCE(EXCLUDED.registrant_email, sadie_gtm.domain_whois_cache.registrant_email),
+                    is_privacy_protected = EXCLUDED.is_privacy_protected,
+                    queried_at = NOW()
+            """, d_domains, d_names, d_orgs, d_emails,
+                d_registrars, d_dates, d_privacy, d_sources)
+
+        # ── 2. Batch DNS cache ─────────────────────────────────────
+        # mx_records is text[] — can't unnest text[][]. Encode as jsonb[], decode in SQL.
+        n_domains, n_providers, n_mx_json, n_soa = [], [], [], []
+        n_spf, n_dmarc, n_catchall = [], [], []
+        seen_dns_domains = set()
+        for r in results:
+            di = r.domain_intel
+            if di and (di.email_provider or di.mx_records) and di.domain not in seen_dns_domains:
+                seen_dns_domains.add(di.domain)
+                n_domains.append(di.domain)
+                n_providers.append(di.email_provider)
+                n_mx_json.append(json.dumps(di.mx_records or []))
+                n_soa.append(di.soa_email)
+                n_spf.append(di.spf_record)
+                n_dmarc.append(di.dmarc_record)
+                n_catchall.append(di.is_catch_all)
+        if n_domains:
+            await conn.execute("""
+                INSERT INTO sadie_gtm.domain_dns_cache
+                    (domain, email_provider, mx_records, soa_email,
+                     spf_record, dmarc_record, is_catch_all, queried_at)
+                SELECT
+                    v.domain, v.email_provider,
+                    ARRAY(SELECT jsonb_array_elements_text(v.mx_json)),
+                    v.soa_email, v.spf_record, v.dmarc_record, v.is_catch_all, NOW()
+                FROM unnest(
+                    $1::text[], $2::text[], $3::jsonb[], $4::text[],
+                    $5::text[], $6::text[], $7::bool[]
+                ) AS v(domain, email_provider, mx_json, soa_email,
+                       spf_record, dmarc_record, is_catch_all)
+                ON CONFLICT (domain) DO UPDATE
+                SET email_provider = EXCLUDED.email_provider,
+                    mx_records = EXCLUDED.mx_records,
+                    soa_email = EXCLUDED.soa_email,
+                    spf_record = EXCLUDED.spf_record,
+                    dmarc_record = EXCLUDED.dmarc_record,
+                    is_catch_all = EXCLUDED.is_catch_all,
+                    queried_at = NOW()
+            """, n_domains, n_providers, n_mx_json, n_soa, n_spf, n_dmarc, n_catchall)
+
+        # ── 3. Batch cert cache ────────────────────────────────────
+        # alt_domains is text[] — can't unnest text[][]. Encode as jsonb[], decode in SQL.
+        c_domains, c_orgs, c_alts_json, c_counts, c_ovev = [], [], [], [], []
+        seen_cert_domains = set()
+        for r in results:
+            di = r.domain_intel
+            if di and (di.ct_org_name or di.ct_cert_count) and di.domain not in seen_cert_domains:
+                seen_cert_domains.add(di.domain)
+                c_domains.append(di.domain)
+                c_orgs.append(di.ct_org_name)
+                c_alts_json.append(json.dumps(di.ct_alt_domains or []))
+                c_counts.append(di.ct_cert_count)
+                c_ovev.append(bool(di.ct_org_name))
+        if c_domains:
+            await conn.execute("""
+                INSERT INTO sadie_gtm.domain_cert_cache
+                    (domain, org_name, alt_domains, cert_count, has_ov_ev, queried_at)
+                SELECT
+                    v.domain, v.org_name,
+                    ARRAY(SELECT jsonb_array_elements_text(v.alts_json)),
+                    v.cert_count, v.has_ov_ev, NOW()
+                FROM unnest(
+                    $1::text[], $2::text[], $3::jsonb[], $4::int[], $5::bool[]
+                ) AS v(domain, org_name, alts_json, cert_count, has_ov_ev)
+                ON CONFLICT (domain) DO UPDATE
+                SET org_name = COALESCE(EXCLUDED.org_name, sadie_gtm.domain_cert_cache.org_name),
+                    alt_domains = EXCLUDED.alt_domains,
+                    cert_count = EXCLUDED.cert_count,
+                    has_ov_ev = EXCLUDED.has_ov_ev,
+                    queried_at = NOW()
+            """, c_domains, c_orgs, c_alts_json, c_counts, c_ovev)
+
+        # ── 4. Batch upsert decision makers ────────────────────────
+        # sources is text[] — can't unnest text[][]. Encode as jsonb[], decode in SQL.
+        dm_ids, dm_names, dm_titles, dm_emails = [], [], [], []
+        dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls = [], [], [], [], []
+        seen_dms = set()
+        for r in results:
+            for dm in (r.decision_makers or []):
+                dm_key = (r.hotel_id, dm.full_name, dm.title)
+                if dm_key in seen_dms:
+                    continue
+                seen_dms.add(dm_key)
+                dm_ids.append(r.hotel_id)
+                dm_names.append(dm.full_name)
+                dm_titles.append(dm.title)
+                dm_emails.append(dm.email)
+                dm_verified.append(dm.email_verified)
+                dm_phones.append(dm.phone)
+                dm_sources_json.append(json.dumps(dm.sources or []))
+                dm_conf.append(dm.confidence)
+                dm_urls.append(dm.raw_source_url)
+        dm_count = 0
+        if dm_ids:
+            tag = await conn.execute("""
+                INSERT INTO sadie_gtm.hotel_decision_makers
+                    (hotel_id, full_name, title, email, email_verified, phone,
+                     sources, confidence, raw_source_url)
+                SELECT
+                    v.hotel_id, v.full_name, v.title, v.email, v.email_verified, v.phone,
+                    ARRAY(SELECT jsonb_array_elements_text(v.sources_json)),
+                    v.confidence, v.raw_source_url
+                FROM unnest(
+                    $1::int[], $2::text[], $3::text[], $4::text[],
+                    $5::bool[], $6::text[], $7::jsonb[], $8::float4[], $9::text[]
+                ) AS v(hotel_id, full_name, title, email, email_verified, phone,
+                       sources_json, confidence, raw_source_url)
+                ON CONFLICT (hotel_id, full_name, title) DO UPDATE
+                SET email = COALESCE(NULLIF(EXCLUDED.email, ''), sadie_gtm.hotel_decision_makers.email),
+                    email_verified = EXCLUDED.email_verified OR sadie_gtm.hotel_decision_makers.email_verified,
+                    phone = COALESCE(NULLIF(EXCLUDED.phone, ''), sadie_gtm.hotel_decision_makers.phone),
+                    sources = (SELECT array_agg(DISTINCT s) FROM unnest(array_cat(sadie_gtm.hotel_decision_makers.sources, EXCLUDED.sources)) s),
+                    confidence = GREATEST(EXCLUDED.confidence, sadie_gtm.hotel_decision_makers.confidence),
+                    raw_source_url = COALESCE(EXCLUDED.raw_source_url, sadie_gtm.hotel_decision_makers.raw_source_url),
+                    updated_at = NOW()
+            """, dm_ids, dm_names, dm_titles, dm_emails,
+                dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls)
+            try:
+                dm_count = int(tag.split()[-1])
+            except (ValueError, IndexError):
+                dm_count = len(dm_ids)
+
+        # ── 5. Batch upsert enrichment status ──────────────────────
+        s_ids, s_statuses, s_layers = [], [], []
+        for r in results:
+            s_ids.append(r.hotel_id)
+            s_statuses.append(1 if r.decision_makers else 2)
+            s_layers.append(r.layers_completed)
+        if s_ids:
+            await conn.execute("""
+                INSERT INTO sadie_gtm.hotel_owner_enrichment (hotel_id, status, layers_completed, last_attempt)
+                SELECT v.*, NOW() FROM unnest(
+                    $1::int[], $2::int[], $3::int[]
+                ) AS v(hotel_id, status, layers_completed)
+                ON CONFLICT (hotel_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    layers_completed = sadie_gtm.hotel_owner_enrichment.layers_completed | EXCLUDED.layers_completed,
+                    last_attempt = NOW()
+            """, s_ids, s_statuses, s_layers)
+
+    return dm_count
 
 
 async def cache_domain_intel(intel: DomainIntel) -> None:

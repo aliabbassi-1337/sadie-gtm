@@ -992,19 +992,21 @@ class TestRunOwnerEnrichmentMocked:
 
         service = Service(rms_repo=None, rms_queue=MockQueue())
 
+        # enrich_batch handles its own persist internally
+        async def fake_enrich_batch(hotels, concurrency, layers, persist=True, flush_interval=20):
+            return fake_results
+
         with patch("services.enrichment.repo.get_hotels_pending_owner_enrichment",
                     new_callable=AsyncMock, return_value=fake_hotels):
             with patch("services.enrichment.owner_enricher.enrich_batch",
-                        new_callable=AsyncMock, return_value=fake_results):
-                with patch.object(service, "_persist_owner_results",
-                                  new_callable=AsyncMock, return_value=1):
-                    result = await service.run_owner_enrichment(limit=10)
+                        side_effect=fake_enrich_batch):
+                result = await service.run_owner_enrichment(limit=10)
 
         assert result["processed"] == 2
         assert result["found"] == 1
         assert result["contacts"] == 1
         assert result["verified"] == 0
-        assert result["saved"] == 1
+        assert result["saved"] == 1  # total_contacts (1 DM found)
 
     @pytest.mark.asyncio
     async def test_layer_filter_maps_correctly(self):
