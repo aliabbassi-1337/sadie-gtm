@@ -890,7 +890,7 @@ async def enrich_missing(args, all_parks: bool = False):
     if AZURE_KEY:
         logger.info("LLM extracting people...")
         async with httpx.AsyncClient() as llm_client:
-            sem = asyncio.Semaphore(50)
+            sem = asyncio.Semaphore(300)
             async def _extract_one(r):
                 if not r.page_texts:
                     return
