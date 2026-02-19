@@ -520,9 +520,86 @@ async def _serper_search_entity(client, entity_name, sem) -> list[str]:
             return []
 
 
+async def fix_websites(args):
+    """Find real websites for all Big4 parks with bad/missing URLs, plus entity websites."""
+    conn = await asyncpg.connect(**DB_CONFIG)
+    dry_run = not args.apply
+
+    # Load ALL Big4 parks
+    rows = await conn.fetch(
+        "SELECT h.id, h.name, h.website FROM sadie_gtm.hotels h WHERE " + BIG4_WHERE + " ORDER BY h.name"
+    )
+    all_parks = [(r['id'], r['name'], r['website'] or '') for r in rows]
+    bad_parks = [(hid, name, url) for hid, name, url in all_parks if _is_bad_website(url)]
+
+    # Load entities
+    entity_rows = await conn.fetch(
+        "SELECT dm.hotel_id, dm.full_name"
+        " FROM sadie_gtm.hotel_decision_makers dm"
+        " JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
+        " WHERE " + BIG4_WHERE + " AND dm.full_name ~* $1",
+        ENTITY_RE_STR,
+    )
+    unique_entities: dict[str, dict] = {}
+    for r in entity_rows:
+        key = r['full_name'].strip().upper()
+        if key not in unique_entities:
+            unique_entities[key] = {'name': r['full_name'], 'hotel_ids': []}
+        unique_entities[key]['hotel_ids'].append(r['hotel_id'])
+
+    print(f"Total Big4 parks: {len(all_parks)}")
+    print(f"Parks with bad/missing website: {len(bad_parks)}")
+    print(f"Unique entities to search: {len(unique_entities)}")
+
+    updated = 0
+    entity_urls_found = 0
+
+    async with httpx.AsyncClient() as client:
+        # 1) Fix hotel websites
+        if bad_parks:
+            logger.info(f"Finding websites for {len(bad_parks)} parks via Serper...")
+            sem = asyncio.Semaphore(10)
+            found = await asyncio.gather(*[
+                _serper_find_website(client, name, sem) for _, name, _ in bad_parks
+            ])
+            for (hid, name, old_url), new_url in zip(bad_parks, found):
+                if new_url:
+                    logger.info(f"  {name} -> {new_url}")
+                    if not dry_run:
+                        await conn.execute(
+                            "UPDATE sadie_gtm.hotels SET website = $1, updated_at = NOW() WHERE id = $2",
+                            new_url, hid,
+                        )
+                    updated += 1
+                else:
+                    logger.warning(f"  No website found: {name} (was: {old_url or 'blank'})")
+
+        # 2) Find entity websites
+        if unique_entities:
+            logger.info(f"Searching {len(unique_entities)} entities via Serper...")
+            sem = asyncio.Semaphore(20)
+            items = list(unique_entities.values())
+            results = await asyncio.gather(*[
+                _serper_search_entity(client, item['name'], sem) for item in items
+            ])
+            for item, urls in zip(items, results):
+                if urls:
+                    entity_urls_found += 1
+                    logger.info(f"  {item['name'][:50]} -> {len(urls)} URLs")
+
+    print(f"\n{'DRY RUN' if dry_run else 'APPLIED'}")
+    print(f"Hotel websites fixed: {updated}/{len(bad_parks)}")
+    print(f"Entities with URLs: {entity_urls_found}/{len(unique_entities)}")
+    if dry_run:
+        print("\nRun with --apply to write to DB")
+
+    await conn.close()
+
+
 async def enrich_missing(args):
-    """Targeted enrichment: find websites, crawl park + entity sites, extract people, insert.
-    Uses text_mode + SemaphoreDispatcher + Brightdata proxy for maximum speed."""
+    """Targeted enrichment: crawl park + entity sites, extract people, insert.
+    Uses text_mode + SemaphoreDispatcher + CF Worker proxy for maximum speed.
+    Run --fix-websites first to ensure all parks have good URLs."""
     conn = await asyncpg.connect(**DB_CONFIG)
     dry_run = not args.apply
 
@@ -534,73 +611,21 @@ async def enrich_missing(args):
         await conn.close()
         return
 
-    # Step 2: Find websites for parks with bad/missing websites
-    bad_parks = [p for p in parks if _is_bad_website(p.website)]
-    if bad_parks:
-        logger.info(f"Finding websites for {len(bad_parks)} parks via Serper...")
-        async with httpx.AsyncClient() as client:
-            sem = asyncio.Semaphore(10)
-            found = await asyncio.gather(*[
-                _serper_find_website(client, p.hotel_name, sem) for p in bad_parks
-            ])
-            for park, url in zip(bad_parks, found):
-                if url:
-                    logger.info(f"  Found: {park.hotel_name} -> {url}")
-                    park.website = url
-                    if not dry_run:
-                        await conn.execute(
-                            "UPDATE sadie_gtm.hotels SET website = $1, updated_at = NOW() WHERE id = $2",
-                            url, park.hotel_id,
-                        )
-                else:
-                    logger.warning(f"  No website for: {park.hotel_name}")
-
-    # Step 3: Search entity names via Serper (deduplicate by entity name)
-    entity_urls: dict[int, list[str]] = {}
-    if entity_map:
-        unique_entities: dict[str, dict] = {}
-        for hid, name in entity_map.items():
-            key = name.strip().upper()
-            if key not in unique_entities:
-                unique_entities[key] = {'name': name, 'hotel_ids': []}
-            unique_entities[key]['hotel_ids'].append(hid)
-
-        logger.info(f"Searching {len(unique_entities)} entities via Serper...")
-        async with httpx.AsyncClient() as client:
-            sem = asyncio.Semaphore(20)
-            items = list(unique_entities.values())
-            results = await asyncio.gather(*[
-                _serper_search_entity(client, item['name'], sem) for item in items
-            ])
-            for item, urls in zip(items, results):
-                for hid in item['hotel_ids']:
-                    entity_urls[hid] = urls
-
-    # Step 4: Build URL list for crawl4ai
+    # Step 2: Build URL list for crawl4ai
     all_urls: list[str] = []
     url_to_park_idx: dict[str, int] = {}
     crawlable: list[ParkInfo] = []
 
     for park in parks:
         has_website = park.website and not _is_bad_website(park.website)
-        has_entity_urls = park.hotel_id in entity_urls and entity_urls[park.hotel_id]
-        if not has_website and not has_entity_urls:
+        if not has_website:
             continue
         idx = len(crawlable)
         crawlable.append(park)
-        if has_website:
-            for url in _build_urls(park.website):
-                if url not in url_to_park_idx:
-                    all_urls.append(url)
-                    url_to_park_idx[url] = idx
-        if has_entity_urls:
-            for url in entity_urls[park.hotel_id]:
-                # Skip binary files
-                if re.search(r'\.(pdf|doc|docx|xls|xlsx|zip|png|jpg|gif)(\?|$)', url, re.IGNORECASE):
-                    continue
-                if url not in url_to_park_idx:
-                    all_urls.append(url)
-                    url_to_park_idx[url] = idx
+        for url in _build_urls(park.website):
+            if url not in url_to_park_idx:
+                all_urls.append(url)
+                url_to_park_idx[url] = idx
 
     logger.info(f"Crawling {len(all_urls)} URLs across {len(crawlable)} parks...")
 
@@ -829,8 +854,10 @@ async def main():
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--blanks-only", action="store_true", help="Only crawl parks with zero DMs")
     parser.add_argument("--chain-fill", action="store_true", help="Fill known chain execs into blank parks")
+    parser.add_argument("--fix-websites", action="store_true",
+                        help="Find real websites for all Big4 parks with bad/missing URLs via Serper")
     parser.add_argument("--enrich-missing", action="store_true",
-                        help="Full enrichment: find websites, crawl park+entity sites, extract people, insert")
+                        help="Full enrichment: crawl park+entity sites, extract people, insert")
     parser.add_argument("--apply", action="store_true", help="Write results to DB (default: dry-run)")
     parser.add_argument("--hotel-ids", type=str, help="Comma-separated hotel IDs to crawl")
     parser.add_argument("--no-llm", action="store_true")
@@ -841,6 +868,11 @@ async def main():
 
     logger.remove()
     logger.add(sys.stderr, level="DEBUG" if args.verbose else "INFO")
+
+    # Fix websites — find real URLs for parks with bad/missing websites + entities
+    if args.fix_websites:
+        await fix_websites(args)
+        return
 
     # Chain fill mode — fast batch insert, no crawling needed
     if args.chain_fill:
