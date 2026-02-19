@@ -116,13 +116,19 @@ class EntityResult:
 
 # ── Step 1: Load entities ───────────────────────────────────────────────────
 async def load_entities(conn) -> list[Entity]:
-    rows = await conn.fetch("""
-        SELECT dm.full_name, dm.hotel_id, h.name as hotel_name
-        FROM sadie_gtm.hotel_decision_makers dm
-        JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id
-        WHERE (h.name ILIKE '%%big4%%' OR h.name ILIKE '%%big 4%%')
-        AND (dm.full_name ~* '(PTY|LTD|LIMITED|LLC|INC|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|COUNCIL|MANAGEMENT|ASSETS|VILLAGES|HOLIDAY|CARAVAN|PARKS|RESORT|TOURISM|TOURIST|NRMA|RAC |MOTEL|RETREAT)')
-    """)
+    rows = await conn.fetch(
+        "SELECT dm.full_name, dm.hotel_id, h.name as hotel_name"
+        " FROM sadie_gtm.hotel_decision_makers dm"
+        " JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
+        " WHERE (h.external_id_type = 'big4' OR h.source LIKE '%::big4%')"
+        "   AND dm.full_name ~* $1"
+        "   AND dm.hotel_id NOT IN ("
+        "     SELECT dm2.hotel_id FROM sadie_gtm.hotel_decision_makers dm2"
+        "     WHERE dm2.hotel_id = dm.hotel_id"
+        "       AND dm2.full_name !~* $1"
+        "   )",
+        r'(PTY|LTD|LIMITED|LLC|INC|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|COUNCIL|MANAGEMENT|ASSETS|VILLAGES|HOLIDAY|CARAVAN|PARKS|RESORT|TOURISM|TOURIST|NRMA|RAC |MOTEL|RETREAT)'
+    )
 
     # Group by entity name
     entity_map: dict[str, Entity] = {}
@@ -415,16 +421,15 @@ async def process_entities(entities: list[Entity]) -> list[EntityResult]:
 
 # ── Insert ───────────────────────────────────────────────────────────────────
 async def insert_results(conn, results: list[EntityResult], dry_run: bool = True):
-    """Insert found people as decision makers."""
-    inserted = 0
-    skipped = 0
+    """Batch-insert found people as decision makers using unnest()."""
+    # Build batch arrays
+    dm_ids, dm_names, dm_titles, dm_emails = [], [], [], []
+    dm_phones, dm_sources_json, dm_conf, dm_urls = [], [], [], []
+    dm_verified = []
+    seen = set()
 
     for r in results:
-        if not r.people:
-            continue
-
         for person in r.people:
-            # Validate name
             name = person.name.strip()
             if not name or " " not in name or len(name) < 4:
                 continue
@@ -432,37 +437,57 @@ async def insert_results(conn, results: list[EntityResult], dry_run: bool = True
                 continue
 
             for hotel_id in r.entity.hotel_ids:
-                # Check existing
-                existing = await conn.fetchval(
-                    "SELECT id FROM sadie_gtm.hotel_decision_makers "
-                    "WHERE hotel_id = $1 AND LOWER(full_name) = LOWER($2)",
-                    hotel_id, name,
-                )
-                if existing:
-                    skipped += 1
+                key = (hotel_id, name.lower(), (person.title or "Director").lower())
+                if key in seen:
                     continue
+                seen.add(key)
+                dm_ids.append(hotel_id)
+                dm_names.append(name)
+                dm_titles.append(person.title or "Director")
+                dm_emails.append(person.email or None)
+                dm_verified.append(False)
+                dm_phones.append(person.phone or None)
+                dm_sources_json.append(json.dumps(["entity_website_crawl"]))
+                dm_conf.append(0.70)
+                dm_urls.append(person.source_url or None)
 
-                if not dry_run:
-                    await conn.execute(
-                        """INSERT INTO sadie_gtm.hotel_decision_makers
-                           (hotel_id, full_name, title, email, phone, sources, confidence, raw_source_url)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
-                        hotel_id,
-                        name,
-                        person.title or "Director",
-                        person.email or None,
-                        person.phone or None,
-                        ["entity_website_crawl"],
-                        0.70,
-                        person.source_url or None,
-                    )
-                logger.info(
-                    f"  + {name} ({person.title}) -> {r.entity.hotel_names[r.entity.hotel_ids.index(hotel_id)]}"
-                    f"  [entity: {r.entity.name[:40]}]"
-                )
-                inserted += 1
+    if not dm_ids:
+        return 0, 0
 
-    return inserted, skipped
+    # Log what we're inserting
+    for i in range(len(dm_ids)):
+        logger.info(f"  + {dm_names[i]} ({dm_titles[i]}) -> hotel_id={dm_ids[i]}")
+
+    if dry_run:
+        return len(dm_ids), 0
+
+    tag = await conn.execute(
+        "INSERT INTO sadie_gtm.hotel_decision_makers"
+        "  (hotel_id, full_name, title, email, email_verified, phone,"
+        "   sources, confidence, raw_source_url)"
+        " SELECT"
+        "  v.hotel_id, v.full_name, v.title, v.email, v.email_verified, v.phone,"
+        "  ARRAY(SELECT jsonb_array_elements_text(v.sources_json)),"
+        "  v.confidence, v.raw_source_url"
+        " FROM unnest("
+        "  $1::int[], $2::text[], $3::text[], $4::text[],"
+        "  $5::bool[], $6::text[], $7::jsonb[], $8::float4[], $9::text[]"
+        " ) AS v(hotel_id, full_name, title, email, email_verified, phone,"
+        "        sources_json, confidence, raw_source_url)"
+        " ON CONFLICT (hotel_id, full_name, title) DO UPDATE"
+        " SET email = COALESCE(NULLIF(EXCLUDED.email, ''), sadie_gtm.hotel_decision_makers.email),"
+        "     email_verified = EXCLUDED.email_verified OR sadie_gtm.hotel_decision_makers.email_verified,"
+        "     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), sadie_gtm.hotel_decision_makers.phone),"
+        "     sources = (SELECT array_agg(DISTINCT s) FROM unnest(array_cat(sadie_gtm.hotel_decision_makers.sources, EXCLUDED.sources)) s),"
+        "     confidence = GREATEST(EXCLUDED.confidence, sadie_gtm.hotel_decision_makers.confidence),"
+        "     raw_source_url = COALESCE(EXCLUDED.raw_source_url, sadie_gtm.hotel_decision_makers.raw_source_url),"
+        "     updated_at = NOW()",
+        dm_ids, dm_names, dm_titles, dm_emails,
+        dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls,
+    )
+    # Parse "INSERT 0 N" tag
+    inserted = int(tag.split()[-1]) if tag else len(dm_ids)
+    return inserted, 0
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────

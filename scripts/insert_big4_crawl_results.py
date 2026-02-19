@@ -33,6 +33,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--apply', action='store_true', help='Actually write to DB')
     parser.add_argument('--dry-run', action='store_true', help='Preview changes only')
+    parser.add_argument('--input', default=RESULTS_FILE, help='Path to crawl results JSON')
     parser.add_argument('-v', '--verbose', action='store_true')
     args = parser.parse_args()
 
@@ -43,120 +44,135 @@ async def main():
     logger.remove()
     logger.add(sys.stderr, level="DEBUG" if args.verbose else "INFO")
 
-    with open(RESULTS_FILE) as f:
+    with open(args.input) as f:
         results = json.load(f)
 
     logger.info(f"Loaded {len(results)} parks with new data")
 
     conn = await asyncpg.connect(**DB_CONFIG)
 
-    dm_inserts = 0
-    dm_skipped = 0
-    phone_updates = 0
-    email_updates = 0
+    import re
+    import json as json_mod
+
+    BUSINESS_RE = re.compile(r'(?i)(pty|ltd|trust|holiday|park|resort|caravan|tourism|beach|river)')
+
+    # Build batch arrays for DMs
+    dm_ids, dm_names, dm_titles, dm_emails = [], [], [], []
+    dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls = [], [], [], [], []
+    seen = set()
+
+    # Build batch arrays for phone/email updates
+    phone_hotel_ids, phone_vals = [], []
+    email_hotel_ids, email_vals = [], []
 
     for park in results:
         hotel_id = park['hotel_id']
-        hotel_name = park['hotel_name']
         website = park['website']
 
-        # 1. Insert decision makers
         for owner in park.get('owner_names', []):
             name = owner.get('name', '').strip()
             title = owner.get('title', 'Owner').strip()
-
-            if not name or len(name) < 3:
+            if not name or len(name) < 3 or ' ' not in name:
                 continue
-            # Must have first + last name
-            if ' ' not in name:
-                logger.debug(f"  Skip first-name-only: {name!r} for {hotel_name}")
+            if BUSINESS_RE.search(name):
                 continue
-            # Reject business/place name patterns
-            import re
-            if re.search(r'(?i)(pty|ltd|trust|holiday|park|resort|caravan|tourism|beach|river)', name):
-                logger.debug(f"  Skip business/place name: {name!r} for {hotel_name}")
+            key = (hotel_id, name.lower(), title.lower())
+            if key in seen:
                 continue
+            seen.add(key)
+            dm_ids.append(hotel_id)
+            dm_names.append(name)
+            dm_titles.append(title)
+            dm_emails.append(None)
+            dm_verified.append(False)
+            dm_phones.append(None)
+            dm_sources_json.append(json_mod.dumps(["crawl4ai_llm"]))
+            dm_conf.append(0.65)
+            dm_urls.append(website)
 
-            # Check for existing
-            existing = await conn.fetchval(
-                "SELECT id FROM sadie_gtm.hotel_decision_makers "
-                "WHERE hotel_id = $1 AND LOWER(full_name) = LOWER($2)",
-                hotel_id, name,
-            )
-
-            if existing:
-                logger.debug(f"  Skip existing DM: {name} for {hotel_name}")
-                dm_skipped += 1
-                continue
-
-            if args.apply:
-                await conn.execute(
-                    """INSERT INTO sadie_gtm.hotel_decision_makers
-                       (hotel_id, full_name, title, sources, confidence, raw_source_url)
-                       VALUES ($1, $2, $3, $4, $5, $6)""",
-                    hotel_id, name, title,
-                    ['crawl4ai_llm'],
-                    0.65,
-                    website,
-                )
-            logger.info(f"  + DM: {name} ({title}) -> {hotel_name}")
-            dm_inserts += 1
-
-        # 2. Update phone if hotel has none and we found one
         new_phones = park.get('new_phones', [])
         if new_phones:
-            current = await conn.fetchrow(
-                "SELECT phone_google, phone_website FROM sadie_gtm.hotels WHERE id = $1",
-                hotel_id,
-            )
-            if current and not current['phone_website'] and not current['phone_google']:
-                phone = new_phones[0]  # Use first found
-                if args.apply:
-                    await conn.execute(
-                        "UPDATE sadie_gtm.hotels SET phone_website = $1, updated_at = NOW() WHERE id = $2",
-                        phone, hotel_id,
-                    )
-                logger.info(f"  + Phone: {phone} -> {hotel_name}")
-                phone_updates += 1
+            phone_hotel_ids.append(hotel_id)
+            phone_vals.append(new_phones[0])
 
-        # 3. Update email if hotel has none and we found personal emails
         new_emails = park.get('new_emails', [])
         if new_emails:
-            current_email = await conn.fetchval(
-                "SELECT email FROM sadie_gtm.hotels WHERE id = $1",
-                hotel_id,
-            )
-            if not current_email:
-                # Pick the most specific email (not marketing@, not example@)
-                best = None
-                for e in new_emails:
-                    if 'example' in e.lower():
-                        continue
-                    if 'marketing' in e.lower() or 'corp' in e.lower():
-                        if not best:
-                            best = e
-                        continue
-                    best = e
-                    break
+            best = None
+            for e in new_emails:
+                if 'example' in e.lower():
+                    continue
+                if 'marketing' in e.lower() or 'corp' in e.lower():
+                    if not best:
+                        best = e
+                    continue
+                best = e
+                break
+            if best:
+                email_hotel_ids.append(hotel_id)
+                email_vals.append(best)
 
-                if best:
-                    if args.apply:
-                        await conn.execute(
-                            "UPDATE sadie_gtm.hotels SET email = $1, updated_at = NOW() WHERE id = $2",
-                            best, hotel_id,
-                        )
-                    logger.info(f"  + Email: {best} -> {hotel_name}")
-                    email_updates += 1
+    # Log preview
+    for i in range(len(dm_ids)):
+        logger.info(f"  + DM: {dm_names[i]} ({dm_titles[i]}) -> hotel_id={dm_ids[i]}")
+    for hid, phone in zip(phone_hotel_ids, phone_vals):
+        logger.info(f"  + Phone: {phone} -> hotel_id={hid}")
+    for hid, email in zip(email_hotel_ids, email_vals):
+        logger.info(f"  + Email: {email} -> hotel_id={hid}")
+
+    if args.apply:
+        # Batch insert DMs
+        if dm_ids:
+            await conn.execute(
+                "INSERT INTO sadie_gtm.hotel_decision_makers"
+                "  (hotel_id, full_name, title, email, email_verified, phone,"
+                "   sources, confidence, raw_source_url)"
+                " SELECT"
+                "  v.hotel_id, v.full_name, v.title, v.email, v.email_verified, v.phone,"
+                "  ARRAY(SELECT jsonb_array_elements_text(v.sources_json)),"
+                "  v.confidence, v.raw_source_url"
+                " FROM unnest("
+                "  $1::int[], $2::text[], $3::text[], $4::text[],"
+                "  $5::bool[], $6::text[], $7::jsonb[], $8::float4[], $9::text[]"
+                " ) AS v(hotel_id, full_name, title, email, email_verified, phone,"
+                "        sources_json, confidence, raw_source_url)"
+                " ON CONFLICT (hotel_id, full_name, title) DO UPDATE"
+                " SET email = COALESCE(NULLIF(EXCLUDED.email, ''), sadie_gtm.hotel_decision_makers.email),"
+                "     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), sadie_gtm.hotel_decision_makers.phone),"
+                "     sources = (SELECT array_agg(DISTINCT s) FROM unnest(array_cat(sadie_gtm.hotel_decision_makers.sources, EXCLUDED.sources)) s),"
+                "     confidence = GREATEST(EXCLUDED.confidence, sadie_gtm.hotel_decision_makers.confidence),"
+                "     updated_at = NOW()",
+                dm_ids, dm_names, dm_titles, dm_emails,
+                dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls,
+            )
+
+        # Batch update phones (only where hotel has no phone)
+        if phone_hotel_ids:
+            await conn.execute(
+                "UPDATE sadie_gtm.hotels h SET phone_website = v.phone, updated_at = NOW()"
+                " FROM unnest($1::int[], $2::text[]) AS v(id, phone)"
+                " WHERE h.id = v.id"
+                "   AND (h.phone_website IS NULL OR h.phone_website = '')"
+                "   AND (h.phone_google IS NULL OR h.phone_google = '')",
+                phone_hotel_ids, phone_vals,
+            )
+
+        # Batch update emails (only where hotel has no email)
+        if email_hotel_ids:
+            await conn.execute(
+                "UPDATE sadie_gtm.hotels h SET email = v.email, updated_at = NOW()"
+                " FROM unnest($1::int[], $2::text[]) AS v(id, email)"
+                " WHERE h.id = v.id AND (h.email IS NULL OR h.email = '')",
+                email_hotel_ids, email_vals,
+            )
 
     await conn.close()
 
     print(f"\n{'='*50}")
     print(f"{'DRY RUN' if args.dry_run else 'APPLIED'}")
     print(f"{'='*50}")
-    print(f"Decision makers inserted:  {dm_inserts}")
-    print(f"Decision makers skipped:   {dm_skipped} (already exist)")
-    print(f"Phone numbers updated:     {phone_updates}")
-    print(f"Emails updated:            {email_updates}")
+    print(f"Decision makers:  {len(dm_ids)}")
+    print(f"Phone updates:    {len(phone_hotel_ids)}")
+    print(f"Email updates:    {len(email_hotel_ids)}")
 
     if args.dry_run:
         print(f"\nRun with --apply to write to DB")
