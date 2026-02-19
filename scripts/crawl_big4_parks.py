@@ -27,16 +27,7 @@ from loguru import logger
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.async_dispatcher import SemaphoreDispatcher
 
-# DB config
-DB_CONFIG = dict(
-    host='aws-1-ap-southeast-1.pooler.supabase.com',
-    port=6543, database='postgres',
-    user='postgres.yunairadgmaqesxejqap',
-    password='SadieGTM321-',
-    statement_cache_size=0,
-)
-
-# Azure OpenAI - read .env manually (Python 3.14 dotenv bug)
+# Read .env manually (Python 3.14 dotenv bug)
 def _read_env():
     env = {}
     try:
@@ -51,6 +42,16 @@ def _read_env():
     return env
 
 _ENV = _read_env()
+
+# DB config — credentials from .env
+DB_CONFIG = dict(
+    host=_ENV.get('SADIE_DB_HOST', 'aws-1-ap-southeast-1.pooler.supabase.com'),
+    port=int(_ENV.get('SADIE_DB_PORT', '6543')),
+    database=_ENV.get('SADIE_DB_NAME', 'postgres'),
+    user=_ENV.get('SADIE_DB_USER', 'postgres.yunairadgmaqesxejqap'),
+    password=_ENV.get('SADIE_DB_PASSWORD', ''),
+    statement_cache_size=0,
+)
 AZURE_KEY = _ENV.get('AZURE_OPENAI_API_KEY', '')
 AZURE_ENDPOINT = _ENV.get('AZURE_OPENAI_ENDPOINT', '').rstrip('/')
 AZURE_VERSION = _ENV.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
@@ -89,6 +90,8 @@ SEARCH_SKIP_DOMAINS = {
     "abn.business.gov.au", "abr.business.gov.au",
     "asic.gov.au", "yellowpages.com.au", "whitepages.com.au",
     "truelocal.com.au", "opencorporates.com", "big4.com.au",
+    "insolvencynotices.com.au", "companieslist.com", "businesslist.com.au",
+    "dnb.com", "zoominfo.com", "linkedin.com",
 }
 
 ENTITY_RE_STR = (
@@ -613,17 +616,53 @@ async def fix_websites(args):
     await conn.close()
 
 
-async def enrich_missing(args):
-    """Targeted enrichment using 2-pass crawl with link discovery.
+async def load_all_big4_parks(conn) -> tuple[list[ParkInfo], dict[int, str]]:
+    """Load ALL Big4 parks with their entity names."""
+    rows = await conn.fetch(
+        "SELECT h.id, h.name, h.website, h.email,"
+        "  h.phone_google, h.phone_website"
+        " FROM sadie_gtm.hotels h"
+        " WHERE " + BIG4_WHERE
+        + " ORDER BY h.name",
+    )
+    parks = []
+    for r in rows:
+        parks.append(ParkInfo(
+            hotel_id=r['id'], hotel_name=r['name'],
+            website=r['website'] or '',
+            existing_phones=[p for p in [r.get('phone_google'), r.get('phone_website')] if p],
+            existing_email=r.get('email'),
+        ))
+    # Get entity names for all parks
+    entity_rows = await conn.fetch(
+        "SELECT dm.hotel_id, dm.full_name"
+        " FROM sadie_gtm.hotel_decision_makers dm"
+        " JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
+        " WHERE " + BIG4_WHERE + " AND dm.full_name ~* $1",
+        ENTITY_RE_STR,
+    )
+    entity_map = {}
+    for r in entity_rows:
+        entity_map[r['hotel_id']] = r['full_name']
+    return parks, entity_map
+
+
+async def enrich_missing(args, all_parks: bool = False):
+    """Targeted enrichment using 3-pass crawl with link discovery.
     Pass 1: Crawl homepages, discover internal links (about/team/contact pages).
-    Pass 2: Crawl only discovered relevant pages. No hardcoded paths, no CF Worker proxy.
+    Pass 2: Crawl discovered relevant pages + entity URLs from Serper.
+    Pass 3: Crawl deeper pages discovered from Pass 2.
     Then LLM extract people and batch insert."""
     conn = await asyncpg.connect(**DB_CONFIG)
     dry_run = not args.apply
 
     # Step 1: Load targets
-    parks, entity_map = await load_parks_needing_people(conn)
-    logger.info(f"Found {len(parks)} parks needing real people ({len(entity_map)} with entity names)")
+    if all_parks:
+        parks, entity_map = await load_all_big4_parks(conn)
+        logger.info(f"Loaded ALL {len(parks)} Big4 parks ({len(entity_map)} with entity names)")
+    else:
+        parks, entity_map = await load_parks_needing_people(conn)
+        logger.info(f"Found {len(parks)} parks needing real people ({len(entity_map)} with entity names)")
     if not parks:
         print("All parks have real people!")
         await conn.close()
@@ -890,31 +929,45 @@ async def enrich_missing(args):
             dm_conf.append(0.70)
             dm_urls.append(r.park.website or None)
 
-    # Phone/email updates
-    phone_ids, phone_vals = [], []
-    email_ids, email_vals = [], []
+    # Map orphan contact info (from page scraping) to person/entity DMs
+    # For parks with person DMs: fill in missing email/phone on those DMs
+    # For parks with NO person DMs: update entity DM in DB with contact info
+    entity_contact_ids, entity_contact_emails, entity_contact_phones = [], [], []
     for r in results_list:
-        if r.new_phones:
-            phone_ids.append(r.park.hotel_id)
-            phone_vals.append(r.new_phones[0])
+        orphan_email = None
+        orphan_phone = r.new_phones[0] if r.new_phones else None
         if r.new_emails:
-            best = None
             for e in r.new_emails:
                 prefix = e.split('@')[0].lower()
                 if prefix not in GENERIC_PREFIXES:
-                    best = e
+                    orphan_email = e
                     break
-            if not best and r.new_emails:
-                best = r.new_emails[0]
-            if best:
-                email_ids.append(r.park.hotel_id)
-                email_vals.append(best)
+            if not orphan_email:
+                orphan_email = r.new_emails[0]
+
+        if not orphan_email and not orphan_phone:
+            continue
+
+        # Check if this park has person DMs in the batch
+        park_dm_indices = [i for i, hid in enumerate(dm_ids) if hid == r.park.hotel_id]
+        if park_dm_indices:
+            # Fill orphan contact into person DMs that lack email/phone
+            for idx in park_dm_indices:
+                if not dm_emails[idx] and orphan_email:
+                    dm_emails[idx] = orphan_email
+                if not dm_phones[idx] and orphan_phone:
+                    dm_phones[idx] = orphan_phone
+        else:
+            # No person DMs — map contact to entity DM in DB
+            if r.park.hotel_id in entity_map:
+                entity_contact_ids.append(r.park.hotel_id)
+                entity_contact_emails.append(orphan_email)
+                entity_contact_phones.append(orphan_phone)
 
     dm_with_email = sum(1 for e in dm_emails if e)
     dm_with_phone = sum(1 for p in dm_phones if p)
     print(f"\nNew DMs to insert: {len(dm_ids)} ({dm_with_email} with email, {dm_with_phone} with phone)")
-    print(f"Hotel phone updates: {len(phone_ids)}")
-    print(f"Hotel email updates: {len(email_ids)}")
+    print(f"Entity contact updates: {len(entity_contact_ids)}")
 
     if dry_run:
         print(f"\nDRY RUN — run with --apply to write to DB")
@@ -943,21 +996,19 @@ async def enrich_missing(args):
                 dm_ids, dm_names, dm_titles, dm_emails,
                 dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls,
             )
-        if phone_ids:
+        # Update entity DMs with orphan contact info
+        if entity_contact_ids:
             await conn.execute(
-                "UPDATE sadie_gtm.hotels h SET phone_website = v.phone, updated_at = NOW()"
-                " FROM unnest($1::int[], $2::text[]) AS v(id, phone)"
-                " WHERE h.id = v.id"
-                "   AND (h.phone_website IS NULL OR h.phone_website = '')"
-                "   AND (h.phone_google IS NULL OR h.phone_google = '')",
-                phone_ids, phone_vals,
-            )
-        if email_ids:
-            await conn.execute(
-                "UPDATE sadie_gtm.hotels h SET email = v.email, updated_at = NOW()"
-                " FROM unnest($1::int[], $2::text[]) AS v(id, email)"
-                " WHERE h.id = v.id AND (h.email IS NULL OR h.email = '')",
-                email_ids, email_vals,
+                "UPDATE sadie_gtm.hotel_decision_makers dm"
+                " SET email = COALESCE(dm.email, v.email),"
+                "     phone = COALESCE(dm.phone, v.phone),"
+                "     updated_at = NOW()"
+                " FROM unnest($1::int[], $2::text[], $3::text[])"
+                "   AS v(hotel_id, email, phone)"
+                " WHERE dm.hotel_id = v.hotel_id"
+                "   AND dm.full_name ~* $4",
+                entity_contact_ids, entity_contact_emails, entity_contact_phones,
+                ENTITY_RE_STR,
             )
         print(f"\nAPPLIED to database!")
 
@@ -973,11 +1024,13 @@ async def main():
     parser.add_argument("--fix-websites", action="store_true",
                         help="Find real websites for all Big4 parks with bad/missing URLs via Serper")
     parser.add_argument("--enrich-missing", action="store_true",
-                        help="Full enrichment: crawl park+entity sites, extract people, insert")
+                        help="Full enrichment for parks without real people")
+    parser.add_argument("--enrich-all", action="store_true",
+                        help="Full enrichment for ALL Big4 parks (re-enrich everything)")
     parser.add_argument("--apply", action="store_true", help="Write results to DB (default: dry-run)")
     parser.add_argument("--hotel-ids", type=str, help="Comma-separated hotel IDs to crawl")
     parser.add_argument("--no-llm", action="store_true")
-    parser.add_argument("--concurrency", type=int, default=20)
+    parser.add_argument("--concurrency", type=int, default=300)
     parser.add_argument("--output", type=str, default="/tmp/big4_crawl_results.json", help="JSON output file")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -999,7 +1052,12 @@ async def main():
 
     # Enrich missing — comprehensive targeted enrichment
     if args.enrich_missing:
-        await enrich_missing(args)
+        await enrich_missing(args, all_parks=False)
+        return
+
+    # Enrich all — re-enrich ALL Big4 parks
+    if args.enrich_all:
+        await enrich_missing(args, all_parks=True)
         return
 
     conn = await asyncpg.connect(**DB_CONFIG)
