@@ -96,7 +96,7 @@ async def get_big4_hotels(conn) -> list[ParkInfo]:
             h.id, h.name, h.phone_google, h.phone_website, h.email,
             h.website, h.city, h.state
         FROM sadie_gtm.hotels h
-        WHERE (h.name ILIKE '%big4%' OR h.name ILIKE '%big 4%')
+        WHERE (h.external_id_type = 'big4' OR h.source LIKE '%::big4%')
           AND h.website IS NOT NULL AND h.website != ''
           AND h.website NOT ILIKE '%big4.com.au%'
           AND h.name NOT ILIKE '%demo%'

@@ -29,7 +29,7 @@ async def main():
             string_agg(array_to_string(dm.sources, '+'), ', ' ORDER BY dm.confidence DESC) AS sources
         FROM sadie_gtm.hotels h
         JOIN sadie_gtm.hotel_decision_makers dm ON dm.hotel_id = h.id
-        WHERE h.name ILIKE '%big4%' OR h.name ILIKE '%big 4%'
+        WHERE (h.external_id_type = 'big4' OR h.source LIKE '%::big4%')
         GROUP BY h.id, h.name, h.website
         ORDER BY contact_count DESC
     """)
@@ -57,7 +57,7 @@ async def main():
         SELECT dm.id, dm.full_name, dm.title, h.name AS hotel_name, dm.hotel_id
         FROM sadie_gtm.hotel_decision_makers dm
         JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id
-        WHERE (h.name ILIKE '%big4%' OR h.name ILIKE '%big 4%')
+        WHERE (h.external_id_type = 'big4' OR h.source LIKE '%::big4%')
           AND dm.full_name NOT LIKE '% %'
     """)
     print(f"\n1. FIRST NAME ONLY (no surname): {len(first_only)}")
@@ -96,7 +96,7 @@ async def main():
         SELECT dm.id, dm.full_name, dm.title, h.name AS hotel_name
         FROM sadie_gtm.hotel_decision_makers dm
         JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id
-        WHERE (h.name ILIKE '%big4%' OR h.name ILIKE '%big 4%')
+        WHERE (h.external_id_type = 'big4' OR h.source LIKE '%::big4%')
           AND (LENGTH(dm.full_name) < 4 OR dm.full_name ~ '^[A-Z][a-z]{1,2}$')
     """)
     print(f"\n4. SUSPICIOUS SHORT NAMES: {len(suspicious)}")
@@ -108,7 +108,7 @@ async def main():
         SELECT dm.id, dm.full_name, dm.title, h.name AS hotel_name
         FROM sadie_gtm.hotel_decision_makers dm
         JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id
-        WHERE (h.name ILIKE '%big4%' OR h.name ILIKE '%big 4%')
+        WHERE (h.external_id_type = 'big4' OR h.source LIKE '%::big4%')
           AND dm.title ILIKE ANY(ARRAY['%CEO%', '%CFO%', '%Chief%', '%Head of%', '%New Zealand%', '%Marketing%'])
     """)
     print(f"\n5. CORPORATE/HQ ROLES (may not be park-specific): {len(corp)}")
