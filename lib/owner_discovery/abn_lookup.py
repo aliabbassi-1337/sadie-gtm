@@ -110,8 +110,15 @@ def _name_similarity(hotel_name: str, entity_name: str, business_names: list[str
         if hotel_lower in bn_lower or bn_lower in hotel_lower:
             return 0.95
 
-    # Word overlap scoring
-    hotel_words = set(re.findall(r'\w+', hotel_lower)) - {"the", "a", "an", "and", "of", "in", "at"}
+    # Word overlap scoring — strip generic industry/location noise from denominator
+    noise = {
+        "the", "a", "an", "and", "of", "in", "at", "on", "by",
+        "big4", "big", "4", "holiday", "holidays", "park", "parks",
+        "caravan", "tourist", "resort", "camping", "beach", "beachfront",
+        "riverfront", "riverside", "lakeside", "foreshore", "village",
+        "retreat", "accommodation", "getaway", "frontage",
+    }
+    hotel_words = set(re.findall(r'\w+', hotel_lower)) - noise
     entity_words = set(re.findall(r'\w+', entity_lower))
     all_bn_words = set()
     for bn in business_names:
@@ -315,26 +322,37 @@ def _extract_field(html: str, label_pattern: str) -> Optional[str]:
 def _extract_business_names(html: str) -> list[str]:
     """Extract all trading/business names from the ABN detail page."""
     names = []
-    # Business names section — look for rows in the business names table
-    # Pattern: rows containing business name entries
+    # Find the table with caption containing "Business name" or "Trading name"
+    # ABR caption has spans: <caption><span...></span>Business name(s) <span...>...</span></caption>
     bn_section = re.search(
-        r'(?:Business|Trading)\s+name.*?<table[^>]*>(.*?)</table>',
+        r'<table[^>]*>\s*<caption[^>]*>.*?(?:Business|Trading)\s+name.*?</caption>(.*?)</table>',
         html, re.IGNORECASE | re.DOTALL,
     )
     if bn_section:
-        # Extract individual names from table rows
-        for m in re.finditer(r'<td[^>]*>\s*([^<]+?)\s*</td>', bn_section.group(1)):
-            name = m.group(1).strip()
-            # Skip dates, statuses, and empty values
+        # Extract names from <td> elements — names may be wrapped in <a> tags
+        for m in re.finditer(r'<td[^>]*>\s*(.*?)\s*</td>', bn_section.group(1), re.DOTALL):
+            raw = m.group(1).strip()
+            # Strip HTML tags to get plain text
+            name = re.sub(r'<[^>]+>', '', raw).strip()
+            # Clean &nbsp; and HTML entities
+            name = re.sub(r'&nbsp;', ' ', name)
+            name = re.sub(r'&amp;', '&', name)
+            name = re.sub(r'&#\d+;', '', name)
+            name = re.sub(r'\s+', ' ', name).strip()
             if (
                 name
-                and not re.match(r'^\d{2}\s+\w+\s+\d{4}$', name)
+                and len(name) > 2
+                and len(name) < 200
+                and not re.match(r'^\d{1,2}\s+\w+\s+\d{4}$', name)  # dates
+                and not re.match(r'^\d+$', name)  # pure numbers
                 and name.lower() not in {
                     'current', 'cancelled', 'active', 'from', 'to', 'status',
+                    'business name', 'trading name',
                 }
                 and 'not entitled' not in name.lower()
                 and 'tax deductible' not in name.lower()
-                and len(name) < 100
+                and 'register a business' not in name.lower()
+                and 'registered name' not in name.lower()
             ):
                 names.append(name)
 
