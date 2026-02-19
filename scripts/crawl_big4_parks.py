@@ -767,19 +767,15 @@ async def enrich_missing(args):
                 urls=discovered_urls, config=run_config,
                 dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
             )
-            # Discover deeper links — only from park's OWN domain (not entity/external sites)
+            # Discover deeper links (e.g. /about -> /about/our-team)
             deeper_urls: list[str] = []
             deeper_url_to_idx: dict[str, int] = {}
-            park_domains = {_get_domain(_ensure_https(p.website)) for p in crawlable if p.website}
             for cr in disc_results:
                 if cr.url not in disc_url_to_idx:
                     continue
                 idx = disc_url_to_idx[cr.url]
                 _process_crawl_result(cr, idx)
-                # Only discover deeper links from park's own website, not external entity sites
-                cr_domain = _get_domain(cr.url)
-                if cr_domain not in park_domains:
-                    continue
+                # Discover deeper relevant links from Pass 2 pages
                 links = cr.links if isinstance(cr.links, dict) else {}
                 for link in links.get("internal", []):
                     href = (link.get("href") or "").strip()
