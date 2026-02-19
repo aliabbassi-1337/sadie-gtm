@@ -650,7 +650,7 @@ async def enrich_missing(args):
         wait_until="domcontentloaded",
         delay_before_return_html=0,
         mean_delay=0, max_range=0,   # No inter-request delays
-        page_timeout=15000,
+        page_timeout=30000,
         scan_full_page=False,
         wait_for_images=False,
         excluded_tags=["nav", "footer", "script", "style", "noscript", "header", "aside"],
