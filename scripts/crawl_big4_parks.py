@@ -25,7 +25,7 @@ import httpx
 from loguru import logger
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
-from crawl4ai.async_dispatcher import SemaphoreDispatcher
+from crawl4ai.async_dispatcher import SemaphoreDispatcher, MemoryAdaptiveDispatcher
 
 # Read .env manually (Python 3.14 dotenv bug)
 def _read_env():
@@ -696,11 +696,51 @@ async def enrich_missing(args, all_parks: bool = False):
         wait_until="domcontentloaded",
         delay_before_return_html=0,
         mean_delay=0, max_range=0,   # No inter-request delays
-        page_timeout=30000,
+        page_timeout=10000,  # 10s — fail fast
         scan_full_page=False,
         wait_for_images=False,
         excluded_tags=["nav", "footer", "script", "style", "noscript", "header", "aside"],
     )
+
+    # Use MemoryAdaptiveDispatcher — auto-scales concurrency based on RAM
+    dispatcher = MemoryAdaptiveDispatcher(
+        memory_threshold_percent=85.0,
+        max_session_permit=args.concurrency,
+    )
+
+    # Helper: run crawl across N parallel browser instances for speed
+    NUM_BROWSERS = 4  # 4 parallel Chromium instances
+    async def _parallel_crawl(urls_to_crawl: list[str]) -> list:
+        """Split URLs across multiple crawler instances for true parallelism."""
+        if not urls_to_crawl:
+            return []
+        if len(urls_to_crawl) <= 50:
+            # Small batch — single browser is fine
+            async with AsyncWebCrawler(config=browser_config) as c:
+                return await c.arun_many(
+                    urls=urls_to_crawl, config=run_config,
+                    dispatcher=SemaphoreDispatcher(max_session_permit=min(args.concurrency, len(urls_to_crawl))),
+                )
+        # Split URLs into chunks across N browsers
+        chunks = [[] for _ in range(NUM_BROWSERS)]
+        for i, url in enumerate(urls_to_crawl):
+            chunks[i % NUM_BROWSERS].append(url)
+
+        async def _crawl_chunk(chunk_urls):
+            async with AsyncWebCrawler(config=browser_config) as c:
+                return await c.arun_many(
+                    urls=chunk_urls, config=run_config,
+                    dispatcher=SemaphoreDispatcher(
+                        max_session_permit=max(1, args.concurrency // NUM_BROWSERS)
+                    ),
+                )
+
+        chunk_results = await asyncio.gather(*[_crawl_chunk(ch) for ch in chunks if ch])
+        # Flatten results
+        all_results = []
+        for cr_list in chunk_results:
+            all_results.extend(cr_list)
+        return all_results
 
     RELEVANT_RE = re.compile(
         r'(?i)(about|team|contact|our.?story|management|director|owner|staff|people|leadership|who.?we.?are)'
@@ -739,25 +779,77 @@ async def enrich_missing(args, all_parks: bool = False):
             if not r.park.existing_email or e.lower() != r.park.existing_email.lower():
                 r.new_emails.append(e)
 
-    async with AsyncWebCrawler(config=browser_config) as crawler:
-        # ── Pass 1: Crawl homepages, discover internal links ──
-        logger.info(f"Pass 1: {len(homepage_urls)} homepages (concurrency={args.concurrency})...")
-        hp_results = await crawler.arun_many(
-            urls=homepage_urls, config=run_config,
-            dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
-        )
+    # ── Pass 1: Crawl homepages, discover internal links ──
+    logger.info(f"Pass 1: {len(homepage_urls)} homepages ({NUM_BROWSERS} browsers, concurrency={args.concurrency})...")
+    hp_results = await _parallel_crawl(homepage_urls)
 
-        discovered_urls: list[str] = []
-        disc_url_to_idx: dict[str, int] = {}
-        seen_urls = set(homepage_urls)
+    discovered_urls: list[str] = []
+    disc_url_to_idx: dict[str, int] = {}
+    seen_urls = set(homepage_urls)
 
-        for cr in hp_results:
-            if cr.url not in url_to_idx:
+    for cr in hp_results:
+        if cr.url not in url_to_idx:
+            continue
+        idx = url_to_idx[cr.url]
+        _process_crawl_result(cr, idx)
+
+        # Discover relevant internal links from homepage
+        links = cr.links if isinstance(cr.links, dict) else {}
+        for link in links.get("internal", []):
+            href = (link.get("href") or "").strip()
+            text = (link.get("text") or "").strip()
+            if not href or href in seen_urls or BINARY_EXT_RE.search(href):
                 continue
-            idx = url_to_idx[cr.url]
-            _process_crawl_result(cr, idx)
+            if RELEVANT_RE.search(href) or RELEVANT_RE.search(text):
+                seen_urls.add(href)
+                discovered_urls.append(href)
+                disc_url_to_idx[href] = idx
 
-            # Discover relevant internal links from homepage
+    hp_ok = sum(1 for r in results_list if r.pages_crawled > 0)
+    logger.info(f"Pass 1 done: {hp_ok}/{len(crawlable)} homepages OK, {len(discovered_urls)} internal pages discovered")
+
+    # ── Entity website search via Serper (run concurrently) ──
+    if entity_map and SERPER_API_KEY:
+        unique_entities: dict[str, list[int]] = {}
+        for i, park in enumerate(crawlable):
+            ename = entity_map.get(park.hotel_id)
+            if ename:
+                key = ename.strip().upper()
+                if key not in unique_entities:
+                    unique_entities[key] = {'name': ename, 'indices': []}
+                unique_entities[key]['indices'].append(i)
+
+        logger.info(f"Searching {len(unique_entities)} entity websites via Serper...")
+        async with httpx.AsyncClient() as serper_client:
+            sem = asyncio.Semaphore(50)  # Higher Serper concurrency
+            entity_items = list(unique_entities.values())
+            entity_url_results = await asyncio.gather(*[
+                _serper_search_entity(serper_client, item['name'], sem)
+                for item in entity_items
+            ])
+
+        entity_urls_added = 0
+        for item, urls in zip(entity_items, entity_url_results):
+            for url in urls:
+                if url not in seen_urls and not BINARY_EXT_RE.search(url):
+                    seen_urls.add(url)
+                    idx = item['indices'][0]
+                    discovered_urls.append(url)
+                    disc_url_to_idx[url] = idx
+                    entity_urls_added += 1
+        logger.info(f"Added {entity_urls_added} entity URLs to crawl list")
+
+    # ── Pass 2: Crawl discovered park pages + entity websites ──
+    deeper_urls: list[str] = []
+    deeper_url_to_idx: dict[str, int] = {}
+    if discovered_urls:
+        logger.info(f"Pass 2: {len(discovered_urls)} pages (internal + entity)...")
+        disc_results = await _parallel_crawl(discovered_urls)
+        for cr in disc_results:
+            if cr.url not in disc_url_to_idx:
+                continue
+            idx = disc_url_to_idx[cr.url]
+            _process_crawl_result(cr, idx)
             links = cr.links if isinstance(cr.links, dict) else {}
             for link in links.get("internal", []):
                 href = (link.get("href") or "").strip()
@@ -766,84 +858,17 @@ async def enrich_missing(args, all_parks: bool = False):
                     continue
                 if RELEVANT_RE.search(href) or RELEVANT_RE.search(text):
                     seen_urls.add(href)
-                    discovered_urls.append(href)
-                    disc_url_to_idx[href] = idx
+                    deeper_urls.append(href)
+                    deeper_url_to_idx[href] = idx
 
-        hp_ok = sum(1 for r in results_list if r.pages_crawled > 0)
-        logger.info(f"Pass 1 done: {hp_ok}/{len(crawlable)} homepages OK, {len(discovered_urls)} internal pages discovered")
-
-        # ── Entity website search via Serper ──
-        # For each park with an entity name, search for the entity's corporate website
-        if entity_map and SERPER_API_KEY:
-            # Deduplicate entities — many parks share the same parent entity
-            unique_entities: dict[str, list[int]] = {}  # entity_name -> [park indices]
-            for i, park in enumerate(crawlable):
-                ename = entity_map.get(park.hotel_id)
-                if ename:
-                    key = ename.strip().upper()
-                    if key not in unique_entities:
-                        unique_entities[key] = {'name': ename, 'indices': []}
-                    unique_entities[key]['indices'].append(i)
-
-            logger.info(f"Searching {len(unique_entities)} entity websites via Serper...")
-            async with httpx.AsyncClient() as serper_client:
-                sem = asyncio.Semaphore(20)
-                entity_items = list(unique_entities.values())
-                entity_url_results = await asyncio.gather(*[
-                    _serper_search_entity(serper_client, item['name'], sem)
-                    for item in entity_items
-                ])
-
-            entity_urls_added = 0
-            for item, urls in zip(entity_items, entity_url_results):
-                for url in urls:
-                    if url not in seen_urls and not BINARY_EXT_RE.search(url):
-                        seen_urls.add(url)
-                        # Map entity URL to first park index (all share same entity)
-                        idx = item['indices'][0]
-                        discovered_urls.append(url)
-                        disc_url_to_idx[url] = idx
-                        entity_urls_added += 1
-            logger.info(f"Added {entity_urls_added} entity URLs to crawl list")
-
-        # ── Pass 2: Crawl discovered park pages + entity websites ──
-        if discovered_urls:
-            logger.info(f"Pass 2: {len(discovered_urls)} pages (internal + entity)...")
-            disc_results = await crawler.arun_many(
-                urls=discovered_urls, config=run_config,
-                dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
-            )
-            # Discover deeper links (e.g. /about -> /about/our-team)
-            deeper_urls: list[str] = []
-            deeper_url_to_idx: dict[str, int] = {}
-            for cr in disc_results:
-                if cr.url not in disc_url_to_idx:
-                    continue
-                idx = disc_url_to_idx[cr.url]
-                _process_crawl_result(cr, idx)
-                # Discover deeper relevant links from Pass 2 pages
-                links = cr.links if isinstance(cr.links, dict) else {}
-                for link in links.get("internal", []):
-                    href = (link.get("href") or "").strip()
-                    text = (link.get("text") or "").strip()
-                    if not href or href in seen_urls or BINARY_EXT_RE.search(href):
-                        continue
-                    if RELEVANT_RE.search(href) or RELEVANT_RE.search(text):
-                        seen_urls.add(href)
-                        deeper_urls.append(href)
-                        deeper_url_to_idx[href] = idx
-
-        # ── Pass 3: Crawl deeper pages (e.g. /about/our-team, /about/management) ──
-        if deeper_urls:
-            logger.info(f"Pass 3: {len(deeper_urls)} deeper pages...")
-            deep_results = await crawler.arun_many(
-                urls=deeper_urls, config=run_config,
-                dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
-            )
-            for cr in deep_results:
-                if cr.url not in deeper_url_to_idx:
-                    continue
-                _process_crawl_result(cr, deeper_url_to_idx[cr.url])
+    # ── Pass 3: Crawl deeper pages (e.g. /about/our-team, /about/management) ──
+    if deeper_urls:
+        logger.info(f"Pass 3: {len(deeper_urls)} deeper pages...")
+        deep_results = await _parallel_crawl(deeper_urls)
+        for cr in deep_results:
+            if cr.url not in deeper_url_to_idx:
+                continue
+            _process_crawl_result(cr, deeper_url_to_idx[cr.url])
 
     # Deduplicate
     for r in results_list:
