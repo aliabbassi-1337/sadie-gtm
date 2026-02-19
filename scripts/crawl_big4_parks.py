@@ -966,7 +966,7 @@ async def enrich_missing(args):
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--blanks-only", action="store_true", help="Only crawl parks with zero DMs")
     parser.add_argument("--chain-fill", action="store_true", help="Fill known chain execs into blank parks")
