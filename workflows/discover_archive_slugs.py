@@ -86,6 +86,11 @@ async def main():
         help="Disable Arquivo.pt queries",
     )
     parser.add_argument(
+        "--no-mews-sitemap",
+        action="store_true",
+        help="Disable Mews sitemap hotel website scraping",
+    )
+    parser.add_argument(
         "--no-proxy",
         action="store_true",
         help="Disable Brightdata proxy (auto-detected from env vars)",
@@ -114,6 +119,7 @@ async def main():
         enable_urlscan=not args.no_urlscan,
         enable_virustotal=not args.no_virustotal,
         enable_arquivo=not args.no_arquivo,
+        enable_mews_sitemap=not args.no_mews_sitemap,
         proxy_url=proxy_url,
     )
 
@@ -131,6 +137,8 @@ async def main():
             parts.append(f"virustotal: {r.virustotal_count}")
         if r.arquivo_count:
             parts.append(f"arquivo: {r.arquivo_count}")
+        if r.mews_sitemap_count:
+            parts.append(f"mews_sitemap: {r.mews_sitemap_count}")
         breakdown = ", ".join(parts)
         print(f"{r.engine}: {r.total_slugs} new slugs ({breakdown})")
         if r.s3_key:
