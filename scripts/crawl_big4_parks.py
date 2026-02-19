@@ -290,15 +290,16 @@ Rules:
 - Do NOT include company names, trust names, or business entities
 - Do NOT include town/place names
 - Only include real person names explicitly stated in the text
+- Include their email and phone if mentioned near their name
 
-Return JSON array: [{{"name": "First Last", "title": "Role"}}]
+Return JSON array: [{{"name": "First Last", "title": "Role", "email": "if found or null", "phone": "if found or null"}}]
 If no full names found, return: []"""
 
     url = f"{AZURE_ENDPOINT}/openai/deployments/{AZURE_DEPLOY}/chat/completions?api-version={AZURE_VERSION}"
     try:
         resp = await client.post(url,
             headers={"api-key": AZURE_KEY, "Content-Type": "application/json"},
-            json={"messages": [{"role": "user", "content": prompt}], "max_tokens": 300, "temperature": 0.1},
+            json={"messages": [{"role": "user", "content": prompt}], "max_tokens": 500, "temperature": 0.1},
             timeout=20.0)
         if resp.status_code == 429:
             await asyncio.sleep(3)
@@ -306,20 +307,24 @@ If no full names found, return: []"""
         if resp.status_code != 200:
             return []
         content = resp.json()["choices"][0]["message"]["content"].strip()
+        logger.debug(f"LLM raw response for {hotel_name}: {content[:300]}")
         data = json.loads(content)
         valid = []
         for d in (data if isinstance(data, list) else [data]):
             name = (d.get("name") or "").strip()
             if not name or " " not in name:
+                logger.debug(f"  SKIP (no full name): {name!r}")
                 continue  # Must have first + last name
             # Reject business/place patterns
             if re.search(r'(?i)(pty|ltd|trust|holiday|park|resort|caravan|tourism)', name):
+                logger.debug(f"  SKIP (business pattern): {name!r}")
                 continue
             d["name"] = name
             valid.append(d)
+        logger.debug(f"LLM result for {hotel_name}: {len(valid)} valid from {len(data if isinstance(data, list) else [data])} raw")
         return valid
     except Exception as e:
-        logger.debug(f"LLM error: {e}")
+        logger.warning(f"LLM error for {hotel_name}: {e}")
         return []
 
 
@@ -626,6 +631,8 @@ async def enrich_missing(args):
 
     # Filter to crawlable parks
     crawlable = [p for p in parks if p.website and not _is_bad_website(p.website)]
+    if args.limit and args.limit < len(crawlable):
+        crawlable = crawlable[:args.limit]
     logger.info(f"{len(crawlable)} with crawlable websites, {len(parks) - len(crawlable)} skipped (bad/missing URL)")
 
     if not crawlable:
@@ -808,6 +815,14 @@ async def enrich_missing(args):
     logger.info(f"Total pages crawled: {total_pages} across {len(crawlable)} parks")
 
     # Step 3: LLM extraction — high concurrency
+    parks_with_text = sum(1 for r in results_list if r.page_texts)
+    total_text_len = sum(sum(len(t) for t in r.page_texts) for r in results_list)
+    logger.info(f"Pre-LLM: {parks_with_text}/{len(results_list)} parks have page text, total {total_text_len} chars")
+    for r in results_list:
+        if r.page_texts:
+            logger.debug(f"  {r.park.hotel_name}: {len(r.page_texts)} pages, {sum(len(t) for t in r.page_texts)} chars")
+        else:
+            logger.debug(f"  {r.park.hotel_name}: NO TEXT ({r.pages_crawled} pages crawled, {len(r.errors)} errors)")
     if AZURE_KEY:
         logger.info("LLM extracting people...")
         async with httpx.AsyncClient() as llm_client:
@@ -816,6 +831,7 @@ async def enrich_missing(args):
                 if not r.page_texts:
                     return
                 combined = "\n---\n".join(r.page_texts)
+                logger.debug(f"LLM input for {r.park.hotel_name}: {len(combined)} chars, first 200: {combined[:200]!r}")
                 async with sem:
                     r.owner_names = await llm_extract_owners(llm_client, combined, r.park.hotel_name)
             await asyncio.gather(*[_extract_one(r) for r in results_list])
@@ -837,8 +853,12 @@ async def enrich_missing(args):
 
     for r in results_list:
         if r.owner_names:
-            names = ", ".join(o['name'] for o in r.owner_names)
-            print(f"  {r.park.hotel_name[:50]:<50} | {names}")
+            for o in r.owner_names:
+                extras = []
+                if o.get('email'): extras.append(o['email'])
+                if o.get('phone'): extras.append(o['phone'])
+                extra_str = f" ({', '.join(extras)})" if extras else ""
+                print(f"  {r.park.hotel_name[:50]:<50} | {o['name']} - {o.get('title','?')}{extra_str}")
         elif not r.pages_crawled:
             print(f"  {r.park.hotel_name[:50]:<50} | NO PAGES ({len(r.errors)} errors)")
 
@@ -863,9 +883,9 @@ async def enrich_missing(args):
             dm_ids.append(r.park.hotel_id)
             dm_names.append(name)
             dm_titles.append(title)
-            dm_emails.append(None)
+            dm_emails.append(owner.get('email') or None)
             dm_verified.append(False)
-            dm_phones.append(None)
+            dm_phones.append(owner.get('phone') or None)
             dm_sources_json.append(json.dumps(["website_rescrape"]))
             dm_conf.append(0.70)
             dm_urls.append(r.park.website or None)
@@ -890,9 +910,11 @@ async def enrich_missing(args):
                 email_ids.append(r.park.hotel_id)
                 email_vals.append(best)
 
-    print(f"\nNew DMs to insert: {len(dm_ids)}")
-    print(f"Phone updates:     {len(phone_ids)}")
-    print(f"Email updates:     {len(email_ids)}")
+    dm_with_email = sum(1 for e in dm_emails if e)
+    dm_with_phone = sum(1 for p in dm_phones if p)
+    print(f"\nNew DMs to insert: {len(dm_ids)} ({dm_with_email} with email, {dm_with_phone} with phone)")
+    print(f"Hotel phone updates: {len(phone_ids)}")
+    print(f"Hotel email updates: {len(email_ids)}")
 
     if dry_run:
         print(f"\nDRY RUN — run with --apply to write to DB")
@@ -915,6 +937,8 @@ async def enrich_missing(args):
                 " SET sources = (SELECT array_agg(DISTINCT s) FROM unnest("
                 "     array_cat(sadie_gtm.hotel_decision_makers.sources, EXCLUDED.sources)) s),"
                 "     confidence = GREATEST(EXCLUDED.confidence, sadie_gtm.hotel_decision_makers.confidence),"
+                "     email = COALESCE(EXCLUDED.email, sadie_gtm.hotel_decision_makers.email),"
+                "     phone = COALESCE(EXCLUDED.phone, sadie_gtm.hotel_decision_makers.phone),"
                 "     updated_at = NOW()",
                 dm_ids, dm_names, dm_titles, dm_emails,
                 dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls,
