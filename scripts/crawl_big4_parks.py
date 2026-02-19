@@ -726,9 +726,43 @@ async def enrich_missing(args):
         hp_ok = sum(1 for r in results_list if r.pages_crawled > 0)
         logger.info(f"Pass 1 done: {hp_ok}/{len(crawlable)} homepages OK, {len(discovered_urls)} internal pages discovered")
 
-        # ── Pass 2: Crawl discovered about/team/contact pages ──
+        # ── Entity website search via Serper ──
+        # For each park with an entity name, search for the entity's corporate website
+        if entity_map and SERPER_API_KEY:
+            # Deduplicate entities — many parks share the same parent entity
+            unique_entities: dict[str, list[int]] = {}  # entity_name -> [park indices]
+            for i, park in enumerate(crawlable):
+                ename = entity_map.get(park.hotel_id)
+                if ename:
+                    key = ename.strip().upper()
+                    if key not in unique_entities:
+                        unique_entities[key] = {'name': ename, 'indices': []}
+                    unique_entities[key]['indices'].append(i)
+
+            logger.info(f"Searching {len(unique_entities)} entity websites via Serper...")
+            async with httpx.AsyncClient() as serper_client:
+                sem = asyncio.Semaphore(20)
+                entity_items = list(unique_entities.values())
+                entity_url_results = await asyncio.gather(*[
+                    _serper_search_entity(serper_client, item['name'], sem)
+                    for item in entity_items
+                ])
+
+            entity_urls_added = 0
+            for item, urls in zip(entity_items, entity_url_results):
+                for url in urls:
+                    if url not in seen_urls and not BINARY_EXT_RE.search(url):
+                        seen_urls.add(url)
+                        # Map entity URL to first park index (all share same entity)
+                        idx = item['indices'][0]
+                        discovered_urls.append(url)
+                        disc_url_to_idx[url] = idx
+                        entity_urls_added += 1
+            logger.info(f"Added {entity_urls_added} entity URLs to crawl list")
+
+        # ── Pass 2: Crawl discovered park pages + entity websites ──
         if discovered_urls:
-            logger.info(f"Pass 2: {len(discovered_urls)} discovered pages...")
+            logger.info(f"Pass 2: {len(discovered_urls)} pages (internal + entity)...")
             disc_results = await crawler.arun_many(
                 urls=discovered_urls, config=run_config,
                 dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
