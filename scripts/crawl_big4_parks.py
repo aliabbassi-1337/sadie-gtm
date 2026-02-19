@@ -511,7 +511,7 @@ async def _serper_search_entity(client, entity_name, sem) -> list[str]:
             for item in resp.json().get("organic", []):
                 url = item.get("link", "")
                 domain = _get_domain(url)
-                if domain and domain not in SEARCH_SKIP_DOMAINS:
+                if domain and not any(domain == s or domain.endswith('.' + s) for s in SEARCH_SKIP_DOMAINS):
                     urls.append(url)
                 if len(urls) >= 3:
                     break
@@ -767,10 +767,37 @@ async def enrich_missing(args):
                 urls=discovered_urls, config=run_config,
                 dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
             )
+            # Discover deeper links (e.g. /about -> /about/our-team)
+            deeper_urls: list[str] = []
+            deeper_url_to_idx: dict[str, int] = {}
             for cr in disc_results:
                 if cr.url not in disc_url_to_idx:
                     continue
-                _process_crawl_result(cr, disc_url_to_idx[cr.url])
+                idx = disc_url_to_idx[cr.url]
+                _process_crawl_result(cr, idx)
+                # Discover deeper relevant links from Pass 2 pages
+                links = cr.links if isinstance(cr.links, dict) else {}
+                for link in links.get("internal", []):
+                    href = (link.get("href") or "").strip()
+                    text = (link.get("text") or "").strip()
+                    if not href or href in seen_urls or BINARY_EXT_RE.search(href):
+                        continue
+                    if RELEVANT_RE.search(href) or RELEVANT_RE.search(text):
+                        seen_urls.add(href)
+                        deeper_urls.append(href)
+                        deeper_url_to_idx[href] = idx
+
+        # ── Pass 3: Crawl deeper pages (e.g. /about/our-team, /about/management) ──
+        if deeper_urls:
+            logger.info(f"Pass 3: {len(deeper_urls)} deeper pages...")
+            deep_results = await crawler.arun_many(
+                urls=deeper_urls, config=run_config,
+                dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
+            )
+            for cr in deep_results:
+                if cr.url not in deeper_url_to_idx:
+                    continue
+                _process_crawl_result(cr, deeper_url_to_idx[cr.url])
 
     # Deduplicate
     for r in results_list:
