@@ -532,7 +532,7 @@ async def fix_websites(args):
     all_parks = [(r['id'], r['name'], r['website'] or '') for r in rows]
     bad_parks = [(hid, name, url) for hid, name, url in all_parks if _is_bad_website(url)]
 
-    # Load entities
+    # Load existing entity DMs
     entity_rows = await conn.fetch(
         "SELECT dm.hotel_id, dm.full_name"
         " FROM sadie_gtm.hotel_decision_makers dm"
@@ -540,16 +540,28 @@ async def fix_websites(args):
         " WHERE " + BIG4_WHERE + " AND dm.full_name ~* $1",
         ENTITY_RE_STR,
     )
+    parks_with_entity = set()
     unique_entities: dict[str, dict] = {}
     for r in entity_rows:
         key = r['full_name'].strip().upper()
+        parks_with_entity.add(r['hotel_id'])
         if key not in unique_entities:
             unique_entities[key] = {'name': r['full_name'], 'hotel_ids': []}
         unique_entities[key]['hotel_ids'].append(r['hotel_id'])
 
+    # For parks WITHOUT an entity name, search using the park name itself
+    parks_without_entity = [(hid, name) for hid, name, _ in all_parks if hid not in parks_with_entity]
+    for hid, name in parks_without_entity:
+        key = name.strip().upper()
+        if key not in unique_entities:
+            unique_entities[key] = {'name': name, 'hotel_ids': []}
+        unique_entities[key]['hotel_ids'].append(hid)
+
     print(f"Total Big4 parks: {len(all_parks)}")
     print(f"Parks with bad/missing website: {len(bad_parks)}")
-    print(f"Unique entities to search: {len(unique_entities)}")
+    print(f"Parks with known entity: {len(parks_with_entity)}")
+    print(f"Parks without entity (using park name): {len(parks_without_entity)}")
+    print(f"Total searches to run: {len(unique_entities)}")
 
     updated = 0
     entity_urls_found = 0
@@ -574,9 +586,9 @@ async def fix_websites(args):
                 else:
                     logger.warning(f"  No website found: {name} (was: {old_url or 'blank'})")
 
-        # 2) Find entity websites
+        # 2) Find entity/park owner websites for ALL 307 parks
         if unique_entities:
-            logger.info(f"Searching {len(unique_entities)} entities via Serper...")
+            logger.info(f"Searching {len(unique_entities)} entities/parks via Serper...")
             sem = asyncio.Semaphore(20)
             items = list(unique_entities.values())
             results = await asyncio.gather(*[
@@ -589,7 +601,7 @@ async def fix_websites(args):
 
     print(f"\n{'DRY RUN' if dry_run else 'APPLIED'}")
     print(f"Hotel websites fixed: {updated}/{len(bad_parks)}")
-    print(f"Entities with URLs: {entity_urls_found}/{len(unique_entities)}")
+    print(f"Entities/parks with URLs: {entity_urls_found}/{len(unique_entities)}")
     if dry_run:
         print("\nRun with --apply to write to DB")
 
