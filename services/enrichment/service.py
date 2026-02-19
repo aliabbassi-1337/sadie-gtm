@@ -3808,18 +3808,23 @@ class Service(IService):
         from services.enrichment.owner_models import (
             LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
             LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
+            LAYER_GOV_DATA, LAYER_CT_CERTS, LAYER_ABN_ASIC,
         )
 
         layer_map = {
+            "ct-certs": LAYER_CT_CERTS,
             "rdap": LAYER_RDAP,
             "whois-history": LAYER_WHOIS_HISTORY,
             "dns": LAYER_DNS,
             "website": LAYER_WEBSITE,
             "reviews": LAYER_REVIEWS,
+            "gov-data": LAYER_GOV_DATA,
             "email-verify": LAYER_EMAIL_VERIFY,
+            "abn-asic": LAYER_ABN_ASIC,
         }
 
-        layer_mask = layer_map.get(layer, 0xFF) if layer else 0xFF
+        from services.enrichment.owner_models import LAYERS_DEFAULT
+        layer_mask = layer_map.get(layer, LAYERS_DEFAULT) if layer else LAYERS_DEFAULT
 
         if hotels is None:
             layer_filter = layer_mask if layer and layer != "all" else None
@@ -3837,15 +3842,13 @@ class Service(IService):
             hotels=hotels, concurrency=concurrency, layers=layer_mask,
         )
 
-        # Persist results (service layer handles all DB writes)
-        saved_count = await self._persist_owner_results(results)
-
         found = sum(1 for r in results if r.found_any)
         total_contacts = sum(len(r.decision_makers) for r in results)
         verified = sum(
             sum(1 for dm in r.decision_makers if dm.email_verified)
             for r in results
         )
+        saved_count = total_contacts  # persisted incrementally during enrich_batch
 
         logger.info(
             f"Owner enrichment done: {len(results)} processed, "
@@ -3863,31 +3866,12 @@ class Service(IService):
 
 
     async def _persist_owner_results(self, results: list) -> int:
-        """Internal: persist owner enrichment results to DB."""
-        saved_count = 0
-        for result in results:
-            # Cache domain intel
-            if result.domain_intel:
-                if result.domain_intel.registrant_name or result.domain_intel.registrant_org:
-                    await repo.cache_domain_intel(result.domain_intel)
-                if result.domain_intel.email_provider or result.domain_intel.mx_records:
-                    await repo.cache_dns_intel(result.domain_intel)
+        """Persist owner enrichment results to DB using batch SQL queries.
 
-            # Insert decision makers
-            if result.decision_makers:
-                count = await repo.batch_insert_decision_makers(
-                    result.hotel_id, result.decision_makers,
-                )
-                saved_count += count
-                status = 1  # complete
-            else:
-                status = 2  # no_results
-
-            await repo.update_owner_enrichment_status(
-                result.hotel_id, status, result.layers_completed,
-            )
-
-        return saved_count
+        Uses batch_persist_results which does 5 unnest queries total
+        (not 5 × N), all in one connection checkout.
+        """
+        return await repo.batch_persist_results(results)
 
     async def get_owner_enrichment_stats(self) -> Dict[str, Any]:
         """Get owner enrichment pipeline statistics."""

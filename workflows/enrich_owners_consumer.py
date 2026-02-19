@@ -20,13 +20,13 @@ import signal
 from loguru import logger
 
 from db.client import init_db, close_db
-from services.enrichment.service import Service
+from services.enrichment.owner_enricher import enrich_batch
 from infra.sqs import receive_messages, delete_messages_batch, get_queue_attributes
 
 QUEUE_URL = os.getenv("SQS_OWNER_ENRICHMENT_QUEUE_URL", "")
 VISIBILITY_TIMEOUT = 1800  # 30 minutes per batch
 
-LAYER_CHOICES = ["rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
+LAYER_CHOICES = ["ct-certs", "rdap", "whois-history", "dns", "website", "reviews", "email-verify", "gov-data", "abn-asic", "all"]
 
 shutdown_requested = False
 
@@ -47,16 +47,30 @@ async def run_sqs_consumer(concurrency: int = 5, layer: str = "all"):
     signal.signal(signal.SIGTERM, handle_shutdown)
 
     await init_db()
-    svc = Service()
     try:
         logger.info(f"Starting owner enrichment SQS consumer (concurrency={concurrency})")
         total_processed = 0
         total_found = 0
         empty_polls = 0
 
+        # Build layer mask from layer name
+        from services.enrichment.owner_models import (
+            LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
+            LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
+            LAYER_GOV_DATA, LAYER_CT_CERTS, LAYER_ABN_ASIC,
+            LAYERS_DEFAULT,
+        )
+        layer_name_map = {
+            "ct-certs": LAYER_CT_CERTS, "rdap": LAYER_RDAP,
+            "whois-history": LAYER_WHOIS_HISTORY, "dns": LAYER_DNS,
+            "website": LAYER_WEBSITE, "reviews": LAYER_REVIEWS,
+            "email-verify": LAYER_EMAIL_VERIFY, "gov-data": LAYER_GOV_DATA,
+            "abn-asic": LAYER_ABN_ASIC,
+        }
+
         while not shutdown_requested:
             messages = receive_messages(
-                QUEUE_URL, max_messages=min(concurrency, 10),
+                QUEUE_URL, max_messages=10,
                 visibility_timeout=VISIBILITY_TIMEOUT, wait_time_seconds=20,
             )
 
@@ -68,41 +82,82 @@ async def run_sqs_consumer(concurrency: int = 5, layer: str = "all"):
                 continue
             empty_polls = 0
 
-            # Parse hotel data from messages
-            hotels = []
-            msg_map = {}  # hotel_id -> receipt_handle
+            # Parse batched messages — each message contains {"hotels": [...], "layers_mask": ...}
+            # Also support legacy format {"hotel_id": ..., "website": ...}
+            msg_tasks = []  # list of (receipt_handle, hotels_list, layers_mask)
             invalid_handles = []
 
             for msg in messages:
                 body = msg["body"]
-                hotel_id = body.get("hotel_id")
-                website = body.get("website")
-                if hotel_id and website:
-                    hotels.append(body)
-                    msg_map[hotel_id] = msg["receipt_handle"]
+                receipt = msg["receipt_handle"]
+
+                if "hotels" in body:
+                    # New batched format
+                    hotels_in_msg = body["hotels"]
+                    layers_mask = body.get("layers_mask", LAYERS_DEFAULT)
+                    valid = [h for h in hotels_in_msg if h.get("hotel_id") and h.get("website")]
+                    if valid:
+                        msg_tasks.append((receipt, valid, layers_mask))
+                    else:
+                        invalid_handles.append(receipt)
+                elif body.get("hotel_id") and body.get("website"):
+                    # Legacy single-hotel format
+                    layers_mask = body.get("layers_mask", LAYERS_DEFAULT)
+                    msg_tasks.append((receipt, [body], layers_mask))
                 else:
-                    invalid_handles.append(msg["receipt_handle"])
+                    invalid_handles.append(receipt)
 
             if invalid_handles:
                 delete_messages_batch(QUEUE_URL, invalid_handles)
-            if not hotels:
+            if not msg_tasks:
                 continue
 
-            # Run enrichment + persist via service layer
-            result = await svc.run_owner_enrichment(
-                hotels=hotels,
-                concurrency=concurrency,
-                layer=layer if layer != "all" else None,
+            total_hotels_this_poll = sum(len(hotels) for _, hotels, _ in msg_tasks)
+            logger.info(
+                f"Processing {len(msg_tasks)} messages ({total_hotels_this_poll} hotels)"
             )
 
-            # Delete successful messages
+            # Process all messages concurrently — each runs enrich_batch on its hotels
+            # enrich_batch handles incremental persist (flushes every ~20 hotels)
+
+            async def process_message(receipt, hotels, layers_mask):
+                """Process one SQS message's hotel batch."""
+                # Override layers_mask if a specific layer was requested via CLI
+                if layer != "all":
+                    layers_mask = layer_name_map.get(layer, LAYERS_DEFAULT)
+
+                results = await enrich_batch(
+                    hotels=hotels,
+                    concurrency=concurrency,
+                    layers=layers_mask,
+                    persist=True,
+                )
+                return receipt, results
+
+            gather_results = await asyncio.gather(
+                *[process_message(r, h, lm) for r, h, lm in msg_tasks],
+                return_exceptions=True,
+            )
+
+            # Count results and delete messages
             handles_to_delete = []
-            for r in result.get("results", []):
-                total_processed += 1
-                if r.decision_makers:
-                    total_found += 1
-                if r.hotel_id in msg_map:
-                    handles_to_delete.append(msg_map[r.hotel_id])
+            for gr in gather_results:
+                if isinstance(gr, Exception):
+                    logger.error(f"Message processing exception: {gr}")
+                    continue
+
+                receipt, results = gr
+
+                for r in results:
+                    total_processed += 1
+                    if r.decision_makers:
+                        total_found += 1
+
+                handles_to_delete.append(receipt)
+                logger.debug(
+                    f"Message done: {len(results)} hotels, "
+                    f"{sum(1 for r in results if r.decision_makers)} with contacts"
+                )
 
             if handles_to_delete:
                 delete_messages_batch(QUEUE_URL, handles_to_delete)

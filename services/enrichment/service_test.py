@@ -992,19 +992,21 @@ class TestRunOwnerEnrichmentMocked:
 
         service = Service(rms_repo=None, rms_queue=MockQueue())
 
+        # enrich_batch handles its own persist internally
+        async def fake_enrich_batch(hotels, concurrency, layers, persist=True, flush_interval=20):
+            return fake_results
+
         with patch("services.enrichment.repo.get_hotels_pending_owner_enrichment",
                     new_callable=AsyncMock, return_value=fake_hotels):
             with patch("services.enrichment.owner_enricher.enrich_batch",
-                        new_callable=AsyncMock, return_value=fake_results):
-                with patch.object(service, "_persist_owner_results",
-                                  new_callable=AsyncMock, return_value=1):
-                    result = await service.run_owner_enrichment(limit=10)
+                        side_effect=fake_enrich_batch):
+                result = await service.run_owner_enrichment(limit=10)
 
         assert result["processed"] == 2
         assert result["found"] == 1
         assert result["contacts"] == 1
         assert result["verified"] == 0
-        assert result["saved"] == 1
+        assert result["saved"] == 1  # total_contacts (1 DM found)
 
     @pytest.mark.asyncio
     async def test_layer_filter_maps_correctly(self):
@@ -1018,6 +1020,129 @@ class TestRunOwnerEnrichmentMocked:
             await service.run_owner_enrichment(limit=5, layer="website")
 
         mock_pending.assert_called_once_with(limit=5, layer=LAYER_WEBSITE)
+
+    @pytest.mark.asyncio
+    async def test_gov_data_layer_filter_maps_correctly(self):
+        from unittest.mock import patch, AsyncMock
+        from services.enrichment.owner_models import LAYER_GOV_DATA
+
+        service = Service(rms_repo=None, rms_queue=MockQueue())
+
+        with patch("services.enrichment.repo.get_hotels_pending_owner_enrichment",
+                    new_callable=AsyncMock, return_value=[]) as mock_pending:
+            await service.run_owner_enrichment(limit=5, layer="gov-data")
+
+        mock_pending.assert_called_once_with(limit=5, layer=LAYER_GOV_DATA)
+
+
+@pytest.mark.no_db
+class TestRunGovDataLayer:
+    """Tests for _run_gov_data layer function."""
+
+    @pytest.mark.asyncio
+    async def test_returns_decision_makers_from_gov_matches(self):
+        from unittest.mock import patch, AsyncMock
+        from services.enrichment.owner_enricher import _run_gov_data
+
+        fake_matches = [
+            {
+                "id": 100,
+                "name": "Sunshine Hotel LLC",
+                "email": "owner@sunshine.com",
+                "phone_google": "555-1234",
+                "phone_website": None,
+                "address": "123 Beach Rd",
+                "source": "dbpr_license",
+                "external_id": "H12345",
+                "external_id_type": "license_number",
+            },
+        ]
+
+        with patch("services.enrichment.repo.find_gov_matches",
+                    new_callable=AsyncMock, return_value=fake_matches):
+            dms = await _run_gov_data("[test]", 1, "Sunshine Hotel", "Miami", "Florida")
+
+        assert len(dms) == 1
+        assert dms[0].full_name == "Sunshine Hotel LLC"
+        assert dms[0].email == "owner@sunshine.com"
+        assert dms[0].phone == "555-1234"
+        assert dms[0].sources == ["gov_dbpr_license"]
+        assert dms[0].confidence == 0.9
+        assert dms[0].raw_source_url == "gov://dbpr_license/H12345"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_city_state(self):
+        from services.enrichment.owner_enricher import _run_gov_data
+
+        dms = await _run_gov_data("[test]", 1, "Hotel", None, None)
+        assert dms == []
+
+        dms = await _run_gov_data("[test]", 1, "Hotel", "Miami", None)
+        assert dms == []
+
+        dms = await _run_gov_data("[test]", 1, "Hotel", None, "Florida")
+        assert dms == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_matches(self):
+        from unittest.mock import patch, AsyncMock
+        from services.enrichment.owner_enricher import _run_gov_data
+
+        with patch("services.enrichment.repo.find_gov_matches",
+                    new_callable=AsyncMock, return_value=[]):
+            dms = await _run_gov_data("[test]", 1, "Nonexistent Hotel", "Miami", "Florida")
+
+        assert dms == []
+
+    @pytest.mark.asyncio
+    async def test_multiple_gov_matches(self):
+        from unittest.mock import patch, AsyncMock
+        from services.enrichment.owner_enricher import _run_gov_data
+
+        fake_matches = [
+            {"id": 10, "name": "Hotel A", "email": None, "phone_google": None,
+             "phone_website": "555-0001", "source": "texas_hot", "external_id": "TX100"},
+            {"id": 20, "name": "Hotel A Corp", "email": "info@a.com", "phone_google": "555-0002",
+             "phone_website": None, "source": "dbpr_license", "external_id": "FL200"},
+        ]
+
+        with patch("services.enrichment.repo.find_gov_matches",
+                    new_callable=AsyncMock, return_value=fake_matches):
+            dms = await _run_gov_data("[test]", 1, "Hotel A", "Austin", "Texas")
+
+        assert len(dms) == 2
+        assert dms[0].sources == ["gov_texas_hot"]
+        assert dms[0].phone == "555-0001"  # falls back to phone_website
+        assert dms[1].sources == ["gov_dbpr_license"]
+        assert dms[1].email == "info@a.com"
+
+    @pytest.mark.asyncio
+    async def test_gov_data_wired_into_orchestrator(self):
+        """Verify _run_gov_data is called during enrichment when LAYER_GOV_DATA is set."""
+        from unittest.mock import patch, AsyncMock
+        from services.enrichment.owner_enricher import enrich_single_hotel
+        from services.enrichment.owner_models import LAYER_GOV_DATA, DecisionMaker
+
+        hotel = {
+            "hotel_id": 99, "name": "Test Hotel", "website": "https://test.com",
+            "city": "Miami", "state": "Florida",
+        }
+
+        gov_dm = DecisionMaker(
+            full_name="Gov Match", sources=["gov_dbpr_license"], confidence=0.9,
+        )
+
+        with patch("services.enrichment.owner_enricher._run_gov_data",
+                    new_callable=AsyncMock, return_value=[gov_dm]) as mock_gov:
+            async with __import__("httpx").AsyncClient() as client:
+                result = await enrich_single_hotel(
+                    client, hotel, layers=LAYER_GOV_DATA,
+                )
+
+        mock_gov.assert_called_once_with("[99|test.com]", 99, "Test Hotel", "Miami", "Florida")
+        assert len(result.decision_makers) == 1
+        assert result.decision_makers[0].full_name == "Gov Match"
+        assert result.layers_completed & LAYER_GOV_DATA
 
 
 if __name__ == "__main__":

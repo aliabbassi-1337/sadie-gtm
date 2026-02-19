@@ -23,22 +23,39 @@ import asyncio
 import argparse
 from loguru import logger
 
-from db.client import init_db, close_db
+from db.client import init_db, close_db, get_conn
 from services.enrichment.service import Service
 
-LAYER_CHOICES = ["rdap", "whois-history", "dns", "website", "reviews", "email-verify", "all"]
+LAYER_CHOICES = ["ct-certs", "rdap", "whois-history", "dns", "website", "reviews", "email-verify", "gov-data", "abn-asic", "all"]
 
 
 async def run_enrichment(
     limit: int = 20,
     concurrency: int = 5,
     layer: str = "all",
+    source: str = None,
 ) -> None:
     """Run owner enrichment (direct mode, no SQS)."""
     await init_db()
     try:
+        hotels = None
+        if source:
+            async with get_conn() as conn:
+                rows = await conn.fetch("""
+                    SELECT id, name, website, city, state, country
+                    FROM sadie_gtm.hotels
+                    WHERE (external_id_type = $1 OR source LIKE '%::' || $1 OR source LIKE $1 || '_%')
+                      AND website IS NOT NULL AND website != ''
+                    ORDER BY id
+                    LIMIT $2
+                """, source, limit)
+            hotels = [{"hotel_id": r["id"], "name": r["name"], "website": r["website"],
+                       "city": r["city"], "state": r["state"], "country": r["country"]} for r in rows]
+            logger.info(f"Filtered to {len(hotels)} hotels with source={source!r}")
+
         svc = Service()
         result = await svc.run_owner_enrichment(
+            hotels=hotels,
             limit=limit,
             concurrency=concurrency,
             layer=layer if layer != "all" else None,
@@ -96,6 +113,10 @@ def main():
         "--layer", choices=LAYER_CHOICES, default="all",
         help="Run specific layer only (default: all)",
     )
+    run_parser.add_argument(
+        "--source", type=str, default=None,
+        help="Filter hotels by source (e.g. 'big4', 'rms')",
+    )
 
     subparsers.add_parser("status", help="Show enrichment pipeline status")
 
@@ -106,6 +127,7 @@ def main():
             limit=args.limit,
             concurrency=args.concurrency,
             layer=args.layer,
+            source=args.source,
         ))
     elif args.command == "status":
         asyncio.run(show_status())

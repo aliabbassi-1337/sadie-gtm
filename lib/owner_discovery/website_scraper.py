@@ -241,11 +241,16 @@ Hotel name: {hotel_name}
 Text:
 {text}
 
-If you find an owner, general manager, or key decision maker, respond with EXACTLY this JSON format:
-{{"name": "Full Name", "title": "Their Title", "email": "their@email.com", "phone": "their phone"}}
+Rules:
+- The name MUST include both first name AND surname (e.g. "John Smith", not just "John")
+- Do NOT return company names, trust names, or business entities
+- Do NOT guess or make up information
+- Only include fields you actually find in the text
 
-If no owner/GM info is found, respond with: {{"name": null}}
-Only include fields you actually find in the text. Do not guess or make up information."""
+If you find an owner, general manager, or key decision maker with a full name, respond with EXACTLY this JSON format:
+{{"name": "First Last", "title": "Their Title", "email": "their@email.com", "phone": "their phone"}}
+
+If no full name is found, respond with: {{"name": null}}"""
 
     url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
     payload = {
@@ -270,9 +275,10 @@ Only include fields you actually find in the text. Do not guess or make up infor
         content = resp.json()["choices"][0]["message"]["content"].strip()
         data = json.loads(content)
 
-        if data.get("name"):
+        name = (data.get("name") or "").strip()
+        if name and " " in name:
             return DecisionMaker(
-                full_name=data["name"],
+                full_name=name,
                 title=data.get("title"),
                 email=data.get("email"),
                 phone=data.get("phone"),
@@ -316,11 +322,15 @@ async def scrape_hotel_website(
     pages_fetched = 0
     pages_skipped = 0
 
-    # Fetch about/team/contact pages
-    for path in OWNER_PAGE_PATHS:
-        url = urljoin(base_url, path)
-        html = await _fetch_page(client, url)
-        if not html:
+    # Fetch all about/team/contact pages concurrently
+    urls = [(path, urljoin(base_url, path)) for path in OWNER_PAGE_PATHS]
+    fetch_results = await asyncio.gather(
+        *[_fetch_page(client, url) for _, url in urls],
+        return_exceptions=True,
+    )
+
+    for (path, _url), html in zip(urls, fetch_results):
+        if isinstance(html, Exception) or not html:
             pages_skipped += 1
             continue
         pages_fetched += 1

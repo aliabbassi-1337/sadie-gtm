@@ -7,6 +7,7 @@ from services.enrichment.owner_models import (
     OwnerEnrichmentResult,
     LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
     LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
+    LAYER_GOV_DATA,
 )
 
 
@@ -86,11 +87,16 @@ class TestLayerConstants:
 
     def test_layer_values_are_powers_of_two(self):
         layers = [LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
-                  LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY]
+                  LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
+                  LAYER_GOV_DATA]
         for layer in layers:
             assert layer & (layer - 1) == 0, f"{layer} is not a power of 2"
 
     def test_layers_are_unique(self):
         layers = [LAYER_RDAP, LAYER_WHOIS_HISTORY, LAYER_DNS,
-                  LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY]
+                  LAYER_WEBSITE, LAYER_REVIEWS, LAYER_EMAIL_VERIFY,
+                  LAYER_GOV_DATA]
         assert len(set(layers)) == len(layers)
+
+    def test_gov_data_layer_value(self):
+        assert LAYER_GOV_DATA == 64

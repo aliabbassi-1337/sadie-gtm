@@ -159,11 +159,13 @@ async def discover_emails(
 
     # Determine verification method based on email provider
     if email_provider == "microsoft_365":
-        # Use O365 autodiscover (most reliable, unthrottled)
+        # Use O365 autodiscover (most reliable, unthrottled) — all in parallel
         logger.debug(f"Email {domain}: using O365 GetCredentialType verification")
         async with httpx.AsyncClient() as client:
-            for email in candidates:
-                status = await verify_o365_email(client, email)
+            statuses = await asyncio.gather(
+                *[verify_o365_email(client, email) for email in candidates]
+            )
+            for email, status in zip(candidates, statuses):
                 if status == "exists":
                     logger.debug(f"Email {domain}: O365 verified {email}")
                     results.append({"email": email, "verified": True, "method": "o365_autodiscover"})
@@ -184,8 +186,10 @@ async def discover_emails(
                     results.append({"email": email, "verified": False, "method": "catch_all_domain"})
             else:
                 logger.debug(f"Email {domain}: SMTP verification via {mx_host}")
-                for email in candidates:
-                    status = await _smtp_verify(email, mx_host)
+                statuses = await asyncio.gather(
+                    *[_smtp_verify(email, mx_host) for email in candidates]
+                )
+                for email, status in zip(candidates, statuses):
                     if status == "exists":
                         logger.debug(f"Email {domain}: SMTP verified {email}")
                         results.append({"email": email, "verified": True, "method": "smtp_rcpt"})

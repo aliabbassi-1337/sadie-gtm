@@ -13,13 +13,16 @@ Cost: Free (socket WHOIS + Wayback Machine).
 
 import asyncio
 import re
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
 import httpx
 from loguru import logger
 
 from services.enrichment.owner_models import DecisionMaker, DomainIntel
+
+if TYPE_CHECKING:
+    from lib.proxy import CfWorkerProxy
 
 # ── Privacy / junk detection ─────────────────────────────────────────
 
@@ -269,10 +272,17 @@ async def _fetch_wayback_snapshot(
     client: httpx.AsyncClient,
     url: str,
     timestamp: str,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
 ) -> Optional[str]:
     """Fetch a cached page from the Wayback Machine."""
     wayback_url = f"https://web.archive.org/web/{timestamp}id_/{url}"
     try:
+        # Try CF Worker proxy first
+        if cf_proxy and cf_proxy.is_configured:
+            text = await cf_proxy.fetch(client, wayback_url, timeout=30.0)
+            if text:
+                return text
+
         resp = await client.get(wayback_url, timeout=30.0, follow_redirects=True)
         if resp.status_code == 200:
             return resp.text
@@ -297,6 +307,7 @@ def _parse_whois_page(html: str) -> dict:
 async def lookup_historical_whois(
     client: httpx.AsyncClient,
     domain: str,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
 ) -> Optional[DomainIntel]:
     """Look up historical WHOIS via Wayback Machine."""
     domain = _extract_domain(domain) or domain
@@ -311,7 +322,8 @@ async def lookup_historical_whois(
 
         for snapshot in snapshots:
             html = await _fetch_wayback_snapshot(
-                client, snapshot["url"], snapshot["timestamp"]
+                client, snapshot["url"], snapshot["timestamp"],
+                cf_proxy=cf_proxy,
             )
             if not html:
                 continue
@@ -340,6 +352,7 @@ async def whois_lookup(
     client: httpx.AsyncClient,
     domain: str,
     skip_historical: bool = False,
+    cf_proxy: Optional["CfWorkerProxy"] = None,
 ) -> Optional[DomainIntel]:
     """Combined WHOIS lookup: live first, then historical fallback.
 
@@ -347,6 +360,7 @@ async def whois_lookup(
         client: httpx async client (used for historical Wayback lookups)
         domain: Domain name
         skip_historical: Skip Wayback Machine lookup (faster, less coverage)
+        cf_proxy: Optional CF Worker proxy for Wayback Machine requests
 
     Returns:
         DomainIntel with registrant info, or None if privacy-protected everywhere.
@@ -358,7 +372,7 @@ async def whois_lookup(
 
     # 2. Historical WHOIS via Wayback Machine (slow, limited coverage)
     if not skip_historical:
-        hist_intel = await lookup_historical_whois(client, domain)
+        hist_intel = await lookup_historical_whois(client, domain, cf_proxy=cf_proxy)
         if hist_intel:
             return hist_intel
 

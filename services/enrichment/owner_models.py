@@ -39,6 +39,11 @@ class DomainIntel(BaseModel):
     dmarc_record: Optional[str] = None
     is_catch_all: Optional[bool] = None
 
+    # CT Certificate Intelligence
+    ct_org_name: Optional[str] = None
+    ct_alt_domains: list[str] = []
+    ct_cert_count: int = 0
+
 
 class OwnerEnrichmentResult(BaseModel):
     """Result of running the owner enrichment waterfall for a single hotel."""
@@ -62,3 +67,12 @@ LAYER_DNS = 4
 LAYER_WEBSITE = 8
 LAYER_REVIEWS = 16
 LAYER_EMAIL_VERIFY = 32
+LAYER_GOV_DATA = 64
+LAYER_CT_CERTS = 128
+LAYER_ABN_ASIC = 256
+
+# Default layers — all except CT certs (0% hit rate, clogs crt.sh under load)
+LAYERS_DEFAULT = (
+    LAYER_RDAP | LAYER_WHOIS_HISTORY | LAYER_DNS | LAYER_WEBSITE |
+    LAYER_REVIEWS | LAYER_EMAIL_VERIFY | LAYER_GOV_DATA | LAYER_ABN_ASIC
+)  # 0x17F = 383
