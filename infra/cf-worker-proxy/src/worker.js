@@ -39,14 +39,14 @@ export default {
       }), { headers: { 'Content-Type': 'application/json' } });
     }
 
-    // Extract target URL
-    const targetUrl = url.searchParams.get('url');
+    // Extract target URL — support both ?url= param and X-Target-URL header
+    const targetUrl = url.searchParams.get('url') || request.headers.get('X-Target-URL');
     if (!targetUrl) {
-      return new Response('Missing ?url= parameter', { status: 400 });
+      return new Response('Missing ?url= parameter or X-Target-URL header', { status: 400 });
     }
 
-    // Auth check
-    const authKey = request.headers.get('X-Auth-Key');
+    // Auth check — support both X-Auth-Key and X-Proxy-Key headers
+    const authKey = request.headers.get('X-Auth-Key') || request.headers.get('X-Proxy-Key');
     if (env.AUTH_SECRET && authKey !== env.AUTH_SECRET) {
       return new Response('Unauthorized', { status: 401 });
     }

@@ -4,9 +4,12 @@ For each entity DM (e.g. "SULTAN HOLDINGS PTY LTD"), searches Serper for
 the entity name, fetches top result pages with httpx (no browser), and
 uses Azure OpenAI to extract person names, titles, emails, and phones.
 
+Also supports --search-blanks to Google-search parks with zero DMs by park name.
+
 Usage:
     uv run python3 scripts/crawl_entity_websites.py --dry-run
     uv run python3 scripts/crawl_entity_websites.py --apply
+    uv run python3 scripts/crawl_entity_websites.py --search-blanks --apply
     uv run python3 scripts/crawl_entity_websites.py --limit 5 -v
 """
 
@@ -142,6 +145,24 @@ async def load_entities(conn) -> list[Entity]:
             e.hotel_names.append(r["hotel_name"])
 
     return list(entity_map.values())
+
+
+BIG4_WHERE = "(h.external_id_type = 'big4' OR h.source LIKE '%::big4%')"
+
+
+async def load_blank_parks(conn) -> list[Entity]:
+    """Load parks with zero DMs as Entity objects (for --search-blanks mode)."""
+    rows = await conn.fetch(
+        "SELECT h.id, h.name FROM sadie_gtm.hotels h"
+        " WHERE " + BIG4_WHERE
+        + " AND h.id NOT IN (SELECT dm.hotel_id FROM sadie_gtm.hotel_decision_makers dm)"
+        " ORDER BY h.name"
+    )
+    # Each park becomes an "entity" with the park name as search term
+    return [
+        Entity(name=r["name"], hotel_ids=[r["id"]], hotel_names=[r["name"]])
+        for r in rows
+    ]
 
 
 # ── Step 2: Serper search ───────────────────────────────────────────────────
@@ -420,7 +441,8 @@ async def process_entities(entities: list[Entity]) -> list[EntityResult]:
 
 
 # ── Insert ───────────────────────────────────────────────────────────────────
-async def insert_results(conn, results: list[EntityResult], dry_run: bool = True):
+async def insert_results(conn, results: list[EntityResult], dry_run: bool = True,
+                         source: str = "entity_website_crawl"):
     """Batch-insert found people as decision makers using unnest()."""
     # Build batch arrays
     dm_ids, dm_names, dm_titles, dm_emails = [], [], [], []
@@ -447,7 +469,7 @@ async def insert_results(conn, results: list[EntityResult], dry_run: bool = True
                 dm_emails.append(person.email or None)
                 dm_verified.append(False)
                 dm_phones.append(person.phone or None)
-                dm_sources_json.append(json.dumps(["entity_website_crawl"]))
+                dm_sources_json.append(json.dumps([source]))
                 dm_conf.append(0.70)
                 dm_urls.append(person.source_url or None)
 
@@ -495,6 +517,8 @@ async def main():
     parser = argparse.ArgumentParser(description="Crawl entity websites to find real people")
     parser.add_argument("--apply", action="store_true", help="Write results to DB")
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
+    parser.add_argument("--search-blanks", action="store_true",
+                        help="Search for parks with zero DMs by park name (instead of entity names)")
     parser.add_argument("--limit", type=int, default=0, help="Limit entities to process")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -513,10 +537,14 @@ async def main():
         print("ERROR: AZURE_OPENAI_API_KEY not found in .env")
         sys.exit(1)
 
-    # Load entities
+    # Load entities or blank parks
     conn = await asyncpg.connect(**DB_CONFIG)
-    entities = await load_entities(conn)
-    logger.info(f"Loaded {len(entities)} unique entities across {sum(len(e.hotel_ids) for e in entities)} hotel links")
+    if args.search_blanks:
+        entities = await load_blank_parks(conn)
+        logger.info(f"Loaded {len(entities)} blank parks to search")
+    else:
+        entities = await load_entities(conn)
+        logger.info(f"Loaded {len(entities)} unique entities across {sum(len(e.hotel_ids) for e in entities)} hotel links")
 
     if args.limit:
         entities = entities[:args.limit]
@@ -540,7 +568,8 @@ async def main():
             print(f"  {r.entity.name[:50]:<50} -> {names}")
 
     # Insert
-    inserted, skipped = await insert_results(conn, results, dry_run=not args.apply)
+    src = "google_search" if args.search_blanks else "entity_website_crawl"
+    inserted, skipped = await insert_results(conn, results, dry_run=not args.apply, source=src)
     await conn.close()
 
     print(f"\n{'DRY RUN' if not args.apply else 'APPLIED'}")

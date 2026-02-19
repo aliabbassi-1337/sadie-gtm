@@ -5,6 +5,10 @@ Uses crawl4ai with arun_many() for fast concurrent crawling + Azure OpenAI LLM e
 Usage:
     uv run python3 scripts/crawl_big4_parks.py --limit 10
     uv run python3 scripts/crawl_big4_parks.py --all
+    uv run python3 scripts/crawl_big4_parks.py --blanks-only       # only parks with zero DMs
+    uv run python3 scripts/crawl_big4_parks.py --chain-fill --apply # fill known chain execs
+    uv run python3 scripts/crawl_big4_parks.py --enrich-missing --apply  # full targeted enrichment
+    uv run python3 scripts/crawl_big4_parks.py --enrich-missing --apply --concurrency 10
 """
 
 import argparse
@@ -14,13 +18,14 @@ import re
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote
 
 import asyncpg
 import httpx
 from loguru import logger
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+from crawl4ai.async_dispatcher import SemaphoreDispatcher
 
 # DB config
 DB_CONFIG = dict(
@@ -50,6 +55,7 @@ AZURE_KEY = _ENV.get('AZURE_OPENAI_API_KEY', '')
 AZURE_ENDPOINT = _ENV.get('AZURE_OPENAI_ENDPOINT', '').rstrip('/')
 AZURE_VERSION = _ENV.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
 AZURE_DEPLOY = 'gpt-35-turbo'  # actual model: gpt-4.1-mini
+SERPER_API_KEY = _ENV.get('SERPER_API_KEY', '')
 
 # Key pages to crawl per park (reduced for speed)
 OWNER_PATHS = ["/about", "/about-us", "/our-story", "/contact"]
@@ -64,6 +70,37 @@ EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 GENERIC_PREFIXES = {"noreply", "no-reply", "info", "reservations", "bookings",
                      "enquiries", "enquiry", "sales", "reception", "admin",
                      "support", "help", "hello", "contact", "stay"}
+
+# Tourism portal domains (not park-specific websites)
+BAD_WEBSITE_DOMAINS = {
+    "visitvictoria.com", "visitnsw.com", "visitgippsland.com.au",
+    "discovertasmania.com.au", "southaustralia.com",
+    "visitqueensland.com", "big4.com.au", "wotif.com",
+    "booking.com", "tripadvisor.com",
+}
+
+# Domains to skip in Serper search results
+SEARCH_SKIP_DOMAINS = {
+    "facebook.com", "instagram.com", "twitter.com", "x.com",
+    "youtube.com", "tiktok.com", "pinterest.com",
+    "booking.com", "expedia.com", "tripadvisor.com", "hotels.com",
+    "agoda.com", "airbnb.com", "vrbo.com", "kayak.com",
+    "wotif.com", "google.com", "maps.google.com",
+    "abn.business.gov.au", "abr.business.gov.au",
+    "asic.gov.au", "yellowpages.com.au", "whitepages.com.au",
+    "truelocal.com.au", "opencorporates.com", "big4.com.au",
+}
+
+ENTITY_RE_STR = (
+    r'(PTY|LTD|LIMITED|LLC|INC|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|'
+    r'COUNCIL|MANAGEMENT|ASSETS|VILLAGES|HOLIDAY|CARAVAN|PARKS|RESORT|'
+    r'TOURISM|TOURIST|NRMA|RAC |MOTEL|RETREAT)'
+)
+
+BUSINESS_RE = re.compile(
+    r'(?i)(pty|ltd|trust|holiday|park|resort|caravan|tourism|beach|river|'
+    r'motel|camping|management|holdings|assets|council|association)'
+)
 
 
 @dataclass
@@ -90,19 +127,61 @@ def _norm_phone(p: str) -> str:
     return re.sub(r'[^\d]', '', p).lstrip('0').lstrip('61')
 
 
-async def get_big4_hotels(conn) -> list[ParkInfo]:
-    rows = await conn.fetch("""
-        SELECT DISTINCT ON (LOWER(TRIM(h.name)))
-            h.id, h.name, h.phone_google, h.phone_website, h.email,
-            h.website, h.city, h.state
-        FROM sadie_gtm.hotels h
-        WHERE (h.external_id_type = 'big4' OR h.source LIKE '%::big4%')
-          AND h.website IS NOT NULL AND h.website != ''
-          AND h.website NOT ILIKE '%big4.com.au%'
-          AND h.name NOT ILIKE '%demo%'
-          AND h.name NOT ILIKE '%datawarehouse%'
-        ORDER BY LOWER(TRIM(h.name)), h.phone_website DESC NULLS LAST
-    """)
+BIG4_WHERE = "(h.external_id_type = 'big4' OR h.source LIKE '%::big4%')"
+
+# Known chain executives to fill for parks missing people
+CHAIN_EXECS = {
+    "Holiday Haven": {
+        "match": "h.name ILIKE '%holiday haven%' OR h.website ILIKE '%holidayhaven%'",
+        "people": [
+            ("Andrew McEvoy", "Chair"),
+            ("David Galvin", "Chief Executive Officer"),
+        ],
+    },
+    "NRMA Parks": {
+        "match": "h.name ILIKE '%nrma%' OR h.website ILIKE '%nrmaparks%'",
+        "people": [
+            ("Rohan Lund", "Group CEO, NRMA"),
+            ("Paul Davies", "CEO, NRMA Parks and Resorts"),
+        ],
+    },
+    "Tasman Holiday Parks": {
+        "match": "h.name ILIKE '%tasman%' OR h.website ILIKE '%tasman%'",
+        "people": [
+            ("Nikki Milne", "Chief Executive Officer"),
+            ("Bill Dimitropoulos", "Chief Financial Officer"),
+            ("Corrie Milne", "General Manager"),
+        ],
+    },
+}
+
+
+async def get_big4_hotels(conn, blanks_only: bool = False) -> list[ParkInfo]:
+    if blanks_only:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (LOWER(TRIM(h.name)))"
+            "  h.id, h.name, h.phone_google, h.phone_website, h.email,"
+            "  h.website, h.city, h.state"
+            " FROM sadie_gtm.hotels h"
+            " WHERE " + BIG4_WHERE
+            + " AND h.website IS NOT NULL AND h.website != ''"
+            " AND h.website NOT ILIKE '%big4.com.au%'"
+            " AND h.id NOT IN (SELECT dm.hotel_id FROM sadie_gtm.hotel_decision_makers dm)"
+            " ORDER BY LOWER(TRIM(h.name)), h.phone_website DESC NULLS LAST"
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (LOWER(TRIM(h.name)))"
+            "  h.id, h.name, h.phone_google, h.phone_website, h.email,"
+            "  h.website, h.city, h.state"
+            " FROM sadie_gtm.hotels h"
+            " WHERE " + BIG4_WHERE
+            + " AND h.website IS NOT NULL AND h.website != ''"
+            " AND h.website NOT ILIKE '%big4.com.au%'"
+            " AND h.name NOT ILIKE '%demo%'"
+            " AND h.name NOT ILIKE '%datawarehouse%'"
+            " ORDER BY LOWER(TRIM(h.name)), h.phone_website DESC NULLS LAST"
+        )
     parks = []
     for r in rows:
         parks.append(ParkInfo(
@@ -112,6 +191,58 @@ async def get_big4_hotels(conn) -> list[ParkInfo]:
             existing_email=r.get('email'),
         ))
     return parks
+
+
+async def chain_fill(conn, dry_run: bool = True) -> int:
+    """Fill known chain executives into parks that have zero DMs. Batch insert."""
+    dm_ids, dm_names, dm_titles, dm_sources_json, dm_conf = [], [], [], [], []
+
+    for chain_name, chain in CHAIN_EXECS.items():
+        parks = await conn.fetch(
+            "SELECT h.id, h.name FROM sadie_gtm.hotels h"
+            " WHERE " + BIG4_WHERE
+            + " AND (" + chain["match"] + ")"
+            " AND h.id NOT IN ("
+            "   SELECT dm2.hotel_id FROM sadie_gtm.hotel_decision_makers dm2"
+            "   WHERE dm2.full_name !~* $1"
+            " ) ORDER BY h.name",
+            r'(PTY|LTD|TRUST|HOLDINGS|GROUP|CORP)',
+        )
+        if not parks:
+            continue
+        logger.info(f"{chain_name}: {len(parks)} parks need people")
+        for person_name, person_title in chain["people"]:
+            for park in parks:
+                dm_ids.append(park['id'])
+                dm_names.append(person_name)
+                dm_titles.append(person_title)
+                dm_sources_json.append(json.dumps(["chain_mgmt_lookup"]))
+                dm_conf.append(0.60)
+
+    if not dm_ids:
+        print("No chain parks need filling.")
+        return 0
+
+    for i in range(len(dm_ids)):
+        logger.info(f"  + {dm_names[i]} ({dm_titles[i]}) -> hotel_id={dm_ids[i]}")
+
+    if dry_run:
+        print(f"\nDRY RUN: Would insert {len(dm_ids)} chain DMs")
+        return len(dm_ids)
+
+    await conn.execute(
+        "INSERT INTO sadie_gtm.hotel_decision_makers"
+        "  (hotel_id, full_name, title, sources, confidence)"
+        " SELECT v.hotel_id, v.full_name, v.title,"
+        "  ARRAY(SELECT jsonb_array_elements_text(v.sources_json)),"
+        "  v.confidence"
+        " FROM unnest($1::int[], $2::text[], $3::text[], $4::jsonb[], $5::float4[])"
+        "  AS v(hotel_id, full_name, title, sources_json, confidence)"
+        " ON CONFLICT (hotel_id, full_name, title) DO NOTHING",
+        dm_ids, dm_names, dm_titles, dm_sources_json, dm_conf,
+    )
+    print(f"\nInserted up to {len(dm_ids)} chain DMs")
+    return len(dm_ids)
 
 
 def _ensure_https(url: str) -> str:
@@ -209,8 +340,8 @@ async def crawl_and_extract(
     config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         wait_until="domcontentloaded",
-        delay_before_return_html=1.5,
-        page_timeout=20000,
+        delay_before_return_html=0.5,
+        page_timeout=15000,
         excluded_tags=["nav", "footer", "script", "style", "noscript", "header", "aside"],
     )
 
@@ -276,10 +407,431 @@ async def crawl_and_extract(
     return results
 
 
+def _get_domain(url: str) -> str:
+    try:
+        host = urlparse(url).hostname or ""
+        return host.lower().removeprefix("www.")
+    except Exception:
+        return ""
+
+
+def _is_bad_website(url: str) -> bool:
+    if not url:
+        return True
+    domain = _get_domain(url)
+    return any(domain.endswith(bad) for bad in BAD_WEBSITE_DOMAINS)
+
+
+async def load_parks_needing_people(conn) -> tuple[list[ParkInfo], dict[int, str]]:
+    """Load Big4 parks without real people (blank or entity-only).
+    Returns (parks, entity_names_by_hotel_id)."""
+    rows = await conn.fetch(
+        "SELECT h.id, h.name, h.website, h.email,"
+        "  h.phone_google, h.phone_website"
+        " FROM sadie_gtm.hotels h"
+        " WHERE " + BIG4_WHERE
+        + " AND h.id NOT IN ("
+        "   SELECT dm2.hotel_id FROM sadie_gtm.hotel_decision_makers dm2"
+        "   WHERE dm2.full_name !~* $1"
+        " ) ORDER BY h.name",
+        ENTITY_RE_STR,
+    )
+    parks = []
+    for r in rows:
+        parks.append(ParkInfo(
+            hotel_id=r['id'], hotel_name=r['name'],
+            website=r['website'] or '',
+            existing_phones=[p for p in [r.get('phone_google'), r.get('phone_website')] if p],
+            existing_email=r.get('email'),
+        ))
+    # Get entity names for entity-only parks
+    entity_rows = await conn.fetch(
+        "SELECT dm.hotel_id, dm.full_name"
+        " FROM sadie_gtm.hotel_decision_makers dm"
+        " JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
+        " WHERE " + BIG4_WHERE + " AND dm.full_name ~* $1",
+        ENTITY_RE_STR,
+    )
+    target_ids = {p.hotel_id for p in parks}
+    entity_map = {}
+    for r in entity_rows:
+        if r['hotel_id'] in target_ids:
+            entity_map[r['hotel_id']] = r['full_name']
+    return parks, entity_map
+
+
+async def _serper_find_website(client, park_name, sem) -> str | None:
+    """Search Serper for a park's actual website URL."""
+    if not SERPER_API_KEY:
+        return None
+    clean = re.sub(r'(?i)\b(big4|big 4)\b', 'BIG4', park_name).strip()
+    # Remove " - City" suffixes for better search
+    clean = re.sub(r'\s*-\s*[A-Z][a-z]+.*$', '', clean)
+    query = f'{clean} holiday park official website Australia'
+    async with sem:
+        try:
+            resp = await client.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+                json={"q": query, "num": 5, "gl": "au"},
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                return None
+            for item in resp.json().get("organic", []):
+                url = item.get("link", "")
+                domain = _get_domain(url)
+                if domain and domain not in SEARCH_SKIP_DOMAINS and not _is_bad_website(url):
+                    return url
+        except Exception:
+            pass
+    return None
+
+
+async def _serper_search_entity(client, entity_name, sem) -> list[str]:
+    """Search for entity/holding company URLs to find directors."""
+    if not SERPER_API_KEY:
+        return []
+    clean = re.sub(r'(?i)\b(pty\.?|ltd\.?|limited|the trustee for|the)\b', '', entity_name).strip()
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    if len(clean) < 3:
+        return []
+    query = f'"{clean}" Australia director OR owner OR team'
+    async with sem:
+        try:
+            resp = await client.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+                json={"q": query, "num": 5, "gl": "au"},
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                return []
+            urls = []
+            for item in resp.json().get("organic", []):
+                url = item.get("link", "")
+                domain = _get_domain(url)
+                if domain and domain not in SEARCH_SKIP_DOMAINS:
+                    urls.append(url)
+                if len(urls) >= 3:
+                    break
+            return urls
+        except Exception:
+            return []
+
+
+async def enrich_missing(args):
+    """Targeted enrichment: find websites, crawl park + entity sites, extract people, insert.
+    Uses text_mode + SemaphoreDispatcher + Brightdata proxy for maximum speed."""
+    conn = await asyncpg.connect(**DB_CONFIG)
+    dry_run = not args.apply
+
+    # Step 1: Load targets
+    parks, entity_map = await load_parks_needing_people(conn)
+    logger.info(f"Found {len(parks)} parks needing real people ({len(entity_map)} with entity names)")
+    if not parks:
+        print("All parks have real people!")
+        await conn.close()
+        return
+
+    # Step 2: Find websites for parks with bad/missing websites
+    bad_parks = [p for p in parks if _is_bad_website(p.website)]
+    if bad_parks:
+        logger.info(f"Finding websites for {len(bad_parks)} parks via Serper...")
+        async with httpx.AsyncClient() as client:
+            sem = asyncio.Semaphore(10)
+            found = await asyncio.gather(*[
+                _serper_find_website(client, p.hotel_name, sem) for p in bad_parks
+            ])
+            for park, url in zip(bad_parks, found):
+                if url:
+                    logger.info(f"  Found: {park.hotel_name} -> {url}")
+                    park.website = url
+                    if not dry_run:
+                        await conn.execute(
+                            "UPDATE sadie_gtm.hotels SET website = $1, updated_at = NOW() WHERE id = $2",
+                            url, park.hotel_id,
+                        )
+                else:
+                    logger.warning(f"  No website for: {park.hotel_name}")
+
+    # Step 3: Search entity names via Serper (deduplicate by entity name)
+    entity_urls: dict[int, list[str]] = {}
+    if entity_map:
+        unique_entities: dict[str, dict] = {}
+        for hid, name in entity_map.items():
+            key = name.strip().upper()
+            if key not in unique_entities:
+                unique_entities[key] = {'name': name, 'hotel_ids': []}
+            unique_entities[key]['hotel_ids'].append(hid)
+
+        logger.info(f"Searching {len(unique_entities)} entities via Serper...")
+        async with httpx.AsyncClient() as client:
+            sem = asyncio.Semaphore(20)
+            items = list(unique_entities.values())
+            results = await asyncio.gather(*[
+                _serper_search_entity(client, item['name'], sem) for item in items
+            ])
+            for item, urls in zip(items, results):
+                for hid in item['hotel_ids']:
+                    entity_urls[hid] = urls
+
+    # Step 4: Build URL list for crawl4ai
+    all_urls: list[str] = []
+    url_to_park_idx: dict[str, int] = {}
+    crawlable: list[ParkInfo] = []
+
+    for park in parks:
+        has_website = park.website and not _is_bad_website(park.website)
+        has_entity_urls = park.hotel_id in entity_urls and entity_urls[park.hotel_id]
+        if not has_website and not has_entity_urls:
+            continue
+        idx = len(crawlable)
+        crawlable.append(park)
+        if has_website:
+            for url in _build_urls(park.website):
+                if url not in url_to_park_idx:
+                    all_urls.append(url)
+                    url_to_park_idx[url] = idx
+        if has_entity_urls:
+            for url in entity_urls[park.hotel_id]:
+                # Skip binary files
+                if re.search(r'\.(pdf|doc|docx|xls|xlsx|zip|png|jpg|gif)(\?|$)', url, re.IGNORECASE):
+                    continue
+                if url not in url_to_park_idx:
+                    all_urls.append(url)
+                    url_to_park_idx[url] = idx
+
+    logger.info(f"Crawling {len(all_urls)} URLs across {len(crawlable)} parks...")
+
+    # ── Route through CF Worker for IP rotation (300+ edge locations) ──
+    cf_worker_url = _ENV.get('CF_WORKER_SCRAPER_URL', 'https://sadie-scraper-proxy.ali-alabbassi.workers.dev').rstrip('/')
+
+    # Rewrite URLs to go through CF Worker: worker.dev/?url=<encoded_target>
+    proxy_urls: list[str] = []
+    proxy_to_park_idx: dict[str, int] = {}
+    proxy_to_original: dict[str, str] = {}
+
+    if cf_worker_url:
+        logger.info(f"Routing {len(all_urls)} URLs through CF Worker: {cf_worker_url}")
+        for orig_url in all_urls:
+            purl = f"{cf_worker_url}/?url={quote(orig_url, safe='')}"
+            proxy_urls.append(purl)
+            proxy_to_park_idx[purl] = url_to_park_idx[orig_url]
+            proxy_to_original[purl] = orig_url
+    else:
+        logger.warning("No CF Worker — crawling direct")
+        proxy_urls = all_urls
+        proxy_to_park_idx = url_to_park_idx
+        proxy_to_original = {u: u for u in all_urls}
+
+    # ── FAST crawl4ai: text_mode + light_mode + Chromium speed flags ──
+    browser_config = BrowserConfig(
+        headless=True,
+        text_mode=True,        # Skip images/CSS → much faster page loads
+        light_mode=True,       # Disable background features
+        verbose=False,
+        extra_args=[
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--disable-background-networking",
+        ],
+    )
+
+    run_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        wait_until="domcontentloaded",
+        delay_before_return_html=0.1,   # Minimal delay
+        page_timeout=30000,             # 30s — CF Worker adds latency
+        scan_full_page=False,
+        wait_for_images=False,
+        excluded_tags=["nav", "footer", "script", "style", "noscript", "header", "aside"],
+    )
+
+    # SemaphoreDispatcher for high fixed concurrency
+    dispatcher = SemaphoreDispatcher(
+        max_session_permit=args.concurrency,
+    )
+
+    results_list = [ParkResult(park=p) for p in crawlable]
+
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        crawl_results = await crawler.arun_many(
+            urls=proxy_urls,
+            config=run_config,
+            dispatcher=dispatcher,
+        )
+        for cr in crawl_results:
+            if cr.url not in proxy_to_park_idx:
+                continue
+            idx = proxy_to_park_idx[cr.url]
+            r = results_list[idx]
+            if not cr.success:
+                r.errors.append(f"{proxy_to_original.get(cr.url, cr.url)}: failed")
+                continue
+            r.pages_crawled += 1
+            md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown') else cr.markdown) or ""
+            if len(md) < 50:
+                continue
+            r.page_texts.append(md)
+            extracted = _extract_from_md(md)
+            existing_norm = {_norm_phone(p) for p in r.park.existing_phones}
+            for p in extracted["phones"]:
+                if _norm_phone(p) not in existing_norm:
+                    r.new_phones.append(p)
+            for e in extracted["emails"]:
+                if not r.park.existing_email or e.lower() != r.park.existing_email.lower():
+                    r.new_emails.append(e)
+
+    # Deduplicate
+    for r in results_list:
+        r.new_phones = list(dict.fromkeys(r.new_phones))
+        r.new_emails = list(dict.fromkeys(r.new_emails))
+
+    # Step 5: LLM extraction — high concurrency
+    if AZURE_KEY:
+        logger.info("LLM extracting people...")
+        async with httpx.AsyncClient() as llm_client:
+            sem = asyncio.Semaphore(50)  # Azure scales fine
+            async def _extract_one(r):
+                if not r.page_texts:
+                    return
+                combined = "\n---\n".join(r.page_texts)
+                async with sem:
+                    r.owner_names = await llm_extract_owners(llm_client, combined, r.park.hotel_name)
+            await asyncio.gather(*[_extract_one(r) for r in results_list])
+
+    # Step 6: Print results & insert
+    total_found = sum(1 for r in results_list if r.owner_names)
+    total_people = sum(len(r.owner_names) for r in results_list)
+    pages_ok = sum(r.pages_crawled for r in results_list)
+    pages_fail = sum(len(r.errors) for r in results_list)
+
+    print(f"\n{'='*70}")
+    print(f"ENRICH MISSING RESULTS")
+    print(f"{'='*70}")
+    print(f"Parks targeted:      {len(parks)}")
+    print(f"Parks crawled:       {len(crawlable)}")
+    print(f"Pages OK / failed:   {pages_ok} / {pages_fail}")
+    print(f"Parks with people:   {total_found}")
+    print(f"Total people found:  {total_people}")
+
+    for r in results_list:
+        if r.owner_names:
+            names = ", ".join(o['name'] for o in r.owner_names)
+            print(f"  {r.park.hotel_name[:50]:<50} | {names}")
+        elif not r.pages_crawled:
+            print(f"  {r.park.hotel_name[:50]:<50} | NO PAGES ({len(r.errors)} errors)")
+
+    # Build batch arrays for DM insert
+    dm_ids, dm_names, dm_titles, dm_emails = [], [], [], []
+    dm_phones, dm_sources_json, dm_conf, dm_urls = [], [], [], []
+    dm_verified = []
+    seen = set()
+
+    for r in results_list:
+        for owner in r.owner_names:
+            name = owner.get('name', '').strip()
+            title = owner.get('title', 'Owner').strip()
+            if not name or len(name) < 4 or ' ' not in name:
+                continue
+            if BUSINESS_RE.search(name):
+                continue
+            key = (r.park.hotel_id, name.lower(), title.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            dm_ids.append(r.park.hotel_id)
+            dm_names.append(name)
+            dm_titles.append(title)
+            dm_emails.append(None)
+            dm_verified.append(False)
+            dm_phones.append(None)
+            dm_sources_json.append(json.dumps(["website_rescrape"]))
+            dm_conf.append(0.70)
+            dm_urls.append(r.park.website or None)
+
+    # Phone/email updates
+    phone_ids, phone_vals = [], []
+    email_ids, email_vals = [], []
+    for r in results_list:
+        if r.new_phones:
+            phone_ids.append(r.park.hotel_id)
+            phone_vals.append(r.new_phones[0])
+        if r.new_emails:
+            best = None
+            for e in r.new_emails:
+                prefix = e.split('@')[0].lower()
+                if prefix not in GENERIC_PREFIXES:
+                    best = e
+                    break
+            if not best and r.new_emails:
+                best = r.new_emails[0]
+            if best:
+                email_ids.append(r.park.hotel_id)
+                email_vals.append(best)
+
+    print(f"\nNew DMs to insert: {len(dm_ids)}")
+    print(f"Phone updates:     {len(phone_ids)}")
+    print(f"Email updates:     {len(email_ids)}")
+
+    if dry_run:
+        print(f"\nDRY RUN — run with --apply to write to DB")
+    else:
+        if dm_ids:
+            await conn.execute(
+                "INSERT INTO sadie_gtm.hotel_decision_makers"
+                "  (hotel_id, full_name, title, email, email_verified, phone,"
+                "   sources, confidence, raw_source_url)"
+                " SELECT"
+                "  v.hotel_id, v.full_name, v.title, v.email, v.email_verified, v.phone,"
+                "  ARRAY(SELECT jsonb_array_elements_text(v.sources_json)),"
+                "  v.confidence, v.raw_source_url"
+                " FROM unnest("
+                "  $1::int[], $2::text[], $3::text[], $4::text[],"
+                "  $5::bool[], $6::text[], $7::jsonb[], $8::float4[], $9::text[]"
+                " ) AS v(hotel_id, full_name, title, email, email_verified, phone,"
+                "        sources_json, confidence, raw_source_url)"
+                " ON CONFLICT (hotel_id, full_name, title) DO UPDATE"
+                " SET sources = (SELECT array_agg(DISTINCT s) FROM unnest("
+                "     array_cat(sadie_gtm.hotel_decision_makers.sources, EXCLUDED.sources)) s),"
+                "     confidence = GREATEST(EXCLUDED.confidence, sadie_gtm.hotel_decision_makers.confidence),"
+                "     updated_at = NOW()",
+                dm_ids, dm_names, dm_titles, dm_emails,
+                dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls,
+            )
+        if phone_ids:
+            await conn.execute(
+                "UPDATE sadie_gtm.hotels h SET phone_website = v.phone, updated_at = NOW()"
+                " FROM unnest($1::int[], $2::text[]) AS v(id, phone)"
+                " WHERE h.id = v.id"
+                "   AND (h.phone_website IS NULL OR h.phone_website = '')"
+                "   AND (h.phone_google IS NULL OR h.phone_google = '')",
+                phone_ids, phone_vals,
+            )
+        if email_ids:
+            await conn.execute(
+                "UPDATE sadie_gtm.hotels h SET email = v.email, updated_at = NOW()"
+                " FROM unnest($1::int[], $2::text[]) AS v(id, email)"
+                " WHERE h.id = v.id AND (h.email IS NULL OR h.email = '')",
+                email_ids, email_vals,
+            )
+        print(f"\nAPPLIED to database!")
+
+    await conn.close()
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--all", action="store_true")
+    parser.add_argument("--blanks-only", action="store_true", help="Only crawl parks with zero DMs")
+    parser.add_argument("--chain-fill", action="store_true", help="Fill known chain execs into blank parks")
+    parser.add_argument("--enrich-missing", action="store_true",
+                        help="Full enrichment: find websites, crawl park+entity sites, extract people, insert")
+    parser.add_argument("--apply", action="store_true", help="Write results to DB (default: dry-run)")
     parser.add_argument("--hotel-ids", type=str, help="Comma-separated hotel IDs to crawl")
     parser.add_argument("--no-llm", action="store_true")
     parser.add_argument("--concurrency", type=int, default=5)
@@ -290,8 +842,20 @@ async def main():
     logger.remove()
     logger.add(sys.stderr, level="DEBUG" if args.verbose else "INFO")
 
+    # Chain fill mode — fast batch insert, no crawling needed
+    if args.chain_fill:
+        conn = await asyncpg.connect(**DB_CONFIG)
+        await chain_fill(conn, dry_run=not args.apply)
+        await conn.close()
+        return
+
+    # Enrich missing — comprehensive targeted enrichment
+    if args.enrich_missing:
+        await enrich_missing(args)
+        return
+
     conn = await asyncpg.connect(**DB_CONFIG)
-    parks = await get_big4_hotels(conn)
+    parks = await get_big4_hotels(conn, blanks_only=args.blanks_only)
     await conn.close()
 
     logger.info(f"Found {len(parks)} Big4 parks with external websites")
