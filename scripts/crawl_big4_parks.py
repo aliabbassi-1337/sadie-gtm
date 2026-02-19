@@ -18,7 +18,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urljoin, urlparse, quote
+from urllib.parse import urljoin, urlparse
 
 import asyncpg
 import httpx
@@ -609,9 +609,10 @@ async def fix_websites(args):
 
 
 async def enrich_missing(args):
-    """Targeted enrichment: crawl park + entity sites, extract people, insert.
-    Uses text_mode + SemaphoreDispatcher + CF Worker proxy for maximum speed.
-    Run --fix-websites first to ensure all parks have good URLs."""
+    """Targeted enrichment using 2-pass crawl with link discovery.
+    Pass 1: Crawl homepages, discover internal links (about/team/contact pages).
+    Pass 2: Crawl only discovered relevant pages. No hardcoded paths, no CF Worker proxy.
+    Then LLM extract people and batch insert."""
     conn = await asyncpg.connect(**DB_CONFIG)
     dry_run = not args.apply
 
@@ -623,115 +624,133 @@ async def enrich_missing(args):
         await conn.close()
         return
 
-    # Step 2: Build URL list for crawl4ai
-    all_urls: list[str] = []
-    url_to_park_idx: dict[str, int] = {}
-    crawlable: list[ParkInfo] = []
+    # Filter to crawlable parks
+    crawlable = [p for p in parks if p.website and not _is_bad_website(p.website)]
+    logger.info(f"{len(crawlable)} with crawlable websites, {len(parks) - len(crawlable)} skipped (bad/missing URL)")
 
-    for park in parks:
-        has_website = park.website and not _is_bad_website(park.website)
-        if not has_website:
-            continue
-        idx = len(crawlable)
-        crawlable.append(park)
-        for url in _build_urls(park.website):
-            if url not in url_to_park_idx:
-                all_urls.append(url)
-                url_to_park_idx[url] = idx
+    if not crawlable:
+        print("No crawlable parks!")
+        await conn.close()
+        return
 
-    logger.info(f"Crawling {len(all_urls)} URLs across {len(crawlable)} parks...")
-
-    # ── Route through CF Worker for IP rotation (300+ edge locations) ──
-    cf_worker_url = _ENV.get('CF_WORKER_SCRAPER_URL', 'https://sadie-scraper-proxy.ali-alabbassi.workers.dev').rstrip('/')
-
-    # Rewrite URLs to go through CF Worker: worker.dev/?url=<encoded_target>
-    proxy_urls: list[str] = []
-    proxy_to_park_idx: dict[str, int] = {}
-    proxy_to_original: dict[str, str] = {}
-
-    if cf_worker_url:
-        logger.info(f"Routing {len(all_urls)} URLs through CF Worker: {cf_worker_url}")
-        for orig_url in all_urls:
-            purl = f"{cf_worker_url}/?url={quote(orig_url, safe='')}"
-            proxy_urls.append(purl)
-            proxy_to_park_idx[purl] = url_to_park_idx[orig_url]
-            proxy_to_original[purl] = orig_url
-    else:
-        logger.warning("No CF Worker — crawling direct")
-        proxy_urls = all_urls
-        proxy_to_park_idx = url_to_park_idx
-        proxy_to_original = {u: u for u in all_urls}
-
-    # ── FAST crawl4ai: text_mode + light_mode + Chromium speed flags ──
+    # Step 2: Browser config — max speed, direct (no proxy)
     browser_config = BrowserConfig(
         headless=True,
-        text_mode=True,        # Skip images/CSS → much faster page loads
-        light_mode=True,       # Disable background features
+        text_mode=True,
+        light_mode=True,
         verbose=False,
         extra_args=[
-            "--disable-gpu",
-            "--disable-extensions",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-background-networking",
+            "--disable-gpu", "--disable-extensions", "--disable-dev-shm-usage",
+            "--no-first-run", "--disable-background-networking",
         ],
     )
 
     run_config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         wait_until="domcontentloaded",
-        delay_before_return_html=0.1,   # Minimal delay
-        page_timeout=30000,             # 30s — CF Worker adds latency
+        delay_before_return_html=0,
+        mean_delay=0, max_range=0,   # No inter-request delays
+        page_timeout=15000,
         scan_full_page=False,
         wait_for_images=False,
         excluded_tags=["nav", "footer", "script", "style", "noscript", "header", "aside"],
     )
 
-    # SemaphoreDispatcher for high fixed concurrency
-    dispatcher = SemaphoreDispatcher(
-        max_session_permit=args.concurrency,
+    RELEVANT_RE = re.compile(
+        r'(?i)(about|team|contact|our.?story|management|director|owner|staff|people|leadership|who.?we.?are)'
+    )
+    BINARY_EXT_RE = re.compile(
+        r'(?i)\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|jpg|jpeg|png|gif|svg|mp4|mp3|wav|webp|ico)(\?|$)'
     )
 
     results_list = [ParkResult(park=p) for p in crawlable]
 
+    # Build homepage URL list
+    homepage_urls: list[str] = []
+    url_to_idx: dict[str, int] = {}
+    for i, park in enumerate(crawlable):
+        url = _ensure_https(park.website)
+        homepage_urls.append(url)
+        url_to_idx[url] = i
+
+    def _process_crawl_result(cr, idx):
+        """Extract text + phones/emails from a crawl result."""
+        r = results_list[idx]
+        if not cr.success:
+            r.errors.append(f"{cr.url}: failed")
+            return
+        r.pages_crawled += 1
+        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown') else cr.markdown) or ""
+        if len(md) < 50:
+            return
+        r.page_texts.append(md)
+        extracted = _extract_from_md(md)
+        existing_norm = {_norm_phone(p) for p in r.park.existing_phones}
+        for p in extracted["phones"]:
+            if _norm_phone(p) not in existing_norm:
+                r.new_phones.append(p)
+        for e in extracted["emails"]:
+            if not r.park.existing_email or e.lower() != r.park.existing_email.lower():
+                r.new_emails.append(e)
+
     async with AsyncWebCrawler(config=browser_config) as crawler:
-        crawl_results = await crawler.arun_many(
-            urls=proxy_urls,
-            config=run_config,
-            dispatcher=dispatcher,
+        # ── Pass 1: Crawl homepages, discover internal links ──
+        logger.info(f"Pass 1: {len(homepage_urls)} homepages (concurrency={args.concurrency})...")
+        hp_results = await crawler.arun_many(
+            urls=homepage_urls, config=run_config,
+            dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
         )
-        for cr in crawl_results:
-            if cr.url not in proxy_to_park_idx:
+
+        discovered_urls: list[str] = []
+        disc_url_to_idx: dict[str, int] = {}
+        seen_urls = set(homepage_urls)
+
+        for cr in hp_results:
+            if cr.url not in url_to_idx:
                 continue
-            idx = proxy_to_park_idx[cr.url]
-            r = results_list[idx]
-            if not cr.success:
-                r.errors.append(f"{proxy_to_original.get(cr.url, cr.url)}: failed")
-                continue
-            r.pages_crawled += 1
-            md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown') else cr.markdown) or ""
-            if len(md) < 50:
-                continue
-            r.page_texts.append(md)
-            extracted = _extract_from_md(md)
-            existing_norm = {_norm_phone(p) for p in r.park.existing_phones}
-            for p in extracted["phones"]:
-                if _norm_phone(p) not in existing_norm:
-                    r.new_phones.append(p)
-            for e in extracted["emails"]:
-                if not r.park.existing_email or e.lower() != r.park.existing_email.lower():
-                    r.new_emails.append(e)
+            idx = url_to_idx[cr.url]
+            _process_crawl_result(cr, idx)
+
+            # Discover relevant internal links from homepage
+            links = cr.links if isinstance(cr.links, dict) else {}
+            for link in links.get("internal", []):
+                href = (link.get("href") or "").strip()
+                text = (link.get("text") or "").strip()
+                if not href or href in seen_urls or BINARY_EXT_RE.search(href):
+                    continue
+                if RELEVANT_RE.search(href) or RELEVANT_RE.search(text):
+                    seen_urls.add(href)
+                    discovered_urls.append(href)
+                    disc_url_to_idx[href] = idx
+
+        hp_ok = sum(1 for r in results_list if r.pages_crawled > 0)
+        logger.info(f"Pass 1 done: {hp_ok}/{len(crawlable)} homepages OK, {len(discovered_urls)} internal pages discovered")
+
+        # ── Pass 2: Crawl discovered about/team/contact pages ──
+        if discovered_urls:
+            logger.info(f"Pass 2: {len(discovered_urls)} discovered pages...")
+            disc_results = await crawler.arun_many(
+                urls=discovered_urls, config=run_config,
+                dispatcher=SemaphoreDispatcher(max_session_permit=args.concurrency),
+            )
+            for cr in disc_results:
+                if cr.url not in disc_url_to_idx:
+                    continue
+                _process_crawl_result(cr, disc_url_to_idx[cr.url])
 
     # Deduplicate
     for r in results_list:
         r.new_phones = list(dict.fromkeys(r.new_phones))
         r.new_emails = list(dict.fromkeys(r.new_emails))
 
-    # Step 5: LLM extraction — high concurrency
+    total_pages = sum(r.pages_crawled for r in results_list)
+    logger.info(f"Total pages crawled: {total_pages} across {len(crawlable)} parks")
+
+    # Step 3: LLM extraction — high concurrency
     if AZURE_KEY:
         logger.info("LLM extracting people...")
         async with httpx.AsyncClient() as llm_client:
-            sem = asyncio.Semaphore(50)  # Azure scales fine
+            sem = asyncio.Semaphore(50)
             async def _extract_one(r):
                 if not r.page_texts:
                     return
@@ -873,7 +892,7 @@ async def main():
     parser.add_argument("--apply", action="store_true", help="Write results to DB (default: dry-run)")
     parser.add_argument("--hotel-ids", type=str, help="Comma-separated hotel IDs to crawl")
     parser.add_argument("--no-llm", action="store_true")
-    parser.add_argument("--concurrency", type=int, default=5)
+    parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--output", type=str, default="/tmp/big4_crawl_results.json", help="JSON output file")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
