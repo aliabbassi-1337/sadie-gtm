@@ -49,14 +49,14 @@ if [ ! -f .env ]; then
     echo "Creating .env file (you need to fill in the values)..."
     cat > .env << 'EOF'
 # Database — replace with actual credentials
-SADIE_DB_HOST=aws-1-ap-southeast-1.pooler.supabase.com
+SADIE_DB_HOST=CHANGE_ME
 SADIE_DB_PORT=6543
 SADIE_DB_NAME=postgres
-SADIE_DB_USER=postgres.yunairadgmaqesxejqap
+SADIE_DB_USER=CHANGE_ME
 SADIE_DB_PASSWORD=CHANGE_ME
 
 # AWS
-SQS_DETECTION_QUEUE_URL=https://sqs.eu-north-1.amazonaws.com/760711518969/detection-queue
+SQS_DETECTION_QUEUE_URL=CHANGE_ME
 AWS_REGION=eu-north-1
 EOF
 fi

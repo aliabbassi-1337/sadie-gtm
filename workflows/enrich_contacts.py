@@ -54,11 +54,11 @@ def _read_env():
 _ENV = _read_env()
 
 DB_CONFIG = dict(
-    host=_ENV.get('SADIE_DB_HOST', 'aws-1-ap-southeast-1.pooler.supabase.com'),
+    host=_ENV['SADIE_DB_HOST'],
     port=int(_ENV.get('SADIE_DB_PORT', '6543')),
     database=_ENV.get('SADIE_DB_NAME', 'postgres'),
-    user=_ENV.get('SADIE_DB_USER', 'postgres.yunairadgmaqesxejqap'),
-    password=_ENV.get('SADIE_DB_PASSWORD', ''),
+    user=_ENV['SADIE_DB_USER'],
+    password=_ENV['SADIE_DB_PASSWORD'],
     statement_cache_size=0,
 )
 AZURE_KEY = _ENV.get('AZURE_OPENAI_API_KEY', '')
