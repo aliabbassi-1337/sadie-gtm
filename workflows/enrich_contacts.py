@@ -815,6 +815,7 @@ async def enrich(args, cfg: dict, all_hotels: bool = False):
 
     # Map orphan contact info (from page scraping) to person/entity DMs
     entity_contact_ids, entity_contact_emails, entity_contact_phones = [], [], []
+    hotel_contact_ids, hotel_contact_emails, hotel_contact_phones = [], [], []
     for r in results_list:
         orphan_email = None
         orphan_phone = r.new_phones[0] if r.new_phones else None
@@ -838,16 +839,21 @@ async def enrich(args, cfg: dict, all_hotels: bool = False):
                     dm_emails[idx] = orphan_email
                 if not dm_phones[idx] and orphan_phone:
                     dm_phones[idx] = orphan_phone
+        elif r.hotel.hotel_id in entity_map:
+            entity_contact_ids.append(r.hotel.hotel_id)
+            entity_contact_emails.append(orphan_email)
+            entity_contact_phones.append(orphan_phone)
         else:
-            if r.hotel.hotel_id in entity_map:
-                entity_contact_ids.append(r.hotel.hotel_id)
-                entity_contact_emails.append(orphan_email)
-                entity_contact_phones.append(orphan_phone)
+            # No DMs at all — update hotel-level contact info
+            hotel_contact_ids.append(r.hotel.hotel_id)
+            hotel_contact_emails.append(orphan_email)
+            hotel_contact_phones.append(orphan_phone)
 
     dm_with_email = sum(1 for e in dm_emails if e)
     dm_with_phone = sum(1 for p in dm_phones if p)
     print(f"\nNew DMs to insert: {len(dm_ids)} ({dm_with_email} with email, {dm_with_phone} with phone)")
     print(f"Entity contact updates: {len(entity_contact_ids)}")
+    print(f"Hotel contact updates: {len(hotel_contact_ids)} (phone/email from website, no owner found)")
 
     if dry_run:
         print(f"\nDRY RUN — run with --apply to write to DB")
@@ -888,6 +894,17 @@ async def enrich(args, cfg: dict, all_hotels: bool = False):
                 "   AND dm.full_name ~* $4",
                 entity_contact_ids, entity_contact_emails, entity_contact_phones,
                 ENTITY_RE_STR,
+            )
+        if hotel_contact_ids:
+            await conn.execute(
+                "UPDATE sadie_gtm.hotels h"
+                " SET email = COALESCE(NULLIF(h.email, ''), v.email),"
+                "     phone_website = COALESCE(NULLIF(h.phone_website, ''), v.phone),"
+                "     updated_at = NOW()"
+                " FROM unnest($1::int[], $2::text[], $3::text[])"
+                "   AS v(id, email, phone)"
+                " WHERE h.id = v.id",
+                hotel_contact_ids, hotel_contact_emails, hotel_contact_phones,
             )
         print(f"\nAPPLIED to database!")
 
