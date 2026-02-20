@@ -84,6 +84,7 @@ BAD_WEBSITE_DOMAINS = {
     "discovertasmania.com.au", "southaustralia.com",
     "visitqueensland.com", "big4.com.au", "wotif.com",
     "booking.com", "tripadvisor.com",
+    "rmscloud.com", "rms.com.au",
 }
 
 SEARCH_SKIP_DOMAINS = {
@@ -172,7 +173,7 @@ SOURCE_CONFIGS = {
     },
     "rms_au": {
         "label": "RMS Cloud Australia",
-        "where": "hbe.booking_engine_id = 12 AND h.country IN ('Australia', 'AU')",
+        "where": "hbe.booking_engine_id = 12 AND h.country IN ('Australia', 'AU') AND h.status = 1",
         "join": "JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id",
         "country": "AU",
         "serper_gl": "au",
@@ -302,14 +303,20 @@ async def load_hotels_needing_people(conn, cfg: dict) -> tuple[list[HotelInfo], 
     wc = cfg["where"]
 
     rows = await conn.fetch(
-        f"SELECT h.id, h.name, h.website, h.email,"
+        f"SELECT DISTINCT ON (LOWER(TRIM(h.name)))"
+        f"  h.id, h.name, h.website, h.email,"
         f"  h.phone_google, h.phone_website"
         f" FROM sadie_gtm.hotels h {jc}"
         f" WHERE ({wc})"
         f"  AND h.id NOT IN ("
         f"    SELECT dm2.hotel_id FROM sadie_gtm.hotel_decision_makers dm2"
         f"    WHERE dm2.full_name !~* $1"
-        f"  ) ORDER BY h.name",
+        f"  )"
+        f"  AND h.name NOT ILIKE '%demo%'"
+        f"  AND h.name NOT ILIKE '%test%'"
+        f"  AND h.name NOT ILIKE '%HISTORICAL%'"
+        f"  AND h.name NOT ILIKE '%datawarehouse%'"
+        f" ORDER BY LOWER(TRIM(h.name)), h.website DESC NULLS LAST",
         ENTITY_RE_STR,
     )
     hotels = []
@@ -343,10 +350,16 @@ async def load_all_hotels(conn, cfg: dict) -> tuple[list[HotelInfo], dict[int, s
     wc = cfg["where"]
 
     rows = await conn.fetch(
-        f"SELECT h.id, h.name, h.website, h.email,"
+        f"SELECT DISTINCT ON (LOWER(TRIM(h.name)))"
+        f"  h.id, h.name, h.website, h.email,"
         f"  h.phone_google, h.phone_website"
         f" FROM sadie_gtm.hotels h {jc}"
-        f" WHERE ({wc}) ORDER BY h.name",
+        f" WHERE ({wc})"
+        f"  AND h.name NOT ILIKE '%demo%'"
+        f"  AND h.name NOT ILIKE '%test%'"
+        f"  AND h.name NOT ILIKE '%HISTORICAL%'"
+        f"  AND h.name NOT ILIKE '%datawarehouse%'"
+        f" ORDER BY LOWER(TRIM(h.name)), h.website DESC NULLS LAST",
     )
     hotels = []
     for r in rows:
@@ -513,6 +526,9 @@ async def enrich(args, cfg: dict, all_hotels: bool = False):
 
     # Filter to crawlable hotels
     crawlable = [h for h in hotels if h.website and not _is_bad_website(h.website)]
+    no_website = len(hotels) - len(crawlable)
+    total_crawlable = len(crawlable)
+    logger.info(f"{total_crawlable} with crawlable websites, {no_website} skipped (bad/missing URL)")
 
     # Apply offset for resumability on large batches
     if args.offset and args.offset < len(crawlable):
@@ -521,8 +537,7 @@ async def enrich(args, cfg: dict, all_hotels: bool = False):
 
     if args.limit and args.limit < len(crawlable):
         crawlable = crawlable[:args.limit]
-
-    logger.info(f"{len(crawlable)} with crawlable websites, {len(hotels) - len(crawlable)} skipped (bad/missing URL)")
+        logger.info(f"Limited to {len(crawlable)} hotels (--limit)")
 
     if not crawlable:
         print(f"No crawlable {label} hotels!")
