@@ -74,6 +74,8 @@ DB_CONFIG = dict(
 SERPER_API_KEY = _ENV.get('SERPER_API_KEY', '')
 AWS_REGION = _ENV.get('AWS_REGION', 'eu-north-1')
 BEDROCK_MODEL_ID = 'eu.amazon.nova-micro-v1:0'
+CF_WORKER_URL = _ENV.get('CF_WORKER_PROXY_URL', _ENV.get('CF_WORKER_URL', ''))
+CF_WORKER_AUTH = _ENV.get('CF_WORKER_AUTH_KEY', '')
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -198,6 +200,19 @@ class DMTarget:
 
 
 # ── Utilities ────────────────────────────────────────────────────────────────
+
+def _proxy_headers() -> dict:
+    """Auth headers for CF Worker proxy."""
+    return {"X-Auth-Key": CF_WORKER_AUTH} if CF_WORKER_AUTH else {}
+
+
+def _proxy_url(target_url: str) -> str:
+    """Route a URL through CF Worker for IP rotation. Falls back to direct if no worker configured."""
+    if not CF_WORKER_URL:
+        return target_url
+    from urllib.parse import quote
+    return f"{CF_WORKER_URL.rstrip('/')}/?url={quote(target_url, safe='')}"
+
 
 def _get_domain(url: str) -> str:
     try:
@@ -425,11 +440,15 @@ async def discover_domains(conn, targets: list[DMTarget]) -> None:
 # ── Step 3: Common Crawl harvest ─────────────────────────────────────────────
 
 async def _cc_query(client: httpx.AsyncClient, url_pattern: str, limit: int = 200) -> list[dict]:
-    """Query CC Index API. Returns list of entry dicts."""
+    """Query CC Index API via CF Worker proxy for IP rotation."""
     try:
-        resp = await client.get(CC_INDEX_URL, params={
-            'url': url_pattern, 'output': 'json', 'limit': limit,
-        }, timeout=15.0)
+        from urllib.parse import quote
+        cc_url = f"{CC_INDEX_URL}?url={quote(url_pattern, safe='')}&output=json&limit={limit}"
+        resp = await client.get(
+            _proxy_url(cc_url),
+            headers=_proxy_headers(),
+            timeout=15.0,
+        )
         if resp.status_code != 200:
             return []
         entries = []
@@ -494,8 +513,8 @@ async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
     logger.info(f"CC: searching+fetching {len(all_domains)} domains...")
 
     fetched_pages: dict[str, str] = {}
-    search_sem = asyncio.Semaphore(50)
-    fetch_sem = asyncio.Semaphore(200)
+    search_sem = asyncio.Semaphore(50)   # via CF Worker IP rotation
+    fetch_sem = asyncio.Semaphore(200)   # WARC via S3/CloudFront, direct
     domains_hit = 0
 
     async with httpx.AsyncClient(
@@ -566,9 +585,14 @@ async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict) -> dict[str, str
 
     fetched: dict[str, str] = {}
 
+    proxy_hdrs = _proxy_headers()
+
     async def _fetch_one(client: httpx.AsyncClient, url: str):
         try:
-            resp = await client.get(url, follow_redirects=True, timeout=10.0)
+            resp = await client.get(
+                _proxy_url(url), headers=proxy_hdrs,
+                follow_redirects=True, timeout=10.0,
+            )
             if resp.status_code == 200:
                 ct = resp.headers.get('content-type', '')
                 if 'html' in ct or 'text' in ct:
@@ -579,7 +603,6 @@ async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict) -> dict[str, str
             pass
 
     async with httpx.AsyncClient(
-        headers={"User-Agent": "Mozilla/5.0 (compatible; SadieGTM/1.0)"},
         timeout=10.0,
         limits=httpx.Limits(max_connections=1000, max_keepalive_connections=100),
     ) as client:
@@ -665,11 +688,9 @@ async def _detect_email_providers(domains: set[str]) -> dict[str, Optional[str]]
             return None
 
     loop = asyncio.get_event_loop()
-    sem = asyncio.Semaphore(100)
 
     async def _check_one(domain):
-        async with sem:
-            provider = await loop.run_in_executor(None, _check_mx, domain)
+        provider = await loop.run_in_executor(None, _check_mx, domain)
         results[domain] = provider
 
     await asyncio.gather(*[_check_one(d) for d in domains])
