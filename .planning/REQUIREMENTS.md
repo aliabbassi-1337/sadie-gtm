@@ -84,16 +84,16 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| OWNER-01 | — | Pending |
-| OWNER-02 | — | Pending |
-| OWNER-03 | — | Pending |
-| OWNER-04 | — | Pending |
-| CC-01 | — | Pending |
-| CC-02 | — | Pending |
-| CC-03 | — | Pending |
-| GOV-01 | — | Pending |
-| GOV-02 | — | Pending |
-| GOV-03 | — | Pending |
-| RESIL-01 | — | Pending |
-| RESIL-02 | — | Pending |
-| RESIL-03 | — | Pending |
+| OWNER-01 | Phase 6: Automated DAG | Pending |
+| OWNER-02 | Phase 1: Contact Enrichment Pipeline | Pending |
+| OWNER-03 | Phase 5: Multi-Source Convergence | Pending |
+| OWNER-04 | Phase 6: Automated DAG | Pending |
+| CC-01 | Phase 4: Common Crawl Pipeline | Pending |
+| CC-02 | Phase 4: Common Crawl Pipeline | Pending |
+| CC-03 | Phase 4: Common Crawl Pipeline | Pending |
+| GOV-01 | Phase 2: Government Data Expansion | Pending |
+| GOV-02 | Phase 2: Government Data Expansion | Pending |
+| GOV-03 | Phase 2: Government Data Expansion | Pending |
+| RESIL-01 | Phase 3: Pipeline Resilience | Pending |
+| RESIL-02 | Phase 3: Pipeline Resilience | Pending |
+| RESIL-03 | Phase 3: Pipeline Resilience | Pending |
