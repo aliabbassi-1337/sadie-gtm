@@ -3,32 +3,32 @@
 Enriches EXISTING hotel_decision_makers who have names but are missing
 contact info (email, phone). Does NOT discover new people — that's enrich_owners.
 
-Pipeline:
-  1. Load DMs missing email/phone from hotel_decision_makers
-  2. Email pattern guessing + O365/SMTP verification on hotel domain
-  3. Serper search for person name + entity → crawl found pages → extract contacts
-  4. Batch update DM records
+Pipeline (concurrent where possible):
+  Phase 1 (sequential): Load DMs, discover domains (hotel + entity + guesses)
+  Phase 2 (concurrent): CC harvest + MX detection, then httpx page fetch
+  Phase 3: Email pattern guessing + O365/SMTP verification
+  Phase 4 (opt-in): Serper web search
+  Write: Batch update DM records + hotel email lists
 
 Usage:
-    # Enrich Big4 DMs missing contacts (email pattern only, free)
+    # Default pipeline (CC + httpx + email patterns)
     uv run python3 workflows/enrich_contacts.py --source big4 --apply --limit 50
 
     # With Serper web search (costs money, finds more)
-    uv run python3 workflows/enrich_contacts.py --source big4 --serper --apply --limit 50
+    uv run python3 workflows/enrich_contacts.py --source big4 --serper --apply
 
     # Audit contact coverage
     uv run python3 workflows/enrich_contacts.py --source big4 --audit
-
-    # Ad-hoc
-    uv run python3 workflows/enrich_contacts.py --source custom --where "h.city = 'Sydney'" --limit 10
 """
 
 import argparse
 import asyncio
+import gzip
 import json
 import os
 import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -48,7 +48,6 @@ from crawl4ai.async_dispatcher import SemaphoreDispatcher
 # ── Environment ──────────────────────────────────────────────────────────────
 
 def _read_env():
-    """Read .env file manually."""
     env = dict(os.environ)
     try:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
@@ -79,6 +78,10 @@ BEDROCK_MODEL_ID = 'eu.amazon.nova-micro-v1:0'
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
+# Common Crawl Index
+CC_INDEX_URL = "https://index.commoncrawl.org/CC-MAIN-2024-51-index"
+CC_WARC_BASE = "https://data.commoncrawl.org/"
+
 ENTITY_RE_STR = (
     r'(PTY|LTD|LIMITED|LLC|INC\b|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|'
     r'COUNCIL|MANAGEMENT|ASSETS|VILLAGES|HOLIDAY|CARAVAN|PARKS|RESORT|'
@@ -88,7 +91,35 @@ ENTITY_RE_STR = (
 
 EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 
-# Domains to skip in Serper results — social media, registries, junk
+# Contact page path keywords (for filtering CC results + building crawl URLs)
+CONTACT_PATHS = {
+    'about', 'about-us', 'team', 'our-team', 'leadership',
+    'leadership-team', 'board', 'board-of-directors',
+    'contact', 'contact-us', 'our-story', 'people', 'staff',
+    'management', 'executive-team', 'directors', 'our-people',
+    'who-we-are', 'meet-the-team', 'company',
+}
+
+# Crawl paths for live crawl4ai fallback (most productive paths only)
+CRAWL_PATHS = ['/about', '/about-us', '/team', '/our-team', '/contact', '/contact-us']
+
+# Entity name stop words for domain guessing
+ENTITY_STOP = {
+    'pty', 'ltd', 'limited', 'the', 'trustee', 'for', 'trust', 'no',
+    'as', 'of', 'and', 'trading', 'operations', 'proprietary', 'company',
+    'abn', 'atf', 'inc', 'llc', 'corp', 'corporation', 'group',
+    'australia', 'australian', 'aust', 'nsw', 'qld', 'vic',
+    'tas', 'sa', 'wa', 'nt', 'act', 'new', 'south', 'north',
+    'west', 'east', 'central',
+    'holiday', 'holidays', 'park', 'parks', 'caravan', 'resort',
+    'resorts', 'tourism', 'tourist', 'motel', 'hotel', 'retreat',
+    'village', 'villages', 'camping', 'camp',
+    'national', 'royal', 'first', 'holdings', 'assets', 'management',
+    'services', 'investments', 'properties', 'development',
+    'discretionary', 'family', 'subsidiary',
+}
+
+# Domains to skip in Serper results
 SEARCH_SKIP_DOMAINS = {
     "facebook.com", "instagram.com", "twitter.com", "linkedin.com",
     "tiktok.com", "youtube.com", "pinterest.com",
@@ -98,11 +129,17 @@ SEARCH_SKIP_DOMAINS = {
     "researchgate.net", "academia.edu",
 }
 
-# Personal email providers — accept matches from these even if not hotel domain
 PERSONAL_EMAIL_DOMAINS = {
     "gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "live.com",
     "icloud.com", "me.com", "protonmail.com", "proton.me",
     "bigpond.com", "optusnet.com.au", "westnet.com.au", "internode.on.net",
+}
+
+GENERIC_EMAIL_PREFIXES = {
+    'info', 'admin', 'contact', 'hello', 'enquiries', 'bookings',
+    'reservations', 'reception', 'sales', 'support', 'help',
+    'noreply', 'no-reply', 'stay', 'office', 'mail', 'enquiry',
+    'book', 'general', 'accounts', 'marketing',
 }
 
 AU_PHONE_RE = re.compile(
@@ -148,14 +185,16 @@ class DMTarget:
     hotel_id: int
     hotel_name: str
     hotel_website: str
-    entity_name: Optional[str] = None  # e.g. "XYZ Pty Ltd" if hotel has one
+    entity_name: Optional[str] = None
+    # Domains to try for email patterns — ordered by preference
+    all_domains: list = field(default_factory=list)
     # Results
     found_email: Optional[str] = None
     found_phone: Optional[str] = None
     email_verified: bool = False
-    email_source: Optional[str] = None  # "o365", "smtp", "serper_crawl", "llm_extract"
+    email_source: Optional[str] = None
     phone_source: Optional[str] = None
-    all_emails: list[str] = field(default_factory=list)  # every email found (generic included)
+    all_emails: list = field(default_factory=list)
 
 
 # ── Utilities ────────────────────────────────────────────────────────────────
@@ -169,7 +208,6 @@ def _get_domain(url: str) -> str:
 
 
 def _clean_text_for_llm(md: str) -> str:
-    """Strip crawl4ai markdown artifacts to reduce LLM token waste."""
     md = html_unescape(md)
     md = re.sub(r'<[^>]+>', ' ', md)
     md = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', md)
@@ -182,14 +220,100 @@ def _clean_text_for_llm(md: str) -> str:
     return md.strip()
 
 
+def _entity_to_domain_guesses(entity_name: str) -> list[str]:
+    """Generate plausible domain names from entity name.
+
+    "INGENIA PTY LTD" → ["ingenia.com.au", "ingenia.com"]
+    "HAMPSHIRE VILLAGES PTY LTD" → ["hampshire.com.au", "hampshire.com"]
+    """
+    words = re.sub(r'[^a-zA-Z0-9\s]', '', entity_name.lower()).split()
+    words = [w for w in words if w not in ENTITY_STOP and len(w) >= 4]
+    if not words:
+        return []
+
+    guesses = []
+    seen = set()
+    for w in words:
+        if w not in seen:
+            seen.add(w)
+            guesses.append(w)
+    # Also try first two words combined
+    if len(words) >= 2:
+        combo = words[0] + words[1]
+        if combo not in seen:
+            guesses.append(combo)
+
+    domains = []
+    for g in guesses:
+        domains.append(f"{g}.com.au")
+        domains.append(f"{g}.com")
+    return domains
+
+
+def _is_contact_url(url: str) -> bool:
+    """Check if URL looks like a contact/about/team page (or homepage)."""
+    path = urlparse(url).path.lower().strip('/')
+    if not path:
+        return True  # Homepage
+    return any(p in path for p in CONTACT_PATHS)
+
+
+def _match_email_to_person(target: DMTarget, emails: list[str]) -> Optional[str]:
+    """Try to match an email to a specific person by name. Returns best match or None."""
+    name_parts = target.full_name.lower().split()
+    first = name_parts[0] if name_parts else ""
+    last = name_parts[-1] if len(name_parts) > 1 else ""
+    if not (first and last and len(first) > 1 and len(last) > 1):
+        return None
+
+    hotel_domain = _get_domain(target.hotel_website) if target.hotel_website else ""
+    target_domains = set(target.all_domains)
+
+    best_email = None
+    best_score = -1
+
+    for e in emails:
+        parts = e.split('@')
+        if len(parts) != 2:
+            continue
+        local = parts[0].lower()
+        email_domain = parts[1].lower()
+
+        if local in GENERIC_EMAIL_PREFIXES:
+            continue
+
+        # Name match: require first AND last name parts in the local part
+        name_match = False
+        if first in local and last in local:
+            name_match = True
+        elif local.startswith(first[0]) and last in local:
+            name_match = True
+        elif last in local and local.startswith(first[:2]):
+            name_match = True
+        if not name_match:
+            continue
+
+        # Score by domain relevance
+        if hotel_domain and (email_domain == hotel_domain or email_domain.endswith('.' + hotel_domain)):
+            score = 4
+        elif email_domain in target_domains:
+            score = 3
+        elif email_domain in PERSONAL_EMAIL_DOMAINS:
+            score = 2
+        else:
+            score = 1
+
+        if score > best_score:
+            best_email = e
+            best_score = score
+
+    return best_email
+
+
 # ── Step 1: Load DMs needing contacts ────────────────────────────────────────
 
 async def load_dms_needing_contacts(conn, cfg: dict, need: str = "email") -> list[DMTarget]:
-    """Load decision makers who have names but are missing contact info.
-
-    Args:
-        need: "email" (missing email), "phone" (missing phone), "both" (missing both)
-    """
+    """Load decision makers who have names but are missing contact info."""
     jc = cfg.get("join") or ""
     wc = cfg["where"]
 
@@ -197,7 +321,7 @@ async def load_dms_needing_contacts(conn, cfg: dict, need: str = "email") -> lis
         contact_filter = "AND (dm.email IS NULL OR dm.email = '')"
     elif need == "phone":
         contact_filter = "AND (dm.phone IS NULL OR dm.phone = '')"
-    else:  # both
+    else:
         contact_filter = "AND (dm.email IS NULL OR dm.email = '') AND (dm.phone IS NULL OR dm.phone = '')"
 
     rows = await conn.fetch(
@@ -213,7 +337,7 @@ async def load_dms_needing_contacts(conn, cfg: dict, need: str = "email") -> lis
         ENTITY_RE_STR,
     )
 
-    # Also load entity names for these hotels
+    # Load entity names (DMs matching entity regex on same hotels)
     hotel_ids = list({r['hotel_id'] for r in rows})
     entity_map = {}
     if hotel_ids:
@@ -240,58 +364,530 @@ async def load_dms_needing_contacts(conn, cfg: dict, need: str = "email") -> lis
     return targets
 
 
-# ── Step 2: Email pattern discovery ──────────────────────────────────────────
+# ── Step 2: Domain discovery ─────────────────────────────────────────────────
 
-async def email_pattern_discovery(targets: list[DMTarget]) -> int:
-    """Try email pattern guessing + O365/SMTP verification for each target."""
-    from lib.owner_discovery.email_discovery import discover_emails
+async def discover_domains(conn, targets: list[DMTarget]) -> None:
+    """Populate all_domains for each target: hotel domain + entity domains + guesses."""
+    entity_groups = defaultdict(list)
+    for t in targets:
+        hd = _get_domain(t.hotel_website)
+        if hd:
+            t.all_domains.append(hd)
+        if t.entity_name:
+            entity_groups[t.entity_name].append(t)
 
-    # Group by domain to avoid duplicate DNS/MX lookups
-    needs_email = [t for t in targets if not t.found_email and t.hotel_website]
-    if not needs_email:
-        return 0
+    for entity_name, entity_ts in entity_groups.items():
+        hotel_ids = list({t.hotel_id for t in entity_ts})
 
-    sem = asyncio.Semaphore(20)
+        entity_urls = await conn.fetch(
+            "SELECT DISTINCT raw_source_url FROM sadie_gtm.hotel_decision_makers"
+            " WHERE hotel_id = ANY($1) AND raw_source_url IS NOT NULL"
+            " AND raw_source_url LIKE 'http%'"
+            " AND raw_source_url NOT LIKE '%abr.business%'"
+            " AND raw_source_url NOT LIKE '%abr.gov%'"
+            " AND raw_source_url NOT LIKE '%big4.com.au%'"
+            " AND raw_source_url NOT LIKE '%businessnews%'"
+            " AND raw_source_url NOT LIKE '%hotelconversation%'"
+            " AND raw_source_url NOT LIKE '%californiarevealed%'",
+            hotel_ids,
+        )
+        for r in entity_urls:
+            domain = _get_domain(r['raw_source_url'])
+            if domain:
+                for t in entity_ts:
+                    if domain not in t.all_domains:
+                        t.all_domains.append(domain)
+
+        hotel_websites = await conn.fetch(
+            "SELECT DISTINCT website FROM sadie_gtm.hotels"
+            " WHERE id = ANY($1) AND website IS NOT NULL AND website != ''",
+            hotel_ids,
+        )
+        for r in hotel_websites:
+            d = _get_domain(r['website'])
+            if d:
+                for t in entity_ts:
+                    if d not in t.all_domains:
+                        t.all_domains.append(d)
+
+        guesses = _entity_to_domain_guesses(entity_name)
+        for t in entity_ts:
+            for g in guesses:
+                if g not in t.all_domains:
+                    t.all_domains.append(g)
+
+    # Summary
+    total_domains = len({d for t in targets for d in t.all_domains})
+    avg = sum(len(t.all_domains) for t in targets) / len(targets) if targets else 0
+    logger.info(f"Domain discovery: {total_domains} unique domains, avg {avg:.1f} per target")
+
+
+# ── Step 3: Common Crawl harvest ─────────────────────────────────────────────
+
+async def _cc_query(client: httpx.AsyncClient, url_pattern: str, limit: int = 200) -> list[dict]:
+    """Query CC Index API. Returns list of entry dicts."""
+    try:
+        resp = await client.get(CC_INDEX_URL, params={
+            'url': url_pattern, 'output': 'json', 'limit': limit,
+        }, timeout=15.0)
+        if resp.status_code != 200:
+            return []
+        entries = []
+        for line in resp.text.strip().split('\n'):
+            try:
+                entries.append(json.loads(line))
+            except Exception:
+                pass
+        return entries
+    except Exception as e:
+        logger.debug(f"CC query error for {url_pattern}: {e}")
+        return []
+
+
+async def _cc_fetch_warc(client: httpx.AsyncClient, entry: dict) -> tuple[str, str]:
+    """Fetch one WARC record from CC archive and extract HTML. Returns (url, html)."""
+    url = entry.get('url', '')
+    try:
+        filename = entry['filename']
+        offset = int(entry['offset'])
+        length = int(entry['length'])
+
+        # Skip huge pages (>500KB compressed)
+        if length > 500_000:
+            return url, ''
+
+        resp = await client.get(
+            f"{CC_WARC_BASE}{filename}",
+            headers={'Range': f'bytes={offset}-{offset+length-1}'},
+            timeout=30.0,
+        )
+        if resp.status_code not in (200, 206):
+            return url, ''
+
+        raw = gzip.decompress(resp.content)
+
+        # WARC record: WARC-header \r\n\r\n HTTP-header \r\n\r\n body
+        parts = raw.split(b'\r\n\r\n', 2)
+        if len(parts) < 3:
+            return url, ''
+
+        html_bytes = parts[2]
+        encoding = entry.get('encoding', 'UTF-8') or 'UTF-8'
+        try:
+            return url, html_bytes.decode(encoding)
+        except Exception:
+            return url, html_bytes.decode('utf-8', errors='replace')
+    except Exception as e:
+        logger.debug(f"WARC fetch error for {url}: {e}")
+        return url, ''
+
+
+async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
+    """Common Crawl: search + fetch per domain pipelined — no waiting between steps.
+
+    Returns {url: html} of fetched pages.
+    """
+    all_domains = {d for t in targets for d in t.all_domains}
+    if not all_domains:
+        return {}
+
+    logger.info(f"CC: searching+fetching {len(all_domains)} domains...")
+
+    fetched_pages: dict[str, str] = {}
+    search_sem = asyncio.Semaphore(50)
+    fetch_sem = asyncio.Semaphore(200)
+    domains_hit = 0
+
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        limits=httpx.Limits(max_connections=500, max_keepalive_connections=50),
+    ) as client:
+
+        async def _fetch_entry(entry):
+            async with fetch_sem:
+                url, html = await _cc_fetch_warc(client, entry)
+            if html and len(html) >= 100:
+                fetched_pages[url] = html
+
+        async def _search_and_fetch(domain):
+            nonlocal domains_hit
+            async with search_sem:
+                entries = await _cc_query(client, f'*.{domain}/*', limit=200)
+            if not entries:
+                return
+            entries = [e for e in entries if 'html' in (e.get('mime', '') + e.get('mime-detected', ''))]
+            contact_entries = [e for e in entries if _is_contact_url(e.get('url', ''))]
+            if not contact_entries:
+                return
+            domains_hit += 1
+            # Immediately start fetching WARC records (don't wait for other domains)
+            await asyncio.gather(*[_fetch_entry(e) for e in contact_entries])
+
+        await asyncio.gather(*[_search_and_fetch(d) for d in all_domains])
+
+    logger.info(f"CC: {domains_hit}/{len(all_domains)} domains hit, "
+                f"{len(fetched_pages)} pages fetched")
+    return fetched_pages
+
+
+# ── Step 3b: httpx page fetch (primary live fetcher) ─────────────────────────
+
+async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
+    """Fetch contact pages via plain httpx for all target domains.
+
+    Returns {url: html} of all successfully fetched pages.
+    Extraction is done separately so this can run concurrently with CC harvest.
+    """
+    # Collect unique domains from all targets
+    domain_targets: dict[str, list[DMTarget]] = defaultdict(list)
+    for t in targets:
+        for d in t.all_domains[:5]:  # Top 5 domains per person
+            domain_targets[d].append(t)
+
+    urls_to_fetch: list[str] = []
+    url_domain_map: dict[str, str] = {}
+    for domain in domain_targets:
+        # Homepage
+        url = f"https://{domain}/"
+        if url not in url_domain_map:
+            urls_to_fetch.append(url)
+            url_domain_map[url] = domain
+        # Contact paths
+        for path in CRAWL_PATHS:
+            url = f"https://{domain}{path}"
+            if url not in url_domain_map:
+                urls_to_fetch.append(url)
+                url_domain_map[url] = domain
+
+    if not urls_to_fetch:
+        return {}
+
+    logger.info(f"httpx: fetching {len(urls_to_fetch)} pages across {len(domain_targets)} domains...")
+
+    fetched: dict[str, str] = {}
+
+    async def _fetch_one(client: httpx.AsyncClient, url: str):
+        try:
+            resp = await client.get(url, follow_redirects=True, timeout=10.0)
+            if resp.status_code == 200:
+                ct = resp.headers.get('content-type', '')
+                if 'html' in ct or 'text' in ct:
+                    text = resp.text
+                    if len(text) >= 100:
+                        fetched[url] = text
+        except Exception:
+            pass
+
+    async with httpx.AsyncClient(
+        headers={"User-Agent": "Mozilla/5.0 (compatible; SadieGTM/1.0)"},
+        timeout=10.0,
+        limits=httpx.Limits(max_connections=1000, max_keepalive_connections=100),
+    ) as client:
+        await asyncio.gather(*[_fetch_one(client, u) for u in urls_to_fetch])
+
+    logger.info(f"httpx: fetched {len(fetched)}/{len(urls_to_fetch)} pages with HTML content")
+    return fetched
+
+
+def extract_contacts_from_pages(targets: list[DMTarget], pages: dict[str, str],
+                                cfg: dict, source_label: str = "httpx_fetch") -> int:
+    """Extract emails/phones from fetched HTML pages and match to targets.
+
+    Works for both CC-fetched and httpx-fetched pages.
+    Returns number of targets that got a new email match.
+    """
+    country = cfg.get('country', 'AU')
+    phone_re = PHONE_PATTERNS.get(country, PHONE_PATTERNS['DEFAULT'])
+
+    # Build domain → targets mapping
+    domain_targets: dict[str, list[DMTarget]] = defaultdict(list)
+    for t in targets:
+        for d in t.all_domains:
+            domain_targets[d].append(t)
+
     found_count = 0
+    for url, html in pages.items():
+        text = html_unescape(html)
+        page_emails = list(set(EMAIL_RE.findall(text)))
+        page_phones = phone_re.findall(text)
 
-    async def _try_one(t: DMTarget):
-        nonlocal found_count
-        domain = _get_domain(t.hotel_website)
-        if not domain or '.' not in t.full_name.strip().replace('.', ''):
-            return
-        # Need at least first + last name
-        parts = t.full_name.strip().split()
-        if len(parts) < 2:
-            return
+        if not page_emails and not page_phones:
+            continue
 
-        async with sem:
-            results = await discover_emails(domain=domain, full_name=t.full_name)
+        page_domain = _get_domain(url)
+        relevant_targets = domain_targets.get(page_domain, [])
 
-        verified = [d for d in results if d['verified']]
-        # Prefer personal (name-based) over role-based
-        personal = [d for d in verified if not any(
-            d['email'].lower().startswith(r + '@') for r in ['gm', 'owner', 'manager', 'director', 'management']
-        )]
+        for t in relevant_targets:
+            for e in page_emails:
+                if e.lower() not in {x.lower() for x in t.all_emails}:
+                    t.all_emails.append(e)
 
-        if personal:
-            t.found_email = personal[0]['email']
-            t.email_verified = True
-            t.email_source = personal[0]['method']
-            found_count += 1
-        elif verified:
-            t.found_email = verified[0]['email']
-            t.email_verified = True
-            t.email_source = verified[0]['method']
-            found_count += 1
+            if not t.found_email:
+                best = _match_email_to_person(t, page_emails)
+                if best:
+                    t.found_email = best
+                    t.email_source = source_label
+                    found_count += 1
+                    logger.debug(f"  {source_label}: {t.full_name} → {best}")
 
-    await asyncio.gather(*[_try_one(t) for t in needs_email])
+            if not t.found_phone and page_phones:
+                t.found_phone = page_phones[0]
+                t.phone_source = source_label
+
     return found_count
 
 
-# ── Step 3: Serper search + crawl ────────────────────────────────────────────
+# ── Step 4: Email pattern discovery ──────────────────────────────────────────
+
+async def _detect_email_providers(domains: set[str]) -> dict[str, Optional[str]]:
+    """Batch-detect email provider for each domain via MX lookup.
+
+    Returns {domain: "microsoft_365" | "google_workspace" | None}.
+    O365 domains use fast HTTP verification; others fall through to SMTP.
+    """
+    results = {}
+
+    def _check_mx(domain):
+        try:
+            import dns.resolver
+            resolver = dns.resolver.Resolver()
+            resolver.timeout = 5
+            resolver.lifetime = 8
+            mx_records = resolver.resolve(domain, "MX")
+            mx_hosts = [str(r.exchange).rstrip(".").lower() for r in mx_records]
+            mx_str = " ".join(mx_hosts)
+            if "outlook.com" in mx_str or "protection.outlook" in mx_str:
+                return "microsoft_365"
+            elif "google" in mx_str or "aspmx" in mx_str:
+                return "google_workspace"
+            return None
+        except Exception:
+            return None
+
+    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(100)
+
+    async def _check_one(domain):
+        async with sem:
+            provider = await loop.run_in_executor(None, _check_mx, domain)
+        results[domain] = provider
+
+    await asyncio.gather(*[_check_one(d) for d in domains])
+    o365_count = sum(1 for v in results.values() if v == "microsoft_365")
+    logger.info(f"MX detection: {len(results)} domains checked, {o365_count} are O365")
+    return results
+
+
+async def email_pattern_discovery(targets: list[DMTarget],
+                                   providers: dict[str, Optional[str]] | None = None) -> int:
+    """Try email pattern guessing + O365/SMTP verification on ALL domains per target.
+
+    If providers dict is passed (from concurrent MX detection), uses it directly.
+    Otherwise detects providers inline.
+    """
+    from lib.owner_discovery.email_discovery import discover_emails
+
+    needs_email = [t for t in targets if not t.found_email]
+    if not needs_email:
+        return 0
+
+    # Use pre-computed providers or detect now
+    if providers is None:
+        all_domains = {d for t in needs_email for d in t.all_domains}
+        providers = await _detect_email_providers(all_domains)
+
+    # Group targets by domain to batch verify — avoids repeating SMTP for same domain
+    domain_people: dict[str, list[DMTarget]] = defaultdict(list)
+    for t in needs_email:
+        parts = t.full_name.strip().split()
+        if len(parts) < 2:
+            continue
+        for d in t.all_domains:
+            if d and '.' in d:
+                domain_people[d].append(t)
+
+    found_count = 0
+
+    async def _verify_domain(domain: str, people: list[DMTarget]):
+        """Verify all people on a single domain in one batch."""
+        nonlocal found_count
+        provider = providers.get(domain)
+
+        async def _discover_one(t):
+            try:
+                return t, await discover_emails(
+                    domain=domain, full_name=t.full_name,
+                    email_provider=provider)
+            except Exception as e:
+                logger.debug(f"  Email discovery error for {t.full_name}@{domain}: {e}")
+                return t, []
+
+        results_list = await asyncio.gather(*[_discover_one(t) for t in people])
+
+        for t, results in results_list:
+            # Collect all candidate emails
+            for d in results:
+                e = d.get('email', '')
+                if e and e.lower() not in {x.lower() for x in t.all_emails}:
+                    t.all_emails.append(e)
+
+            if t.found_email and t.email_verified:
+                continue  # Already have verified email from another domain
+
+            verified = [d for d in results if d.get('verified')]
+            unverified = [d for d in results if not d.get('verified')]
+            personal_v = [d for d in verified if not any(
+                d['email'].lower().startswith(r + '@')
+                for r in ['gm', 'owner', 'manager', 'director', 'management']
+            )]
+
+            if personal_v:
+                t.found_email = personal_v[0]['email']
+                t.email_verified = True
+                t.email_source = f"email_pattern_{personal_v[0].get('method', 'unknown')}"
+                if t.email_verified:
+                    found_count += 1
+                logger.debug(f"  Pattern: {t.full_name} → {t.found_email} (verified) on {domain}")
+            elif verified:
+                t.found_email = verified[0]['email']
+                t.email_verified = True
+                t.email_source = f"email_pattern_{verified[0].get('method', 'unknown')}"
+                found_count += 1
+            elif unverified and not t.found_email:
+                # Save best unverified — may be overwritten by verified from another domain
+                personal_u = [d for d in unverified if not any(
+                    d['email'].lower().startswith(r + '@')
+                    for r in ['gm', 'owner', 'manager', 'director', 'management']
+                )]
+                best = personal_u[0] if personal_u else unverified[0]
+                t.found_email = best['email']
+                t.email_verified = False
+                t.email_source = f"email_pattern_{best.get('method', 'unknown')}_unverified"
+                found_count += 1
+                logger.debug(f"  Pattern: {t.full_name} → {t.found_email} (unverified) on {domain}")
+
+    # Run all domains concurrently
+    await asyncio.gather(*[_verify_domain(d, ppl) for d, ppl in domain_people.items()])
+    return found_count
+
+
+# ── Step 5: crawl4ai live crawl fallback ─────────────────────────────────────
+
+async def crawl4ai_enrich(targets: list[DMTarget], cfg: dict,
+                          cc_fetched_urls: set, concurrency: int = 10) -> int:
+    """Live crawl hotel/entity contact pages not found in Common Crawl."""
+    needs = [t for t in targets if not t.found_email]
+    if not needs:
+        return 0
+
+    # Collect unique domains from targets still needing email
+    domain_targets: dict[str, list[DMTarget]] = defaultdict(list)
+    for t in needs:
+        for d in t.all_domains[:3]:  # Top 3 domains per person
+            domain_targets[d].append(t)
+
+    # Build URLs: domain × contact paths, minus what CC already fetched
+    # Normalize CC URLs to comparable form
+    cc_paths = set()
+    for u in cc_fetched_urls:
+        try:
+            p = urlparse(u)
+            cc_paths.add(f"{_get_domain(u)}{p.path.rstrip('/')}")
+        except Exception:
+            pass
+
+    urls_to_crawl = []
+    url_domain_map: dict[str, str] = {}
+    for domain in domain_targets:
+        for path in CRAWL_PATHS:
+            check_key = f"{domain}{path}"
+            if check_key not in cc_paths:
+                url = f"https://{domain}{path}"
+                if url not in url_domain_map:
+                    urls_to_crawl.append(url)
+                    url_domain_map[url] = domain
+        # Also homepage
+        if f"{domain}" not in cc_paths and f"{domain}/" not in cc_paths:
+            url = f"https://{domain}/"
+            if url not in url_domain_map:
+                urls_to_crawl.append(url)
+                url_domain_map[url] = domain
+
+    if not urls_to_crawl:
+        logger.info("crawl4ai: no additional pages to crawl (all covered by CC)")
+        return 0
+
+    logger.info(f"crawl4ai: live crawling {len(urls_to_crawl)} pages for {len(needs)} DMs...")
+
+    browser_config = BrowserConfig(
+        headless=True, text_mode=True, light_mode=True, verbose=False,
+        extra_args=["--disable-gpu", "--disable-extensions",
+                     "--disable-dev-shm-usage", "--no-first-run",
+                     "--disable-background-networking"],
+    )
+    run_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        wait_until="domcontentloaded",
+        delay_before_return_html=0,
+        mean_delay=0, max_range=0,
+        page_timeout=10000,
+        scan_full_page=False,
+        wait_for_images=False,
+        excluded_tags=["nav", "footer", "script", "style", "noscript", "header", "aside"],
+    )
+
+    country = cfg.get('country', 'AU')
+    phone_re = PHONE_PATTERNS.get(country, PHONE_PATTERNS['DEFAULT'])
+
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        crawl_results = await crawler.arun_many(
+            urls=urls_to_crawl, config=run_config,
+            dispatcher=SemaphoreDispatcher(
+                max_session_permit=min(concurrency, len(urls_to_crawl))),
+        )
+
+    found_count = 0
+    for cr in crawl_results:
+        if not cr.success:
+            continue
+        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown')
+              else cr.markdown) or ""
+        if len(md) < 50:
+            continue
+
+        text = html_unescape(md)
+        page_emails = list(set(EMAIL_RE.findall(text)))
+        page_phones = phone_re.findall(text)
+
+        if not page_emails and not page_phones:
+            continue
+
+        page_domain = url_domain_map.get(cr.url, _get_domain(cr.url))
+        relevant_targets = domain_targets.get(page_domain, [])
+
+        for t in relevant_targets:
+            for e in page_emails:
+                if e.lower() not in {x.lower() for x in t.all_emails}:
+                    t.all_emails.append(e)
+
+            if not t.found_email:
+                best = _match_email_to_person(t, page_emails)
+                if best:
+                    t.found_email = best
+                    t.email_source = "crawl4ai"
+                    found_count += 1
+                    logger.debug(f"  crawl4ai: {t.full_name} → {best}")
+
+            if not t.found_phone and page_phones:
+                t.found_phone = page_phones[0]
+                t.phone_source = "crawl4ai"
+
+    return found_count
+
+
+# ── Step 6: Serper search + crawl (opt-in) ───────────────────────────────────
 
 async def _serper_search(query: str, gl: str = "au", num: int = 5) -> list[dict]:
-    """Search via Serper API. Returns list of {title, link, snippet}."""
     if not SERPER_API_KEY:
         return []
     try:
@@ -303,8 +899,7 @@ async def _serper_search(query: str, gl: str = "au", num: int = 5) -> list[dict]
             )
             if resp.status_code != 200:
                 return []
-            data = resp.json()
-            return data.get("organic", [])
+            return resp.json().get("organic", [])
     except Exception as e:
         logger.debug(f"Serper error: {e}")
         return []
@@ -316,7 +911,6 @@ BINARY_EXT_RE = re.compile(
 
 
 def _filter_serper_results(results: list[dict]) -> list[str]:
-    """Filter Serper results to useful URLs, skipping social/OTA/registry sites."""
     urls = []
     for r in results:
         link = r.get("link", "")
@@ -327,20 +921,13 @@ def _filter_serper_results(results: list[dict]) -> list[str]:
         domain = _get_domain(link)
         if any(domain == skip or domain.endswith('.' + skip) for skip in SEARCH_SKIP_DOMAINS):
             continue
-        # Catch TripAdvisor country variants (tripadvisor.ie, tripadvisor.co.nz, etc.)
-        if 'tripadvisor' in domain:
-            continue
         urls.append(link)
     return urls
 
 
-async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency: int = 10) -> int:
-    """Search for contact info via Serper + crawl found pages.
-
-    For each person still missing email, searches:
-      "{full_name} {hotel_name} email contact"
-    Then crawls the top results and extracts emails/phones.
-    """
+async def serper_search_contacts(targets: list[DMTarget], cfg: dict,
+                                 concurrency: int = 10) -> int:
+    """Search for contact info via Serper + crawl found pages."""
     needs = [t for t in targets if not t.found_email]
     if not needs:
         return 0
@@ -349,74 +936,45 @@ async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency
     country = cfg.get("country", "AU")
     phone_re = PHONE_PATTERNS.get(country, PHONE_PATTERNS["DEFAULT"])
 
-    # Step 3a: Serper search for each person
     logger.info(f"Serper: searching for {len(needs)} people...")
-    search_sem = asyncio.Semaphore(5)  # Don't hammer Serper
-    url_map: dict[str, list[DMTarget]] = {}  # url -> targets that need it
+    search_sem = asyncio.Semaphore(5)
+    url_map: dict[str, list[DMTarget]] = {}
 
     async def _search_one(t: DMTarget):
-        # Build query: "John Smith Big4 Riverside email contact"
         entity = t.entity_name or t.hotel_name
         query = f'"{t.full_name}" {entity} email contact'
         async with search_sem:
             results = await _serper_search(query, gl=gl)
 
-        # Check snippets for emails first (saves crawling)
-        name_parts = t.full_name.lower().split()
-        first = name_parts[0] if name_parts else ""
-        last = name_parts[-1] if len(name_parts) > 1 else ""
-        hotel_domain = _get_domain(t.hotel_website) if t.hotel_website else ""
-        best_email = None
-        best_score = -1
+        # Check snippets for emails first
         for r in results:
             snippet = r.get("snippet", "")
             emails = EMAIL_RE.findall(snippet)
             for e in emails:
-                # Save every email into all_emails
                 if e.lower() not in {x.lower() for x in t.all_emails}:
                     t.all_emails.append(e)
-                el = e.split('@')[0].lower()
-                email_domain = e.split('@')[1].lower() if '@' in e else ""
-                # Name-matched: require both first AND last name parts
-                if not (first and last and (
-                    (first in el and last in el) or
-                    (first[0] in el and last in el and el.index(first[0]) < el.index(last))
-                )):
-                    continue
-                # Score: hotel domain > personal > other
-                if hotel_domain and (email_domain == hotel_domain or email_domain.endswith('.' + hotel_domain)):
-                    score = 3
-                elif email_domain in PERSONAL_EMAIL_DOMAINS:
-                    score = 2
-                else:
-                    score = 1
-                if score > best_score:
-                    best_email = e
-                    best_score = score
-        if best_email:
-            t.found_email = best_email
-            t.email_source = "serper_snippet"
-            logger.debug(f"  Found email in snippet: {t.full_name} -> {best_email} (score={best_score})")
-            return
+            if not t.found_email:
+                best = _match_email_to_person(t, emails)
+                if best:
+                    t.found_email = best
+                    t.email_source = "serper_snippet"
+                    return
 
         # Collect URLs to crawl
         urls = _filter_serper_results(results)
-        for url in urls[:3]:  # top 3 per person
+        for url in urls[:3]:
             url_map.setdefault(url, []).append(t)
 
     await asyncio.gather(*[_search_one(t) for t in needs])
 
-    # How many still need crawling?
-    still_needs = [t for t in needs if not t.found_email]
-    urls_to_crawl = [url for url, targets in url_map.items()
-                     if any(not t.found_email for t in targets)]
+    # Crawl found pages
+    urls_to_crawl = [url for url, targets_list in url_map.items()
+                     if any(not t.found_email for t in targets_list)]
 
     if not urls_to_crawl:
-        snippet_found = sum(1 for t in needs if t.found_email)
-        return snippet_found
+        return sum(1 for t in needs if t.found_email)
 
-    # Step 3b: Crawl found pages
-    logger.info(f"Crawling {len(urls_to_crawl)} pages from Serper results...")
+    logger.info(f"Serper: crawling {len(urls_to_crawl)} pages...")
     browser_config = BrowserConfig(
         headless=True, text_mode=True, light_mode=True, verbose=False,
         extra_args=["--disable-gpu", "--disable-extensions", "--disable-dev-shm-usage",
@@ -436,72 +994,47 @@ async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency
     async with AsyncWebCrawler(config=browser_config) as crawler:
         crawl_results = await crawler.arun_many(
             urls=urls_to_crawl, config=run_config,
-            dispatcher=SemaphoreDispatcher(max_session_permit=min(concurrency, len(urls_to_crawl))),
+            dispatcher=SemaphoreDispatcher(
+                max_session_permit=min(concurrency, len(urls_to_crawl))),
         )
 
-    # Step 3c: Extract contacts from crawled pages
     found_count = 0
     for cr in crawl_results:
         if not cr.success:
             continue
-        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown') else cr.markdown) or ""
+        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown')
+              else cr.markdown) or ""
         if len(md) < 50:
             continue
 
-        page_emails = EMAIL_RE.findall(md)
+        page_emails = list(set(EMAIL_RE.findall(md)))
         page_phones = phone_re.findall(md)
-
-        # Match emails to targets that triggered this URL
         page_targets = url_map.get(cr.url, [])
-        for t in page_targets:
-            if t.found_email:
-                continue
-            name_parts = t.full_name.lower().split()
-            first = name_parts[0] if name_parts else ""
-            last = name_parts[-1] if len(name_parts) > 1 else ""
-            hotel_domain = _get_domain(t.hotel_website) if t.hotel_website else ""
-            best_email = None
-            best_score = -1
-            for e in page_emails:
-                el = e.split('@')[0].lower()
-                email_domain = e.split('@')[1].lower() if '@' in e else ""
-                # Name-matched emails
-                if first and last and (
-                    (first in el and last in el) or
-                    (first[0] in el and last in el and el.index(first[0]) < el.index(last))
-                ):
-                    if hotel_domain and (email_domain == hotel_domain or email_domain.endswith('.' + hotel_domain)):
-                        score = 3
-                    elif email_domain in PERSONAL_EMAIL_DOMAINS:
-                        score = 2
-                    else:
-                        score = 1
-                    if score > best_score:
-                        best_email = e
-                        best_score = score
-            if best_email:
-                t.found_email = best_email
-                t.email_verified = False
-                t.email_source = "serper_crawl"
-                found_count += 1
-                logger.debug(f"  Found email on page: {t.full_name} -> {best_email} (score={best_score})")
 
-            # Collect ALL emails from page into all_emails for this hotel
+        for t in page_targets:
             for e in page_emails:
                 if e.lower() not in {x.lower() for x in t.all_emails}:
                     t.all_emails.append(e)
+
+            if not t.found_email:
+                best = _match_email_to_person(t, page_emails)
+                if best:
+                    t.found_email = best
+                    t.email_verified = False
+                    t.email_source = "serper_crawl"
+                    found_count += 1
 
             if not t.found_phone and page_phones:
                 t.found_phone = page_phones[0]
                 t.phone_source = "serper_crawl"
 
-    # Step 3d: LLM extraction for pages that had text but no pattern match
-    # Group remaining targets by crawl URL for LLM batch
+    # LLM extraction for remaining
     llm_targets = []
     for cr in crawl_results:
         if not cr.success:
             continue
-        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown') else cr.markdown) or ""
+        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown')
+              else cr.markdown) or ""
         if len(md) < 100:
             continue
         page_targets = [t for t in url_map.get(cr.url, []) if not t.found_email]
@@ -509,8 +1042,7 @@ async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency
             llm_targets.append((cr.url, md, page_targets))
 
     if llm_targets:
-        logger.info(f"LLM extracting contacts from {len(llm_targets)} pages...")
-        sem = asyncio.Semaphore(10)
+        logger.info(f"Serper: LLM extracting from {len(llm_targets)} pages...")
 
         async def _llm_extract(url, md, page_targets):
             names = [t.full_name for t in page_targets]
@@ -523,15 +1055,10 @@ async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency
                 if match:
                     email = match.get('email')
                     if email and '@' in email:
-                        # Save to all_emails regardless
                         if email.lower() not in {x.lower() for x in t.all_emails}:
                             t.all_emails.append(email)
-                        # Only set as primary found_email if not generic
                         prefix = email.split('@')[0].lower()
-                        generic = {'info', 'admin', 'contact', 'hello', 'enquiries',
-                                   'bookings', 'reservations', 'reception', 'sales',
-                                   'support', 'help', 'noreply', 'no-reply', 'stay'}
-                        if prefix not in generic:
+                        if prefix not in GENERIC_EMAIL_PREFIXES:
                             t.found_email = email
                             t.email_verified = False
                             t.email_source = "llm_extract"
@@ -540,10 +1067,9 @@ async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency
                         t.found_phone = phone
                         t.phone_source = "llm_extract"
 
-        await asyncio.gather(*[_llm_extract(url, md, pts) for url, md, pts in llm_targets])
+        await asyncio.gather(*[_llm_extract(u, m, pts) for u, m, pts in llm_targets])
 
-    total_found = sum(1 for t in needs if t.found_email)
-    return total_found
+    return sum(1 for t in needs if t.found_email)
 
 
 # ── LLM extraction ───────────────────────────────────────────────────────────
@@ -559,10 +1085,7 @@ def _get_bedrock():
 
 
 async def llm_extract_contacts(text: str, names: list[str]) -> dict:
-    """Use LLM to extract contact info for specific people from page text.
-
-    Returns dict: {name_lower: {"email": ..., "phone": ...}}
-    """
+    """Use LLM to extract contact info for specific people from page text."""
     names_str = ", ".join(names)
     prompt = f"""Find email addresses and phone numbers for these specific people in the text below:
 {names_str}
@@ -652,7 +1175,7 @@ async def apply_results(conn, targets: list[DMTarget], dry_run: bool = True) -> 
             dm_ids, emails, phones, verified,
         )
 
-    # Save all scraped emails (including generic) to hotels.emails
+    # Save all scraped emails to hotels.emails
     if has_all_emails:
         hotel_ids = [t.hotel_id for t in has_all_emails]
         all_emails_arr = [t.all_emails for t in has_all_emails]
@@ -673,11 +1196,16 @@ async def apply_results(conn, targets: list[DMTarget], dry_run: bool = True) -> 
 # ── Main enrichment flow ─────────────────────────────────────────────────────
 
 async def enrich(args, cfg: dict):
-    """Main enrichment pipeline: email discovery → serper search → update."""
+    """Main enrichment pipeline.
+
+    Sequential: Load targets + discover domains (needs DB)
+    Concurrent: CC harvest | httpx fetch | (MX detect → email patterns)
+    Optional: Serper search
+    """
     conn = await asyncpg.connect(**DB_CONFIG)
     label = cfg["label"]
 
-    # Step 1: Load targets
+    # ── Phase 1: Load + discover (sequential) ──
     targets = await load_dms_needing_contacts(conn, cfg, need="email")
     logger.info(f"Found {len(targets)} {label} DMs missing email")
 
@@ -686,7 +1214,6 @@ async def enrich(args, cfg: dict):
         await conn.close()
         return
 
-    # Apply offset/limit
     if args.offset and args.offset < len(targets):
         targets = targets[args.offset:]
         logger.info(f"Skipping first {args.offset} DMs (--offset)")
@@ -694,29 +1221,58 @@ async def enrich(args, cfg: dict):
         targets = targets[:args.limit]
         logger.info(f"Limited to {len(targets)} DMs (--limit)")
 
-    # Step 2: Email pattern guessing + verification
-    logger.info(f"Step 1: Email pattern discovery for {len(targets)} people...")
-    email_found = await email_pattern_discovery(targets)
-    logger.info(f"Step 1 done: {email_found}/{len(targets)} found via email patterns")
+    await discover_domains(conn, targets)
+    await conn.close()  # Done with DB reads — release connection
 
-    # Step 3: Serper search for remaining (opt-in, expensive)
+    # Collect all domains for concurrent tasks
+    all_domains = {d for t in targets for d in t.all_domains}
+
+    # ── All I/O fires concurrently ──
+    # httpx: blast all URLs at once (independent domains, no throttle)
+    # CC: search+fetch pipelined per domain (CC Index has some latency)
+    # MX → email patterns: detect providers then verify all domains×people
+    async def _mx_then_email_patterns():
+        providers = await _detect_email_providers(all_domains)
+        found = await email_pattern_discovery(targets, providers=providers)
+        return providers, found
+
+    logger.info(f"Firing all I/O concurrently ({len(all_domains)} domains)...")
+
+    # All three are independent — they all start at the same instant
+    httpx_task = asyncio.create_task(httpx_fetch_pages(targets, cfg))
+    cc_task = asyncio.create_task(cc_harvest(targets, cfg))
+    patterns_task = asyncio.create_task(_mx_then_email_patterns())
+
+    # httpx finishes first (unconstrained), extract immediately
+    httpx_pages = await httpx_task
+    httpx_found = extract_contacts_from_pages(targets, httpx_pages, cfg, "httpx_fetch")
+    logger.info(f"httpx done: {httpx_found} emails from {len(httpx_pages)} pages")
+
+    # CC and patterns finish on their own schedule
+    cc_pages, (providers, pattern_found) = await asyncio.gather(cc_task, patterns_task)
+    cc_found = extract_contacts_from_pages(targets, cc_pages, cfg, "cc_harvest")
+    logger.info(f"CC: {cc_found} emails ({len(cc_pages)} pages), "
+                f"patterns: {pattern_found} emails")
+
+    # ── Serper search (opt-in) ──
     still_need = sum(1 for t in targets if not t.found_email)
     if still_need > 0 and args.serper:
         if not SERPER_API_KEY:
             logger.warning("--serper enabled but no SERPER_API_KEY set — skipping")
         else:
-            logger.info(f"Step 2: Serper search for {still_need} remaining people...")
-            serper_found = await serper_search_contacts(targets, cfg, concurrency=args.concurrency)
-            logger.info(f"Step 2 done: {serper_found} additional found via Serper")
+            logger.info(f"Phase 4: Serper search for {still_need} remaining...")
+            serper_found = await serper_search_contacts(
+                targets, cfg, concurrency=args.concurrency)
+            logger.info(f"Serper: {serper_found} found")
     elif still_need > 0 and not args.serper:
-        logger.info(f"Step 2 skipped: {still_need} still need email (use --serper to enable web search)")
+        logger.info(f"Serper skipped: {still_need} still need email (use --serper to enable)")
 
     # Results summary
     total_email = sum(1 for t in targets if t.found_email)
     total_phone = sum(1 for t in targets if t.found_phone)
     verified = sum(1 for t in targets if t.email_verified)
     total_all_emails = sum(len(t.all_emails) for t in targets)
-    hotels_with_emails = sum(1 for t in targets if t.all_emails)
+    hotels_with_emails = len({t.hotel_id for t in targets if t.all_emails})
 
     print(f"\n{'='*60}")
     print(f"{label.upper()} CONTACT ENRICHMENT RESULTS")
@@ -727,7 +1283,6 @@ async def enrich(args, cfg: dict):
     print(f"All emails scraped:  {total_all_emails} across {hotels_with_emails} hotels")
     print(f"Still missing email: {len(targets) - total_email}")
 
-    # Show by source
     sources = {}
     for t in targets:
         if t.email_source:
@@ -735,9 +1290,8 @@ async def enrich(args, cfg: dict):
     if sources:
         print(f"\nEmail sources:")
         for src, cnt in sorted(sources.items(), key=lambda x: -x[1]):
-            print(f"  {src:<25} {cnt:>5}")
+            print(f"  {src:<30} {cnt:>5}")
 
-    # Show found contacts
     found = [t for t in targets if t.found_email or t.found_phone]
     if found:
         print(f"\nFound contacts:")
@@ -752,7 +1306,8 @@ async def enrich(args, cfg: dict):
         if len(found) > 50:
             print(f"  ... and {len(found) - 50} more")
 
-    # Apply
+    # Reconnect to DB for writing results
+    conn = await asyncpg.connect(**DB_CONFIG)
     await apply_results(conn, targets, dry_run=not args.apply)
     await conn.close()
 
@@ -831,7 +1386,6 @@ async def audit(args, cfg: dict):
     for r in sources:
         print(f"  {r['src']:<30} {r['cnt']:>5}")
 
-    # Show sample of people missing email
     if args.verbose:
         samples = await conn.fetch(
             f"SELECT dm.full_name, dm.title, h.name AS hotel_name, h.website"
@@ -860,21 +1414,18 @@ async def main():
     parser.add_argument("--source", required=True,
                         help=f"Source config: {', '.join(SOURCE_CONFIGS.keys())}, or 'custom'")
     parser.add_argument("--where", type=str, default=None,
-                        help="Custom WHERE clause (required for --source custom)")
+                        help="Custom WHERE clause (for --source custom)")
 
-    # Modes
-    parser.add_argument("--enrich", action="store_true", default=True,
-                        help="Enrich DMs missing contacts (default)")
     parser.add_argument("--audit", action="store_true",
                         help="Print contact coverage stats")
 
-    # Options
     parser.add_argument("--apply", action="store_true", help="Write to DB (default: dry-run)")
     parser.add_argument("--serper", action="store_true",
                         help="Enable Serper web search (expensive, off by default)")
     parser.add_argument("--limit", type=int, default=None, help="Max DMs to process")
-    parser.add_argument("--offset", type=int, default=0, help="Skip first N DMs (for resumability)")
-    parser.add_argument("--concurrency", type=int, default=10, help="Browser concurrency for crawling")
+    parser.add_argument("--offset", type=int, default=0, help="Skip first N DMs")
+    parser.add_argument("--concurrency", type=int, default=10,
+                        help="Browser concurrency for crawling")
     parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
@@ -882,7 +1433,6 @@ async def main():
     logger.remove()
     logger.add(sys.stderr, level="DEBUG" if args.verbose else "INFO")
 
-    # Resolve source config
     if args.source == "custom":
         if not args.where:
             print("ERROR: --source custom requires --where")
@@ -897,7 +1447,8 @@ async def main():
     elif args.source in SOURCE_CONFIGS:
         cfg = SOURCE_CONFIGS[args.source]
     else:
-        print(f"ERROR: Unknown source '{args.source}'. Available: {', '.join(SOURCE_CONFIGS.keys())}, custom")
+        print(f"ERROR: Unknown source '{args.source}'. "
+              f"Available: {', '.join(SOURCE_CONFIGS.keys())}, custom")
         sys.exit(1)
 
     logger.info(f"Source: {cfg['label']} | Country: {cfg.get('country', '?')}")
