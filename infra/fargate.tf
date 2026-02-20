@@ -1963,6 +1963,55 @@ resource "aws_cloudwatch_event_target" "rms_availability" {
   }
 }
 
+# =============================================================================
+# CONTACT ENRICHMENT (find emails/phones for decision makers — on-demand)
+# =============================================================================
+# Run manually:
+#   aws ecs run-task --cluster sadie-gtm-cluster \
+#     --task-definition sadie-gtm-contact-enrichment \
+#     --launch-type FARGATE \
+#     --network-configuration "awsvpcConfiguration={subnets=[...],securityGroups=[...],assignPublicIp=ENABLED}" \
+#     --overrides '{"containerOverrides":[{"name":"contact-enrichment","command":["uv","run","python","workflows/enrich_contacts.py","--source","big4","--apply"]}]}'
+
+resource "aws_ecs_task_definition" "contact_enrichment" {
+  family                   = "${var.app_name}-contact-enrichment"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "1024"
+  memory                   = "2048"
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([{
+    name  = "contact-enrichment"
+    image = "${var.ecr_repo_url}:latest"
+
+    command = ["uv", "run", "python", "workflows/enrich_contacts.py", "--source", "big4", "--apply"]
+
+    environment = [
+      { name = "AWS_REGION", value = "eu-north-1" }
+    ]
+
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = "/${var.app_name}/database-url" },
+      { name = "CF_WORKER_PROXY_URL", valueFrom = "/${var.app_name}/cf-worker-url" },
+      { name = "CF_WORKER_AUTH_KEY", valueFrom = "/${var.app_name}/cf-proxy-key" },
+      { name = "SERPER_API_KEY", valueFrom = "/${var.app_name}/serper-api-key" },
+      { name = "AWS_ACCESS_KEY_ID", valueFrom = "/${var.app_name}/aws-access-key-id" },
+      { name = "AWS_SECRET_ACCESS_KEY", valueFrom = "/${var.app_name}/aws-secret-access-key" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.consumer.name
+        "awslogs-region"        = "eu-north-1"
+        "awslogs-stream-prefix" = "contact-enrichment"
+      }
+    }
+  }])
+}
+
 # Outputs
 output "cluster_name" {
   value = aws_ecs_cluster.main.name
@@ -2027,6 +2076,7 @@ output "scheduled_tasks" {
 output "on_demand_tasks" {
   description = "Tasks that can be run manually via aws ecs run-task"
   value = {
-    normalize_states = aws_ecs_task_definition.normalize_states.family
+    normalize_states     = aws_ecs_task_definition.normalize_states.family
+    contact_enrichment   = aws_ecs_task_definition.contact_enrichment.family
   }
 }

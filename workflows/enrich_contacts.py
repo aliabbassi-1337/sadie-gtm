@@ -24,6 +24,7 @@ Usage:
 import argparse
 import asyncio
 import base64
+import concurrent.futures
 import gzip
 import json
 import os
@@ -65,14 +66,32 @@ def _read_env():
 
 _ENV = _read_env()
 
-DB_CONFIG = dict(
-    host=_ENV['SADIE_DB_HOST'],
-    port=int(_ENV.get('SADIE_DB_PORT', '6543')),
-    database=_ENV.get('SADIE_DB_NAME', 'postgres'),
-    user=_ENV['SADIE_DB_USER'],
-    password=_ENV['SADIE_DB_PASSWORD'],
-    statement_cache_size=0,
-)
+
+def _parse_db_config() -> dict:
+    """Build asyncpg connect kwargs from DATABASE_URL or individual SADIE_DB_ vars."""
+    db_url = _ENV.get('DATABASE_URL', '')
+    if db_url:
+        from urllib.parse import urlparse
+        u = urlparse(db_url)
+        return dict(
+            host=u.hostname,
+            port=u.port or 6543,
+            database=u.path.lstrip('/') or 'postgres',
+            user=u.username,
+            password=u.password,
+            statement_cache_size=0,
+        )
+    return dict(
+        host=_ENV['SADIE_DB_HOST'],
+        port=int(_ENV.get('SADIE_DB_PORT', '6543')),
+        database=_ENV.get('SADIE_DB_NAME', 'postgres'),
+        user=_ENV['SADIE_DB_USER'],
+        password=_ENV['SADIE_DB_PASSWORD'],
+        statement_cache_size=0,
+    )
+
+
+DB_CONFIG = _parse_db_config()
 SERPER_API_KEY = _ENV.get('SERPER_API_KEY', '')
 AWS_REGION = _ENV.get('AWS_REGION', 'eu-north-1')
 BEDROCK_MODEL_ID = 'eu.amazon.nova-micro-v1:0'
@@ -247,29 +266,33 @@ async def _proxy_batch(session: aiohttp.ClientSession,
     if CF_WORKER_AUTH:
         headers['X-Auth-Key'] = CF_WORKER_AUTH
 
-    all_results = []
     # Split into chunks (CF Workers paid plan: 1000 subrequests per invocation)
-    for i in range(0, len(requests), chunk_size):
-        chunk = requests[i:i + chunk_size]
+    chunks = [requests[i:i + chunk_size] for i in range(0, len(requests), chunk_size)]
+
+    async def _send_chunk(chunk):
         try:
             async with session.post(
                 batch_url,
                 json={'requests': chunk},
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60),
+                timeout=aiohttp.ClientTimeout(total=180),
             ) as resp:
                 if resp.status != 200:
                     logger.warning(f"Batch fetch failed: HTTP {resp.status}")
-                    continue
+                    return []
                 data = await resp.json()
-                all_results.extend(data.get('results', []))
                 colo = data.get('colo', '?')
                 ok_count = sum(1 for r in data.get('results', []) if r.get('status') in (200, 206))
                 logger.debug(f"Batch: {ok_count}/{len(chunk)} OK (colo={colo})")
+                return data.get('results', [])
         except Exception as e:
             logger.warning(f"Batch fetch error: {type(e).__name__}: {e}")
+            return []
 
-    return all_results
+    # Fire ALL chunks concurrently
+    chunk_results = await asyncio.gather(*[_send_chunk(c) for c in chunks],
+                                         return_exceptions=True)
+    return [r for batch in chunk_results if isinstance(batch, list) for r in batch]
 
 
 def _get_domain(url: str) -> str:
@@ -480,10 +503,25 @@ async def discover_domains(conn, targets: list[DMTarget]) -> None:
                     if d not in t.all_domains:
                         t.all_domains.append(d)
 
-    # Step 3: For entities still missing a non-hotel domain, search CC by entity name
+    total_domains = len({d for t in targets for d in t.all_domains})
+    avg = sum(len(t.all_domains) for t in targets) / len(targets) if targets else 0
+    logger.info(f"Domain discovery: {total_domains} unique domains, avg {avg:.1f} per target")
+
+
+async def discover_entity_domains_cc(targets: list[DMTarget]) -> None:
+    """Step 3 of domain discovery — search CC for entity domains.
+
+    Runs concurrently with the main pipeline. Mutates target.all_domains in-place.
+    Does NOT persist to DB (caller can do that separately).
+    """
+    entity_groups: dict[str, list[DMTarget]] = defaultdict(list)
+    for t in targets:
+        if t.entity_name:
+            entity_groups[t.entity_name].append(t)
+
     entities_needing_domain = {
         name: ts for name, ts in entity_groups.items()
-        if all(len(t.all_domains) <= 1 for t in ts)  # only hotel website, no entity domain
+        if all(len(t.all_domains) <= 1 for t in ts)
     }
 
     if entities_needing_domain:
@@ -508,7 +546,7 @@ async def discover_domains(conn, targets: list[DMTarget]) -> None:
                 cc_url = f"{CC_INDEXES[0]}?url={quote(f'*.{kw}*/*', safe='')}&output=json&limit=10"
                 batch_reqs.append({'url': cc_url, 'accept': 'application/json'})
 
-            connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
+            connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)
             async with aiohttp.ClientSession(connector=connector) as session:
                 results = await _proxy_batch(session, batch_reqs, chunk_size=200)
 
@@ -542,44 +580,29 @@ async def discover_domains(conn, targets: list[DMTarget]) -> None:
                         if ename not in found:
                             found[ename] = best
 
-            # Add found domains to targets + persist to DB
+            # Add found domains to targets (in-place mutation)
             if found:
-                logger.info(f"CC found domains for {len(found)}/{len(entities_needing_domain)} entities")
-                dm_ids_to_update: list[tuple[int, str]] = []
+                logger.info(f"CC entity search: found domains for "
+                            f"{len(found)}/{len(entities_needing_domain)} entities")
                 for entity_name, domain in found.items():
-                    url = f"https://{domain}/"
                     for t in entities_needing_domain[entity_name]:
                         if domain not in t.all_domains:
                             t.all_domains.append(domain)
-                        dm_ids_to_update.append((t.dm_id, url))
-
-                # Persist entity domains to raw_source_url for future runs
-                if dm_ids_to_update:
-                    await conn.executemany(
-                        "UPDATE sadie_gtm.hotel_decision_makers"
-                        " SET raw_source_url = $2, updated_at = NOW()"
-                        " WHERE id = $1"
-                        "   AND (raw_source_url IS NULL OR raw_source_url LIKE '%abr.business%'"
-                        "        OR raw_source_url LIKE '%abr.gov%')",
-                        dm_ids_to_update,
-                    )
-                    logger.info(f"Persisted {len(dm_ids_to_update)} entity website URLs to DB")
-
-    total_domains = len({d for t in targets for d in t.all_domains})
-    avg = sum(len(t.all_domains) for t in targets) / len(targets) if targets else 0
-    logger.info(f"Domain discovery: {total_domains} unique domains, avg {avg:.1f} per target")
 
 
 # ── Step 3: Common Crawl harvest ─────────────────────────────────────────────
 
-async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
+async def cc_harvest(targets: list[DMTarget], cfg: dict,
+                     domains: set[str] | None = None) -> dict[str, str]:
     """Common Crawl: batch search indexes + batch fetch WARC records via CF Worker.
 
     Phase 1: Batch all CC Index queries into one /batch call (all run parallel at edge)
     Phase 2: Filter to contact pages, batch all WARC fetches into /batch calls
     Returns {url: html} of fetched pages.
+
+    If domains is provided, only search those domains (for supplementary passes).
     """
-    all_domains = {d for t in targets for d in t.all_domains}
+    all_domains = domains or {d for t in targets for d in t.all_domains}
     if not all_domains:
         return {}
 
@@ -589,17 +612,21 @@ async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
 
     from urllib.parse import quote
 
-    connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
+    connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)
     async with aiohttp.ClientSession(connector=connector) as session:
 
-        # ── Phase 1: Batch CC Index queries ───────────────────────────────
-        index_requests = []
-        for domain in all_domains:
-            for idx_url in CC_INDEXES:
+        # ── Phase 1: Batch CC Index queries — one /batch call per index, all concurrent
+        per_index_batches = []
+        for idx_url in CC_INDEXES:
+            batch = []
+            for domain in all_domains:
                 cc_url = f"{idx_url}?url={quote(f'*.{domain}/*', safe='')}&output=json&limit=200"
-                index_requests.append({'url': cc_url, 'accept': 'application/json'})
+                batch.append({'url': cc_url, 'accept': 'application/json'})
+            per_index_batches.append(batch)
 
-        results = await _proxy_batch(session, index_requests, chunk_size=200)
+        all_index_results = await asyncio.gather(*[
+            _proxy_batch(session, batch) for batch in per_index_batches])
+        results = [r for batch_results in all_index_results for r in batch_results]
 
         # Parse all index results into entries
         all_entries = []
@@ -689,16 +716,21 @@ async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
 
 # ── Step 3b: httpx page fetch (primary live fetcher) ─────────────────────────
 
-async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
+async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict,
+                            domains: set[str] | None = None) -> dict[str, str]:
     """Fetch contact pages via aiohttp for all target domains.
 
     Uses aiohttp instead of httpx — handles 1000+ concurrent connections natively.
     Returns {url: html} of all successfully fetched pages.
+
+    If domains is provided, only fetch those domains (for supplementary passes).
     """
     # Collect unique domains from all targets
     domain_targets: dict[str, list[DMTarget]] = defaultdict(list)
     for t in targets:
         for d in t.all_domains[:5]:  # Top 5 domains per person
+            if domains and d not in domains:
+                continue
             domain_targets[d].append(t)
 
     urls_to_fetch: list[str] = []
@@ -723,8 +755,8 @@ async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict) -> dict[str, str
 
     fetched: dict[str, str] = {}
     dead_domains: set[str] = set()  # Domains that timeout — skip remaining paths
-    timeout = aiohttp.ClientTimeout(total=8, connect=3)
-    connector = aiohttp.TCPConnector(limit=500, ttl_dns_cache=300, enable_cleanup_closed=True)
+    timeout = aiohttp.ClientTimeout(total=15, connect=5)
+    connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300, enable_cleanup_closed=True)
 
     async def _fetch_one(session: aiohttp.ClientSession, url: str):
         domain = url_domain_map.get(url, '')
@@ -847,7 +879,7 @@ async def llm_extract_from_pages(targets: list[DMTarget], pages: dict[str, str],
     logger.info(f"LLM: extracting contacts from {len(llm_jobs)} pages for "
                 f"{len(needs)} people still needing email...")
 
-    llm_sem = asyncio.Semaphore(20)  # Bedrock throttle
+    llm_sem = asyncio.Semaphore(30)  # Bedrock throttles above ~30 concurrent
     found_count = 0
 
     async def _extract_one(url: str, html: str, page_targets: list[DMTarget]):
@@ -926,11 +958,13 @@ async def _detect_email_providers(domains: set[str]) -> dict[str, Optional[str]]
 
 
 async def email_pattern_discovery(targets: list[DMTarget],
-                                   providers: dict[str, Optional[str]] | None = None) -> int:
-    """Try email pattern guessing + O365/SMTP verification on ALL domains per target.
+                                   providers: dict[str, Optional[str]] | None = None,
+                                   domains: set[str] | None = None) -> int:
+    """Try email pattern guessing + O365/SMTP verification on domains per target.
 
     If providers dict is passed (from concurrent MX detection), uses it directly.
     Otherwise detects providers inline.
+    If domains is provided, only check those domains (for supplementary passes).
     """
     from lib.owner_discovery.email_discovery import discover_emails
 
@@ -940,8 +974,8 @@ async def email_pattern_discovery(targets: list[DMTarget],
 
     # Use pre-computed providers or detect now
     if providers is None:
-        all_domains = {d for t in needs_email for d in t.all_domains}
-        providers = await _detect_email_providers(all_domains)
+        check_domains = domains or {d for t in needs_email for d in t.all_domains}
+        providers = await _detect_email_providers(check_domains)
 
     # Group targets by domain to batch verify — avoids repeating SMTP for same domain
     domain_people: dict[str, list[DMTarget]] = defaultdict(list)
@@ -950,13 +984,15 @@ async def email_pattern_discovery(targets: list[DMTarget],
         if len(parts) < 2:
             continue
         for d in t.all_domains:
+            if domains and d not in domains:
+                continue
             if d and '.' in d:
                 domain_people[d].append(t)
 
     found_count = 0
 
     async def _verify_domain(domain: str, people: list[DMTarget],
-                             shared_client: httpx.AsyncClient):
+                             shared_session: aiohttp.ClientSession):
         """Verify all people on a single domain in one batch."""
         nonlocal found_count
         provider = providers.get(domain)
@@ -1015,7 +1051,7 @@ async def email_pattern_discovery(targets: list[DMTarget],
                 logger.debug(f"  Pattern: {t.full_name} → {t.found_email} (unverified) on {domain}")
 
     # Run all domains concurrently with shared aiohttp session
-    connector = aiohttp.TCPConnector(limit=200, ttl_dns_cache=300)
+    connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)  # no limit
     async with aiohttp.ClientSession(connector=connector) as shared_session:
         await asyncio.gather(*[
             _verify_domain(d, ppl, shared_session)
@@ -1451,6 +1487,10 @@ async def enrich(args, cfg: dict):
     Concurrent: CC harvest | httpx fetch | (MX detect → email patterns)
     Optional: Serper search
     """
+    # Expand thread pool — default is ~12, bottlenecks Bedrock LLM + SMTP verification
+    asyncio.get_event_loop().set_default_executor(
+        concurrent.futures.ThreadPoolExecutor(max_workers=50))
+
     conn = await asyncpg.connect(**DB_CONFIG)
     label = cfg["label"]
 
@@ -1473,48 +1513,79 @@ async def enrich(args, cfg: dict):
     await discover_domains(conn, targets)
     await conn.close()  # Done with DB reads — release connection
 
-    # Collect all domains for concurrent tasks
-    all_domains = {d for t in targets for d in t.all_domains}
+    # Snapshot hotel domains before entity search adds more
+    initial_domains = {d for t in targets for d in t.all_domains}
 
-    # ── All I/O fires concurrently ──
-    # httpx: blast all URLs at once (independent domains, no throttle)
-    # CC: search+fetch pipelined per domain (CC Index has some latency)
+    # ── ALL I/O fires concurrently — nothing waits for anything ──
+    # entity_cc: search CC for entity domains (~40s) — runs in background
+    # httpx: blast all hotel domain URLs at once (independent domains, no throttle)
+    # CC: batch search+fetch hotel domains via CF Worker
     # MX → email patterns: detect providers then verify all domains×people
-    async def _mx_then_email_patterns():
-        providers = await _detect_email_providers(all_domains)
-        found = await email_pattern_discovery(targets, providers=providers)
+
+    async def _mx_then_email_patterns(domain_set):
+        providers = await _detect_email_providers(domain_set)
+        found = await email_pattern_discovery(targets, providers=providers, domains=domain_set)
         return providers, found
 
-    logger.info(f"Firing all I/O concurrently ({len(all_domains)} domains)...")
+    logger.info(f"Firing all I/O concurrently ({len(initial_domains)} domains + entity CC search)...")
 
-    # All three are independent — they all start at the same instant
-    httpx_task = asyncio.create_task(httpx_fetch_pages(targets, cfg))
-    cc_task = asyncio.create_task(cc_harvest(targets, cfg))
-    patterns_task = asyncio.create_task(_mx_then_email_patterns())
+    # ── ALL FIVE start at the same instant — NOTHING sequential ──
+    entity_task = asyncio.create_task(discover_entity_domains_cc(targets))
+    httpx_task = asyncio.create_task(httpx_fetch_pages(targets, cfg, domains=initial_domains))
+    patterns_task = asyncio.create_task(_mx_then_email_patterns(initial_domains))
 
-    # httpx finishes first (unconstrained, direct fetch), extract + LLM immediately
+    cc_task = asyncio.create_task(cc_harvest(targets, cfg, domains=initial_domains))
+
+    # Process results as they arrive — don't let slow tasks block fast ones
+    llm_tasks = []
+
+    # httpx finishes fast (~6s), start LLM immediately
     httpx_pages = await httpx_task
     httpx_found = extract_contacts_from_pages(targets, httpx_pages, cfg, "httpx_fetch")
     logger.info(f"httpx done: {httpx_found} emails from {len(httpx_pages)} pages")
+    if httpx_pages:
+        llm_tasks.append(asyncio.create_task(llm_extract_from_pages(targets, httpx_pages, cfg)))
 
-    # Kick off LLM extraction on httpx pages right away (runs concurrent with CC + patterns)
-    httpx_llm_task = asyncio.create_task(llm_extract_from_pages(targets, httpx_pages, cfg))
+    # Patterns and CC finish on their own schedule — don't block each other
+    patterns_result = await patterns_task
+    providers, pattern_found = patterns_result
+    logger.info(f"Email patterns: {pattern_found} emails")
 
-    # CC and patterns finish on their own schedule
-    cc_pages, (providers, pattern_found) = await asyncio.gather(cc_task, patterns_task)
+    cc_pages = await cc_task
     cc_found = extract_contacts_from_pages(targets, cc_pages, cfg, "cc_harvest")
-    logger.info(f"CC: {cc_found} emails ({len(cc_pages)} pages), "
-                f"patterns: {pattern_found} emails")
+    logger.info(f"CC: {cc_found} emails ({len(cc_pages)} pages)")
+    if cc_pages:
+        llm_tasks.append(asyncio.create_task(llm_extract_from_pages(targets, cc_pages, cfg)))
 
-    # LLM on CC pages (only targets still missing email)
-    cc_llm_task = asyncio.create_task(llm_extract_from_pages(targets, cc_pages, cfg))
+    # Entity CC search — runs concurrently, add new domains when done
+    await entity_task
+    new_domains = {d for t in targets for d in t.all_domains} - initial_domains
 
-    # Wait for both LLM tasks
-    httpx_llm_found = await httpx_llm_task
-    cc_llm_found = await cc_llm_task
-    if httpx_llm_found or cc_llm_found:
-        logger.info(f"LLM extraction: {httpx_llm_found} from httpx pages, "
-                    f"{cc_llm_found} from CC pages")
+    if new_domains:
+        logger.info(f"Entity CC: {len(new_domains)} new domains → supplementary pass...")
+        # Fire all supplementary tasks concurrently, CC with 30s timeout
+        supp_httpx_task = asyncio.create_task(httpx_fetch_pages(targets, cfg, domains=new_domains))
+        supp_patterns_task = asyncio.create_task(_mx_then_email_patterns(new_domains))
+
+        supp_cc_task = asyncio.create_task(cc_harvest(targets, cfg, domains=new_domains))
+
+        supp_httpx_pages, supp_cc_pages, (_, supp_pattern_found) = await asyncio.gather(
+            supp_httpx_task, supp_cc_task, supp_patterns_task)
+        supp_httpx_found = extract_contacts_from_pages(targets, supp_httpx_pages, cfg, "entity_httpx")
+        supp_cc_found = extract_contacts_from_pages(targets, supp_cc_pages, cfg, "entity_cc")
+        logger.info(f"Entity supplementary: httpx={supp_httpx_found}, CC={supp_cc_found}, "
+                    f"patterns={supp_pattern_found}")
+        all_supp_pages = {**supp_httpx_pages, **supp_cc_pages}
+        if all_supp_pages:
+            llm_tasks.append(asyncio.create_task(
+                llm_extract_from_pages(targets, all_supp_pages, cfg)))
+
+    # Wait for ALL LLM tasks
+    if llm_tasks:
+        llm_results = await asyncio.gather(*llm_tasks)
+        total_llm = sum(llm_results)
+        if total_llm:
+            logger.info(f"LLM extraction: {total_llm} total")
 
     # ── Serper search (opt-in) ──
     still_need = sum(1 for t in targets if not t.found_email)

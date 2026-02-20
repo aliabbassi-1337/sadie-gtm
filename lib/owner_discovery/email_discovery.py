@@ -104,7 +104,7 @@ async def verify_o365_email(
         async with session.post(
             "https://login.microsoftonline.com/common/GetCredentialType",
             json={"Username": email},
-            timeout=aiohttp.ClientTimeout(total=5),
+            timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             if resp.status != 200:
                 return None
