@@ -11,20 +11,26 @@ Usage:
 
 import argparse
 import asyncio
+import os
 import sys
 from dataclasses import dataclass, field
 
 import asyncpg
 import httpx
+from dotenv import load_dotenv
 from loguru import logger
 
 from lib.owner_discovery.abn_lookup import abn_to_decision_makers, AbnEntity
 
+load_dotenv()
+_ENV = os.environ
+
 DB_CONFIG = dict(
-    host="aws-1-ap-southeast-1.pooler.supabase.com",
-    port=6543, database="postgres",
-    user="postgres.yunairadgmaqesxejqap",
-    password="SadieGTM321-",
+    host=_ENV.get('SADIE_DB_HOST', 'aws-1-ap-southeast-1.pooler.supabase.com'),
+    port=int(_ENV.get('SADIE_DB_PORT', '6543')),
+    database=_ENV.get('SADIE_DB_NAME', 'postgres'),
+    user=_ENV.get('SADIE_DB_USER', 'postgres.yunairadgmaqesxejqap'),
+    password=_ENV.get('SADIE_DB_PASSWORD', ''),
     statement_cache_size=0,
 )
 
@@ -113,6 +119,8 @@ async def main():
             logger.warning(f"{r.name} -> ERROR: {r.error}")
 
         for dm in r.dms:
+            if not dm.full_name or not dm.full_name.strip():
+                continue
             logger.info(f"  + {dm.full_name} ({dm.title})")
             if args.apply:
                 result = await conn.fetchval(

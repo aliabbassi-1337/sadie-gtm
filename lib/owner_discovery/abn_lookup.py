@@ -578,9 +578,9 @@ def _parse_trust_names(trust_name: str) -> list[str]:
             f"{m_gc.group(2).upper()} {surname}",
         ]
 
-    # Pattern 3: "LES LINDSAY" or "MEECH" — a name (1-3 words, no business words)
+    # Pattern 3: "LES LINDSAY" — a name (2-3 words, require first + last name)
     words = body.split()
-    if 1 <= len(words) <= 3:
+    if 2 <= len(words) <= 3:
         # Check each word looks like a name (capitalized, no numbers, etc.)
         looks_like_name = all(
             re.match(r"^[A-Za-z][A-Za-z.'\\-]+$", w) and len(w) >= 2

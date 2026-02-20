@@ -95,9 +95,10 @@ SEARCH_SKIP_DOMAINS = {
 }
 
 ENTITY_RE_STR = (
-    r'(PTY|LTD|LIMITED|LLC|INC|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|'
+    r'(PTY|LTD|LIMITED|LLC|INC\b|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|'
     r'COUNCIL|MANAGEMENT|ASSETS|VILLAGES|HOLIDAY|CARAVAN|PARKS|RESORT|'
-    r'TOURISM|TOURIST|NRMA|RAC |MOTEL|RETREAT)'
+    r'TOURISM|TOURIST|NRMA|RAC |MOTEL|RETREAT|PROPRIETARY|COMPANY|'
+    r'COMMISSION|FOUNDATION|TRADING|NOMINEES|SUPERANNUATION|ENTERPRISES)'
 )
 
 BUSINESS_RE = re.compile(
@@ -944,12 +945,30 @@ async def enrich_missing(args, all_parks: bool = False):
             if key in seen:
                 continue
             seen.add(key)
+            # Validate email/phone from LLM output
+            raw_email = (owner.get('email') or '').strip() or None
+            raw_phone = (owner.get('phone') or '').strip() or None
+            # Email must contain @ and a dot in domain; reject numbers-only
+            if raw_email and (
+                '@' not in raw_email
+                or '.' not in raw_email.split('@')[-1]
+                or re.match(r'^[\d\s]+$', raw_email)
+            ):
+                logger.warning(f"Bad email from LLM for {name}: {raw_email!r} — moving to phone")
+                if not raw_phone and re.match(r'^[\d\s\-\+\(\)]+$', raw_email):
+                    raw_phone = raw_email
+                raw_email = None
+            # Phone must be mostly digits
+            if raw_phone and len(re.sub(r'[^\d]', '', raw_phone)) < 8:
+                logger.warning(f"Bad phone from LLM for {name}: {raw_phone!r} — dropping")
+                raw_phone = None
+
             dm_ids.append(r.park.hotel_id)
             dm_names.append(name)
             dm_titles.append(title)
-            dm_emails.append(owner.get('email') or None)
+            dm_emails.append(raw_email)
             dm_verified.append(False)
-            dm_phones.append(owner.get('phone') or None)
+            dm_phones.append(raw_phone)
             dm_sources_json.append(json.dumps(["website_rescrape"]))
             dm_conf.append(0.70)
             dm_urls.append(r.park.website or None)

@@ -8,22 +8,30 @@ Usage:
 """
 import argparse
 import asyncio
+import os
+
 import asyncpg
+from dotenv import load_dotenv
+
+load_dotenv()
+_ENV = os.environ
 
 DB_CONFIG = dict(
-    host='aws-1-ap-southeast-1.pooler.supabase.com',
-    port=6543, database='postgres',
-    user='postgres.yunairadgmaqesxejqap',
-    password='SadieGTM321-',
+    host=_ENV.get('SADIE_DB_HOST', 'aws-1-ap-southeast-1.pooler.supabase.com'),
+    port=int(_ENV.get('SADIE_DB_PORT', '6543')),
+    database=_ENV.get('SADIE_DB_NAME', 'postgres'),
+    user=_ENV.get('SADIE_DB_USER', 'postgres.yunairadgmaqesxejqap'),
+    password=_ENV.get('SADIE_DB_PASSWORD', ''),
     statement_cache_size=0,
 )
 
 BIG4_WHERE = "(h.external_id_type = 'big4' OR h.source LIKE '%::big4%')"
 
 ENTITY_RE = (
-    r'(PTY|LTD|LIMITED|LLC|INC|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|'
+    r'(PTY|LTD|LIMITED|LLC|INC\b|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|'
     r'COUNCIL|MANAGEMENT|ASSETS|VILLAGES|HOLIDAY|CARAVAN|PARKS|RESORT|'
-    r'TOURISM|TOURIST|NRMA|RAC |MOTEL|RETREAT)'
+    r'TOURISM|TOURIST|NRMA|RAC |MOTEL|RETREAT|PROPRIETARY|COMPANY|'
+    r'COMMISSION|FOUNDATION|TRADING|NOMINEES|SUPERANNUATION|ENTERPRISES)'
 )
 
 
