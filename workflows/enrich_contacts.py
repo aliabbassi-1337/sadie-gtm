@@ -10,11 +10,11 @@ Pipeline:
   4. Batch update DM records
 
 Usage:
-    # Enrich Big4 DMs missing contacts
+    # Enrich Big4 DMs missing contacts (email pattern only, free)
     uv run python3 workflows/enrich_contacts.py --source big4 --apply --limit 50
 
-    # Enrich RMS AU DMs
-    uv run python3 workflows/enrich_contacts.py --source rms_au --apply
+    # With Serper web search (costs money, finds more)
+    uv run python3 workflows/enrich_contacts.py --source big4 --serper --apply --limit 50
 
     # Audit contact coverage
     uv run python3 workflows/enrich_contacts.py --source big4 --audit
@@ -88,17 +88,14 @@ ENTITY_RE_STR = (
 
 EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 
-# Domains to skip in Serper results — social media, OTAs, registries, junk
+# Domains to skip in Serper results — social media, registries, junk
 SEARCH_SKIP_DOMAINS = {
     "facebook.com", "instagram.com", "twitter.com", "linkedin.com",
     "tiktok.com", "youtube.com", "pinterest.com",
-    "booking.com", "tripadvisor.com", "wotif.com", "expedia.com",
-    "agoda.com", "hotels.com", "trivago.com",
     "abr.business.gov.au", "abr.gov.au", "asic.gov.au",
     "rocketreach.co", "zoominfo.com", "apollo.io",
     "issuu.com", "scribd.com", "yumpu.com", "calameo.com",
     "researchgate.net", "academia.edu",
-    "abc.net.au", "newbook.cloud",
 }
 
 # Personal email providers — accept matches from these even if not hotel domain
@@ -158,6 +155,7 @@ class DMTarget:
     email_verified: bool = False
     email_source: Optional[str] = None  # "o365", "smtp", "serper_crawl", "llm_extract"
     phone_source: Optional[str] = None
+    all_emails: list[str] = field(default_factory=list)  # every email found (generic included)
 
 
 # ── Utilities ────────────────────────────────────────────────────────────────
@@ -368,30 +366,38 @@ async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency
         first = name_parts[0] if name_parts else ""
         last = name_parts[-1] if len(name_parts) > 1 else ""
         hotel_domain = _get_domain(t.hotel_website) if t.hotel_website else ""
+        best_email = None
+        best_score = -1
         for r in results:
             snippet = r.get("snippet", "")
             emails = EMAIL_RE.findall(snippet)
             for e in emails:
+                # Save every email into all_emails
+                if e.lower() not in {x.lower() for x in t.all_emails}:
+                    t.all_emails.append(e)
                 el = e.split('@')[0].lower()
                 email_domain = e.split('@')[1].lower() if '@' in e else ""
-                # Require both first AND last name parts (e.g. john.smith@, jsmith@)
+                # Name-matched: require both first AND last name parts
                 if not (first and last and (
                     (first in el and last in el) or
                     (first[0] in el and last in el and el.index(first[0]) < el.index(last))
                 )):
                     continue
-                # Domain must be related: hotel domain, personal provider, or entity domain
+                # Score: hotel domain > personal > other
                 if hotel_domain and (email_domain == hotel_domain or email_domain.endswith('.' + hotel_domain)):
-                    pass  # hotel domain — always accept
+                    score = 3
                 elif email_domain in PERSONAL_EMAIL_DOMAINS:
-                    pass  # personal email — accept
+                    score = 2
                 else:
-                    logger.debug(f"  Skipping unrelated email: {t.full_name} -> {e} (domain {email_domain})")
-                    continue
-                t.found_email = e
-                t.email_source = "serper_snippet"
-                logger.debug(f"  Found email in snippet: {t.full_name} -> {e}")
-                return
+                    score = 1
+                if score > best_score:
+                    best_email = e
+                    best_score = score
+        if best_email:
+            t.found_email = best_email
+            t.email_source = "serper_snippet"
+            logger.debug(f"  Found email in snippet: {t.full_name} -> {best_email} (score={best_score})")
+            return
 
         # Collect URLs to crawl
         urls = _filter_serper_results(results)
@@ -450,32 +456,40 @@ async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency
         for t in page_targets:
             if t.found_email:
                 continue
-            # Look for email matching the person's name (require first+last)
             name_parts = t.full_name.lower().split()
             first = name_parts[0] if name_parts else ""
             last = name_parts[-1] if len(name_parts) > 1 else ""
             hotel_domain = _get_domain(t.hotel_website) if t.hotel_website else ""
+            best_email = None
+            best_score = -1
             for e in page_emails:
                 el = e.split('@')[0].lower()
                 email_domain = e.split('@')[1].lower() if '@' in e else ""
-                if not (first and last and (
+                # Name-matched emails
+                if first and last and (
                     (first in el and last in el) or
                     (first[0] in el and last in el and el.index(first[0]) < el.index(last))
-                )):
-                    continue
-                # Domain relevance check
-                is_related = (
-                    (hotel_domain and (email_domain == hotel_domain or email_domain.endswith('.' + hotel_domain)))
-                    or email_domain in PERSONAL_EMAIL_DOMAINS
-                )
-                if not is_related:
-                    continue
-                t.found_email = e
+                ):
+                    if hotel_domain and (email_domain == hotel_domain or email_domain.endswith('.' + hotel_domain)):
+                        score = 3
+                    elif email_domain in PERSONAL_EMAIL_DOMAINS:
+                        score = 2
+                    else:
+                        score = 1
+                    if score > best_score:
+                        best_email = e
+                        best_score = score
+            if best_email:
+                t.found_email = best_email
                 t.email_verified = False
                 t.email_source = "serper_crawl"
                 found_count += 1
-                logger.debug(f"  Found email on page: {t.full_name} -> {e}")
-                break
+                logger.debug(f"  Found email on page: {t.full_name} -> {best_email} (score={best_score})")
+
+            # Collect ALL emails from page into all_emails for this hotel
+            for e in page_emails:
+                if e.lower() not in {x.lower() for x in t.all_emails}:
+                    t.all_emails.append(e)
 
             if not t.found_phone and page_phones:
                 t.found_phone = page_phones[0]
@@ -509,8 +523,11 @@ async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency
                 if match:
                     email = match.get('email')
                     if email and '@' in email:
+                        # Save to all_emails regardless
+                        if email.lower() not in {x.lower() for x in t.all_emails}:
+                            t.all_emails.append(email)
+                        # Only set as primary found_email if not generic
                         prefix = email.split('@')[0].lower()
-                        # Reject generic emails (info@, admin@, etc.)
                         generic = {'info', 'admin', 'contact', 'hello', 'enquiries',
                                    'bookings', 'reservations', 'reception', 'sales',
                                    'support', 'help', 'noreply', 'no-reply', 'stay'}
@@ -603,34 +620,54 @@ If no contact info found for any of them, respond with exactly: []"""
 # ── Batch update ─────────────────────────────────────────────────────────────
 
 async def apply_results(conn, targets: list[DMTarget], dry_run: bool = True) -> None:
-    """Batch update DMs with found contact info."""
+    """Batch update DMs with found contact info + save all_emails to hotels."""
     updates = [t for t in targets if t.found_email or t.found_phone]
-    if not updates:
+    has_all_emails = [t for t in targets if t.all_emails]
+
+    if not updates and not has_all_emails:
         print("No contact info found to update.")
         return
 
-    dm_ids = [t.dm_id for t in updates]
-    emails = [t.found_email for t in updates]
-    phones = [t.found_phone for t in updates]
-    verified = [t.email_verified for t in updates]
-
     if dry_run:
-        print(f"\nDRY RUN — would update {len(updates)} DMs. Run with --apply to write.")
+        print(f"\nDRY RUN — would update {len(updates)} DMs, "
+              f"{len(has_all_emails)} hotels with scraped emails. Run with --apply to write.")
         return
 
-    await conn.execute(
-        "UPDATE sadie_gtm.hotel_decision_makers dm"
-        " SET email = COALESCE(NULLIF(dm.email, ''), v.email),"
-        "     email_verified = CASE WHEN v.email IS NOT NULL AND (dm.email IS NULL OR dm.email = '')"
-        "                       THEN v.verified ELSE dm.email_verified END,"
-        "     phone = COALESCE(NULLIF(dm.phone, ''), v.phone),"
-        "     updated_at = NOW()"
-        " FROM unnest($1::int[], $2::text[], $3::text[], $4::bool[])"
-        "   AS v(id, email, phone, verified)"
-        " WHERE dm.id = v.id",
-        dm_ids, emails, phones, verified,
-    )
-    print(f"\nAPPLIED: Updated {len(updates)} DMs in database.")
+    # Update DM records with found personal email/phone
+    if updates:
+        dm_ids = [t.dm_id for t in updates]
+        emails = [t.found_email for t in updates]
+        phones = [t.found_phone for t in updates]
+        verified = [t.email_verified for t in updates]
+        await conn.execute(
+            "UPDATE sadie_gtm.hotel_decision_makers dm"
+            " SET email = COALESCE(NULLIF(dm.email, ''), v.email),"
+            "     email_verified = CASE WHEN v.email IS NOT NULL AND (dm.email IS NULL OR dm.email = '')"
+            "                       THEN v.verified ELSE dm.email_verified END,"
+            "     phone = COALESCE(NULLIF(dm.phone, ''), v.phone),"
+            "     updated_at = NOW()"
+            " FROM unnest($1::int[], $2::text[], $3::text[], $4::bool[])"
+            "   AS v(id, email, phone, verified)"
+            " WHERE dm.id = v.id",
+            dm_ids, emails, phones, verified,
+        )
+
+    # Save all scraped emails (including generic) to hotels.emails
+    if has_all_emails:
+        hotel_ids = [t.hotel_id for t in has_all_emails]
+        all_emails_arr = [t.all_emails for t in has_all_emails]
+        await conn.execute(
+            "UPDATE sadie_gtm.hotels h"
+            " SET emails = (SELECT array_agg(DISTINCT e) FROM unnest("
+            "   array_cat(COALESCE(h.emails, ARRAY[]::text[]), v.all_emails)) e),"
+            "     updated_at = NOW()"
+            " FROM unnest($1::int[], $2::text[][])"
+            "   AS v(id, all_emails)"
+            " WHERE h.id = v.id",
+            hotel_ids, all_emails_arr,
+        )
+
+    print(f"\nAPPLIED: Updated {len(updates)} DMs + {len(has_all_emails)} hotel email lists.")
 
 
 # ── Main enrichment flow ─────────────────────────────────────────────────────
@@ -662,26 +699,32 @@ async def enrich(args, cfg: dict):
     email_found = await email_pattern_discovery(targets)
     logger.info(f"Step 1 done: {email_found}/{len(targets)} found via email patterns")
 
-    # Step 3: Serper search for remaining
+    # Step 3: Serper search for remaining (opt-in, expensive)
     still_need = sum(1 for t in targets if not t.found_email)
-    if still_need > 0 and SERPER_API_KEY:
-        logger.info(f"Step 2: Serper search for {still_need} remaining people...")
-        serper_found = await serper_search_contacts(targets, cfg, concurrency=args.concurrency)
-        logger.info(f"Step 2 done: {serper_found} additional found via Serper")
-    elif still_need > 0:
-        logger.warning("No SERPER_API_KEY — skipping web search step")
+    if still_need > 0 and args.serper:
+        if not SERPER_API_KEY:
+            logger.warning("--serper enabled but no SERPER_API_KEY set — skipping")
+        else:
+            logger.info(f"Step 2: Serper search for {still_need} remaining people...")
+            serper_found = await serper_search_contacts(targets, cfg, concurrency=args.concurrency)
+            logger.info(f"Step 2 done: {serper_found} additional found via Serper")
+    elif still_need > 0 and not args.serper:
+        logger.info(f"Step 2 skipped: {still_need} still need email (use --serper to enable web search)")
 
     # Results summary
     total_email = sum(1 for t in targets if t.found_email)
     total_phone = sum(1 for t in targets if t.found_phone)
     verified = sum(1 for t in targets if t.email_verified)
+    total_all_emails = sum(len(t.all_emails) for t in targets)
+    hotels_with_emails = sum(1 for t in targets if t.all_emails)
 
     print(f"\n{'='*60}")
     print(f"{label.upper()} CONTACT ENRICHMENT RESULTS")
     print(f"{'='*60}")
     print(f"DMs targeted:        {len(targets)}")
-    print(f"Emails found:        {total_email} ({verified} verified)")
+    print(f"Personal emails:     {total_email} ({verified} verified)")
     print(f"Phones found:        {total_phone}")
+    print(f"All emails scraped:  {total_all_emails} across {hotels_with_emails} hotels")
     print(f"Still missing email: {len(targets) - total_email}")
 
     # Show by source
@@ -827,6 +870,8 @@ async def main():
 
     # Options
     parser.add_argument("--apply", action="store_true", help="Write to DB (default: dry-run)")
+    parser.add_argument("--serper", action="store_true",
+                        help="Enable Serper web search (expensive, off by default)")
     parser.add_argument("--limit", type=int, default=None, help="Max DMs to process")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N DMs (for resumability)")
     parser.add_argument("--concurrency", type=int, default=10, help="Browser concurrency for crawling")
