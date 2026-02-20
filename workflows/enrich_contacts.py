@@ -1,19 +1,26 @@
-"""Generic contact enrichment workflow — crawl hotel websites + LLM extraction + Serper search.
+"""Contact enrichment — find email/phone for known decision makers.
 
-Refactored from scripts/crawl_big4_parks.py. Works on any hotel source via SOURCE_CONFIGS.
+Enriches EXISTING hotel_decision_makers who have names but are missing
+contact info (email, phone). Does NOT discover new people — that's enrich_owners.
+
+Pipeline:
+  1. Load DMs missing email/phone from hotel_decision_makers
+  2. Email pattern guessing + O365/SMTP verification on hotel domain
+  3. Serper search for person name + entity → crawl found pages → extract contacts
+  4. Batch update DM records
 
 Usage:
-    # Big4 (same as original)
-    uv run python3 workflows/enrich_contacts.py --source big4 --enrich-all --apply --concurrency 300
-    uv run python3 workflows/enrich_contacts.py --source big4 --chain-fill --apply
+    # Enrich Big4 DMs missing contacts
+    uv run python3 workflows/enrich_contacts.py --source big4 --apply --limit 50
+
+    # Enrich RMS AU DMs
+    uv run python3 workflows/enrich_contacts.py --source rms_au --apply
+
+    # Audit contact coverage
     uv run python3 workflows/enrich_contacts.py --source big4 --audit
 
-    # RMS Australia
-    uv run python3 workflows/enrich_contacts.py --source rms_au --enrich-missing --apply --concurrency 300
-    uv run python3 workflows/enrich_contacts.py --source rms_au --enrich-missing --apply --offset 500
-
     # Ad-hoc
-    uv run python3 workflows/enrich_contacts.py --source custom --where "h.city = 'Sydney'" --enrich-missing --limit 10
+    uv run python3 workflows/enrich_contacts.py --source custom --where "h.city = 'Sydney'" --limit 10
 """
 
 import argparse
@@ -23,11 +30,15 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncpg
 import httpx
+from html import unescape as html_unescape
 from loguru import logger
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
@@ -37,7 +48,7 @@ from crawl4ai.async_dispatcher import SemaphoreDispatcher
 # ── Environment ──────────────────────────────────────────────────────────────
 
 def _read_env():
-    """Read .env file manually (avoids dotenv issues on some Python versions)."""
+    """Read .env file manually."""
     env = dict(os.environ)
     try:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
@@ -66,37 +77,7 @@ AWS_REGION = _ENV.get('AWS_REGION', 'eu-north-1')
 BEDROCK_MODEL_ID = 'eu.amazon.nova-micro-v1:0'
 
 
-# ── Shared constants ─────────────────────────────────────────────────────────
-
-OWNER_PATHS = ["/about", "/about-us", "/our-story", "/contact", "/team", "/our-team"]
-
-EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
-GENERIC_PREFIXES = {
-    "noreply", "no-reply", "info", "reservations", "bookings",
-    "enquiries", "enquiry", "sales", "reception", "admin",
-    "support", "help", "hello", "contact", "stay",
-}
-
-BAD_WEBSITE_DOMAINS = {
-    "visitvictoria.com", "visitnsw.com", "visitgippsland.com.au",
-    "discovertasmania.com.au", "southaustralia.com",
-    "visitqueensland.com", "big4.com.au", "wotif.com",
-    "booking.com", "tripadvisor.com",
-    "rmscloud.com", "rms.com.au",
-}
-
-SEARCH_SKIP_DOMAINS = {
-    "facebook.com", "instagram.com", "twitter.com", "x.com",
-    "youtube.com", "tiktok.com", "pinterest.com",
-    "booking.com", "expedia.com", "tripadvisor.com", "hotels.com",
-    "agoda.com", "airbnb.com", "vrbo.com", "kayak.com",
-    "wotif.com", "google.com", "maps.google.com",
-    "abn.business.gov.au", "abr.business.gov.au",
-    "asic.gov.au", "yellowpages.com.au", "whitepages.com.au",
-    "truelocal.com.au", "opencorporates.com", "big4.com.au",
-    "insolvencynotices.com.au", "companieslist.com", "businesslist.com.au",
-    "dnb.com", "zoominfo.com", "linkedin.com",
-}
+# ── Constants ────────────────────────────────────────────────────────────────
 
 ENTITY_RE_STR = (
     r'(PTY|LTD|LIMITED|LLC|INC\b|TRUST|TRUSTEE|HOLDINGS|ASSOCIATION|CORP|'
@@ -105,20 +86,27 @@ ENTITY_RE_STR = (
     r'COMMISSION|FOUNDATION|TRADING|NOMINEES|SUPERANNUATION|ENTERPRISES)'
 )
 
-BUSINESS_RE = re.compile(
-    r'(?i)(pty|ltd|trust|holiday|park|resort|caravan|tourism|beach|river|'
-    r'motel|camping|management|holdings|assets|council|association)'
-)
+EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 
-RELEVANT_RE = re.compile(
-    r'(?i)(about|team|contact|our.?story|management|director|owner|staff|people|leadership|who.?we.?are)'
-)
-BINARY_EXT_RE = re.compile(
-    r'(?i)\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|jpg|jpeg|png|gif|svg|mp4|mp3|wav|webp|ico)(\?|$)'
-)
+# Domains to skip in Serper results — social media, OTAs, registries, junk
+SEARCH_SKIP_DOMAINS = {
+    "facebook.com", "instagram.com", "twitter.com", "linkedin.com",
+    "tiktok.com", "youtube.com", "pinterest.com",
+    "booking.com", "tripadvisor.com", "wotif.com", "expedia.com",
+    "agoda.com", "hotels.com", "trivago.com",
+    "abr.business.gov.au", "abr.gov.au", "asic.gov.au",
+    "rocketreach.co", "zoominfo.com", "apollo.io",
+    "issuu.com", "scribd.com", "yumpu.com", "calameo.com",
+    "researchgate.net", "academia.edu",
+    "abc.net.au", "newbook.cloud",
+}
 
-
-# ── Phone patterns by country ────────────────────────────────────────────────
+# Personal email providers — accept matches from these even if not hotel domain
+PERSONAL_EMAIL_DOMAINS = {
+    "gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "live.com",
+    "icloud.com", "me.com", "protonmail.com", "proton.me",
+    "bigpond.com", "optusnet.com.au", "westnet.com.au", "internode.on.net",
+}
 
 AU_PHONE_RE = re.compile(
     r'(?:\+61\s?\d|\(0\d\)|\b0[2-478])\s*\d{4}\s*\d{4}'
@@ -129,7 +117,6 @@ US_PHONE_RE = re.compile(
     r'(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}'
 )
 DEFAULT_PHONE_RE = re.compile(r'\+?\d[\d\s.\-()]{8,}\d')
-
 PHONE_PATTERNS = {"AU": AU_PHONE_RE, "US": US_PHONE_RE, "DEFAULT": DEFAULT_PHONE_RE}
 
 
@@ -142,32 +129,6 @@ SOURCE_CONFIGS = {
         "join": None,
         "country": "AU",
         "serper_gl": "au",
-        "entity_search_suffix": "Australia director OR owner OR team",
-        "enable_abn": True,
-        "chain_execs": {
-            "Holiday Haven": {
-                "match": "h.name ILIKE '%holiday haven%' OR h.website ILIKE '%holidayhaven%'",
-                "people": [
-                    ("Andrew McEvoy", "Chair"),
-                    ("David Galvin", "Chief Executive Officer"),
-                ],
-            },
-            "NRMA Parks": {
-                "match": "h.name ILIKE '%nrma%' OR h.website ILIKE '%nrmaparks%'",
-                "people": [
-                    ("Rohan Lund", "Group CEO, NRMA"),
-                    ("Paul Davies", "CEO, NRMA Parks and Resorts"),
-                ],
-            },
-            "Tasman Holiday Parks": {
-                "match": "h.name ILIKE '%tasman%' OR h.website ILIKE '%tasman%'",
-                "people": [
-                    ("Nikki Milne", "Chief Executive Officer"),
-                    ("Bill Dimitropoulos", "Chief Financial Officer"),
-                    ("Corrie Milne", "General Manager"),
-                ],
-            },
-        },
     },
     "rms_au": {
         "label": "RMS Cloud Australia",
@@ -175,68 +136,31 @@ SOURCE_CONFIGS = {
         "join": "JOIN sadie_gtm.hotel_booking_engines hbe ON hbe.hotel_id = h.id",
         "country": "AU",
         "serper_gl": "au",
-        "entity_search_suffix": "Australia director OR owner OR team",
-        "enable_abn": True,
-        "chain_execs": {},
     },
 }
 
 
-# ── Dataclasses ──────────────────────────────────────────────────────────────
+# ── Dataclass ────────────────────────────────────────────────────────────────
 
 @dataclass
-class HotelInfo:
+class DMTarget:
+    """A decision maker who needs contact info."""
+    dm_id: int
+    full_name: str
+    title: str
     hotel_id: int
     hotel_name: str
-    website: str
-    existing_phones: list[str] = field(default_factory=list)
-    existing_email: Optional[str] = None
+    hotel_website: str
+    entity_name: Optional[str] = None  # e.g. "XYZ Pty Ltd" if hotel has one
+    # Results
+    found_email: Optional[str] = None
+    found_phone: Optional[str] = None
+    email_verified: bool = False
+    email_source: Optional[str] = None  # "o365", "smtp", "serper_crawl", "llm_extract"
+    phone_source: Optional[str] = None
 
 
-@dataclass
-class HotelResult:
-    hotel: HotelInfo
-    pages_crawled: int = 0
-    page_texts: list[str] = field(default_factory=list)
-    owner_names: list[dict] = field(default_factory=list)
-    new_phones: list[str] = field(default_factory=list)
-    new_emails: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-
-
-# ── Utility functions ────────────────────────────────────────────────────────
-
-def _norm_phone(p: str) -> str:
-    return re.sub(r'[^\d]', '', p).lstrip('0').lstrip('61')
-
-
-def _ensure_https(url: str) -> str:
-    if not url.startswith(("http://", "https://")):
-        return "https://" + url
-    return url
-
-
-def _build_urls(website: str) -> list[str]:
-    base = _ensure_https(website)
-    parsed = urlparse(base)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    urls = [base]
-    for p in OWNER_PATHS:
-        urls.append(urljoin(origin + "/", p.lstrip("/")))
-    return urls
-
-
-def _extract_from_md(md: str, country: str = "AU") -> dict:
-    phone_re = PHONE_PATTERNS.get(country, PHONE_PATTERNS["DEFAULT"])
-    phones = list(dict.fromkeys(phone_re.findall(md)))
-    raw_emails = EMAIL_RE.findall(md)
-    emails = []
-    for e in raw_emails:
-        prefix = e.split('@')[0].lower()
-        if prefix not in GENERIC_PREFIXES:
-            emails.append(e)
-    return {"phones": phones, "emails": list(dict.fromkeys(emails))}
-
+# ── Utilities ────────────────────────────────────────────────────────────────
 
 def _get_domain(url: str) -> str:
     try:
@@ -246,201 +170,363 @@ def _get_domain(url: str) -> str:
         return ""
 
 
-def _is_bad_website(url: str) -> bool:
-    if not url:
-        return True
-    domain = _get_domain(url)
-    return any(domain.endswith(bad) for bad in BAD_WEBSITE_DOMAINS)
+def _clean_text_for_llm(md: str) -> str:
+    """Strip crawl4ai markdown artifacts to reduce LLM token waste."""
+    md = html_unescape(md)
+    md = re.sub(r'<[^>]+>', ' ', md)
+    md = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', md)
+    md = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', md)
+    md = re.sub(r'#{1,6}\s*', '', md)
+    md = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', md)
+    md = re.sub(r'[-=_]{3,}', '', md)
+    md = re.sub(r'[ \t]+', ' ', md)
+    md = re.sub(r'\n{3,}', '\n\n', md)
+    return md.strip()
 
 
-# ── Query builders ───────────────────────────────────────────────────────────
+# ── Step 1: Load DMs needing contacts ────────────────────────────────────────
 
-async def get_hotels(conn, cfg: dict, blanks_only: bool = False) -> list[HotelInfo]:
+async def load_dms_needing_contacts(conn, cfg: dict, need: str = "email") -> list[DMTarget]:
+    """Load decision makers who have names but are missing contact info.
+
+    Args:
+        need: "email" (missing email), "phone" (missing phone), "both" (missing both)
+    """
     jc = cfg.get("join") or ""
     wc = cfg["where"]
 
-    if blanks_only:
-        rows = await conn.fetch(
-            f"SELECT DISTINCT ON (LOWER(TRIM(h.name)))"
-            f"  h.id, h.name, h.phone_google, h.phone_website, h.email,"
-            f"  h.website, h.city, h.state"
-            f" FROM sadie_gtm.hotels h {jc}"
-            f" WHERE ({wc})"
-            f"  AND h.website IS NOT NULL AND h.website != ''"
-            f"  AND h.id NOT IN (SELECT dm.hotel_id FROM sadie_gtm.hotel_decision_makers dm)"
-            f" ORDER BY LOWER(TRIM(h.name)), h.phone_website DESC NULLS LAST"
-        )
-    else:
-        rows = await conn.fetch(
-            f"SELECT DISTINCT ON (LOWER(TRIM(h.name)))"
-            f"  h.id, h.name, h.phone_google, h.phone_website, h.email,"
-            f"  h.website, h.city, h.state"
-            f" FROM sadie_gtm.hotels h {jc}"
-            f" WHERE ({wc})"
-            f"  AND h.website IS NOT NULL AND h.website != ''"
-            f"  AND h.name NOT ILIKE '%demo%'"
-            f"  AND h.name NOT ILIKE '%datawarehouse%'"
-            f" ORDER BY LOWER(TRIM(h.name)), h.phone_website DESC NULLS LAST"
-        )
-
-    hotels = []
-    for r in rows:
-        hotels.append(HotelInfo(
-            hotel_id=r['id'], hotel_name=r['name'],
-            website=r['website'],
-            existing_phones=[p for p in [r.get('phone_google'), r.get('phone_website')] if p],
-            existing_email=r.get('email'),
-        ))
-    return hotels
-
-
-async def load_hotels_needing_people(conn, cfg: dict) -> tuple[list[HotelInfo], dict[int, str]]:
-    """Load hotels without real people (blank or entity-only).
-    Returns (hotels, entity_names_by_hotel_id)."""
-    jc = cfg.get("join") or ""
-    wc = cfg["where"]
+    if need == "email":
+        contact_filter = "AND (dm.email IS NULL OR dm.email = '')"
+    elif need == "phone":
+        contact_filter = "AND (dm.phone IS NULL OR dm.phone = '')"
+    else:  # both
+        contact_filter = "AND (dm.email IS NULL OR dm.email = '') AND (dm.phone IS NULL OR dm.phone = '')"
 
     rows = await conn.fetch(
-        f"SELECT DISTINCT ON (LOWER(TRIM(h.name)))"
-        f"  h.id, h.name, h.website, h.email,"
-        f"  h.phone_google, h.phone_website"
-        f" FROM sadie_gtm.hotels h {jc}"
-        f" WHERE ({wc})"
-        f"  AND h.id NOT IN ("
-        f"    SELECT dm2.hotel_id FROM sadie_gtm.hotel_decision_makers dm2"
-        f"    WHERE dm2.full_name !~* $1"
-        f"  )"
-        f"  AND h.name NOT ILIKE '%demo%'"
-        f"  AND h.name NOT ILIKE '%test%'"
-        f"  AND h.name NOT ILIKE '%HISTORICAL%'"
-        f"  AND h.name NOT ILIKE '%datawarehouse%'"
-        f" ORDER BY LOWER(TRIM(h.name)), h.website DESC NULLS LAST",
-        ENTITY_RE_STR,
-    )
-    hotels = []
-    for r in rows:
-        hotels.append(HotelInfo(
-            hotel_id=r['id'], hotel_name=r['name'],
-            website=r['website'] or '',
-            existing_phones=[p for p in [r.get('phone_google'), r.get('phone_website')] if p],
-            existing_email=r.get('email'),
-        ))
-
-    entity_rows = await conn.fetch(
-        f"SELECT dm.hotel_id, dm.full_name"
+        f"SELECT dm.id AS dm_id, dm.full_name, dm.title,"
+        f"  h.id AS hotel_id, h.name AS hotel_name, h.website"
         f" FROM sadie_gtm.hotel_decision_makers dm"
         f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
         f" {jc}"
-        f" WHERE ({wc}) AND dm.full_name ~* $1",
-        ENTITY_RE_STR,
-    )
-    target_ids = {h.hotel_id for h in hotels}
-    entity_map = {}
-    for r in entity_rows:
-        if r['hotel_id'] in target_ids:
-            entity_map[r['hotel_id']] = r['full_name']
-    return hotels, entity_map
-
-
-async def load_all_hotels(conn, cfg: dict) -> tuple[list[HotelInfo], dict[int, str]]:
-    """Load ALL hotels in this source with their entity names."""
-    jc = cfg.get("join") or ""
-    wc = cfg["where"]
-
-    rows = await conn.fetch(
-        f"SELECT DISTINCT ON (LOWER(TRIM(h.name)))"
-        f"  h.id, h.name, h.website, h.email,"
-        f"  h.phone_google, h.phone_website"
-        f" FROM sadie_gtm.hotels h {jc}"
         f" WHERE ({wc})"
-        f"  AND h.name NOT ILIKE '%demo%'"
-        f"  AND h.name NOT ILIKE '%test%'"
-        f"  AND h.name NOT ILIKE '%HISTORICAL%'"
-        f"  AND h.name NOT ILIKE '%datawarehouse%'"
-        f" ORDER BY LOWER(TRIM(h.name)), h.website DESC NULLS LAST",
-    )
-    hotels = []
-    for r in rows:
-        hotels.append(HotelInfo(
-            hotel_id=r['id'], hotel_name=r['name'],
-            website=r['website'] or '',
-            existing_phones=[p for p in [r.get('phone_google'), r.get('phone_website')] if p],
-            existing_email=r.get('email'),
-        ))
-
-    entity_rows = await conn.fetch(
-        f"SELECT dm.hotel_id, dm.full_name"
-        f" FROM sadie_gtm.hotel_decision_makers dm"
-        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
-        f" {jc}"
-        f" WHERE ({wc}) AND dm.full_name ~* $1",
+        f"  AND dm.full_name !~* $1"
+        f"  {contact_filter}"
+        f" ORDER BY dm.id",
         ENTITY_RE_STR,
     )
+
+    # Also load entity names for these hotels
+    hotel_ids = list({r['hotel_id'] for r in rows})
     entity_map = {}
-    for r in entity_rows:
-        entity_map[r['hotel_id']] = r['full_name']
-    return hotels, entity_map
+    if hotel_ids:
+        entity_rows = await conn.fetch(
+            "SELECT dm.hotel_id, dm.full_name"
+            " FROM sadie_gtm.hotel_decision_makers dm"
+            " WHERE dm.hotel_id = ANY($1) AND dm.full_name ~* $2",
+            hotel_ids, ENTITY_RE_STR,
+        )
+        for er in entity_rows:
+            entity_map[er['hotel_id']] = er['full_name']
+
+    targets = []
+    for r in rows:
+        targets.append(DMTarget(
+            dm_id=r['dm_id'],
+            full_name=r['full_name'],
+            title=r['title'] or '',
+            hotel_id=r['hotel_id'],
+            hotel_name=r['hotel_name'],
+            hotel_website=r['website'] or '',
+            entity_name=entity_map.get(r['hotel_id']),
+        ))
+    return targets
 
 
-# ── Serper functions ─────────────────────────────────────────────────────────
+# ── Step 2: Email pattern discovery ──────────────────────────────────────────
 
-async def _serper_find_website(client, hotel_name: str, sem, cfg: dict) -> str | None:
-    """Search Serper for a hotel's actual website URL."""
+async def email_pattern_discovery(targets: list[DMTarget]) -> int:
+    """Try email pattern guessing + O365/SMTP verification for each target."""
+    from lib.owner_discovery.email_discovery import discover_emails
+
+    # Group by domain to avoid duplicate DNS/MX lookups
+    needs_email = [t for t in targets if not t.found_email and t.hotel_website]
+    if not needs_email:
+        return 0
+
+    sem = asyncio.Semaphore(20)
+    found_count = 0
+
+    async def _try_one(t: DMTarget):
+        nonlocal found_count
+        domain = _get_domain(t.hotel_website)
+        if not domain or '.' not in t.full_name.strip().replace('.', ''):
+            return
+        # Need at least first + last name
+        parts = t.full_name.strip().split()
+        if len(parts) < 2:
+            return
+
+        async with sem:
+            results = await discover_emails(domain=domain, full_name=t.full_name)
+
+        verified = [d for d in results if d['verified']]
+        # Prefer personal (name-based) over role-based
+        personal = [d for d in verified if not any(
+            d['email'].lower().startswith(r + '@') for r in ['gm', 'owner', 'manager', 'director', 'management']
+        )]
+
+        if personal:
+            t.found_email = personal[0]['email']
+            t.email_verified = True
+            t.email_source = personal[0]['method']
+            found_count += 1
+        elif verified:
+            t.found_email = verified[0]['email']
+            t.email_verified = True
+            t.email_source = verified[0]['method']
+            found_count += 1
+
+    await asyncio.gather(*[_try_one(t) for t in needs_email])
+    return found_count
+
+
+# ── Step 3: Serper search + crawl ────────────────────────────────────────────
+
+async def _serper_search(query: str, gl: str = "au", num: int = 5) -> list[dict]:
+    """Search via Serper API. Returns list of {title, link, snippet}."""
     if not SERPER_API_KEY:
-        return None
-    clean = re.sub(r'\s*-\s*[A-Z][a-z]+.*$', '', hotel_name).strip()
-    query = f'{clean} official website'
-    async with sem:
-        try:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 "https://google.serper.dev/search",
                 headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-                json={"q": query, "num": 5, "gl": cfg.get("serper_gl", "")},
-                timeout=10.0,
-            )
-            if resp.status_code != 200:
-                return None
-            for item in resp.json().get("organic", []):
-                url = item.get("link", "")
-                domain = _get_domain(url)
-                if domain and domain not in SEARCH_SKIP_DOMAINS and not _is_bad_website(url):
-                    return url
-        except Exception:
-            pass
-    return None
-
-
-async def _serper_search_entity(client, entity_name: str, sem, cfg: dict) -> list[str]:
-    """Search for entity/holding company URLs to find directors."""
-    if not SERPER_API_KEY:
-        return []
-    clean = re.sub(r'(?i)\b(pty\.?|ltd\.?|limited|the trustee for|the)\b', '', entity_name).strip()
-    clean = re.sub(r'\s+', ' ', clean).strip()
-    if len(clean) < 3:
-        return []
-    suffix = cfg.get("entity_search_suffix", "director OR owner OR team")
-    query = f'"{clean}" {suffix}'
-    async with sem:
-        try:
-            resp = await client.post(
-                "https://google.serper.dev/search",
-                headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-                json={"q": query, "num": 5, "gl": cfg.get("serper_gl", "")},
-                timeout=10.0,
+                json={"q": query, "gl": gl, "num": num},
             )
             if resp.status_code != 200:
                 return []
-            urls = []
-            for item in resp.json().get("organic", []):
-                url = item.get("link", "")
-                domain = _get_domain(url)
-                if domain and not any(domain == s or domain.endswith('.' + s) for s in SEARCH_SKIP_DOMAINS):
-                    urls.append(url)
-                if len(urls) >= 3:
-                    break
-            return urls
-        except Exception:
-            return []
+            data = resp.json()
+            return data.get("organic", [])
+    except Exception as e:
+        logger.debug(f"Serper error: {e}")
+        return []
+
+
+BINARY_EXT_RE = re.compile(
+    r'(?i)\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|jpg|jpeg|png|gif|svg|mp4|mp3|wav|webp|ico)(\?|$)'
+)
+
+
+def _filter_serper_results(results: list[dict]) -> list[str]:
+    """Filter Serper results to useful URLs, skipping social/OTA/registry sites."""
+    urls = []
+    for r in results:
+        link = r.get("link", "")
+        if not link:
+            continue
+        if BINARY_EXT_RE.search(link):
+            continue
+        domain = _get_domain(link)
+        if any(domain == skip or domain.endswith('.' + skip) for skip in SEARCH_SKIP_DOMAINS):
+            continue
+        # Catch TripAdvisor country variants (tripadvisor.ie, tripadvisor.co.nz, etc.)
+        if 'tripadvisor' in domain:
+            continue
+        urls.append(link)
+    return urls
+
+
+async def serper_search_contacts(targets: list[DMTarget], cfg: dict, concurrency: int = 10) -> int:
+    """Search for contact info via Serper + crawl found pages.
+
+    For each person still missing email, searches:
+      "{full_name} {hotel_name} email contact"
+    Then crawls the top results and extracts emails/phones.
+    """
+    needs = [t for t in targets if not t.found_email]
+    if not needs:
+        return 0
+
+    gl = cfg.get("serper_gl", "au")
+    country = cfg.get("country", "AU")
+    phone_re = PHONE_PATTERNS.get(country, PHONE_PATTERNS["DEFAULT"])
+
+    # Step 3a: Serper search for each person
+    logger.info(f"Serper: searching for {len(needs)} people...")
+    search_sem = asyncio.Semaphore(5)  # Don't hammer Serper
+    url_map: dict[str, list[DMTarget]] = {}  # url -> targets that need it
+
+    async def _search_one(t: DMTarget):
+        # Build query: "John Smith Big4 Riverside email contact"
+        entity = t.entity_name or t.hotel_name
+        query = f'"{t.full_name}" {entity} email contact'
+        async with search_sem:
+            results = await _serper_search(query, gl=gl)
+
+        # Check snippets for emails first (saves crawling)
+        name_parts = t.full_name.lower().split()
+        first = name_parts[0] if name_parts else ""
+        last = name_parts[-1] if len(name_parts) > 1 else ""
+        hotel_domain = _get_domain(t.hotel_website) if t.hotel_website else ""
+        for r in results:
+            snippet = r.get("snippet", "")
+            emails = EMAIL_RE.findall(snippet)
+            for e in emails:
+                el = e.split('@')[0].lower()
+                email_domain = e.split('@')[1].lower() if '@' in e else ""
+                # Require both first AND last name parts (e.g. john.smith@, jsmith@)
+                if not (first and last and (
+                    (first in el and last in el) or
+                    (first[0] in el and last in el and el.index(first[0]) < el.index(last))
+                )):
+                    continue
+                # Domain must be related: hotel domain, personal provider, or entity domain
+                if hotel_domain and (email_domain == hotel_domain or email_domain.endswith('.' + hotel_domain)):
+                    pass  # hotel domain — always accept
+                elif email_domain in PERSONAL_EMAIL_DOMAINS:
+                    pass  # personal email — accept
+                else:
+                    logger.debug(f"  Skipping unrelated email: {t.full_name} -> {e} (domain {email_domain})")
+                    continue
+                t.found_email = e
+                t.email_source = "serper_snippet"
+                logger.debug(f"  Found email in snippet: {t.full_name} -> {e}")
+                return
+
+        # Collect URLs to crawl
+        urls = _filter_serper_results(results)
+        for url in urls[:3]:  # top 3 per person
+            url_map.setdefault(url, []).append(t)
+
+    await asyncio.gather(*[_search_one(t) for t in needs])
+
+    # How many still need crawling?
+    still_needs = [t for t in needs if not t.found_email]
+    urls_to_crawl = [url for url, targets in url_map.items()
+                     if any(not t.found_email for t in targets)]
+
+    if not urls_to_crawl:
+        snippet_found = sum(1 for t in needs if t.found_email)
+        return snippet_found
+
+    # Step 3b: Crawl found pages
+    logger.info(f"Crawling {len(urls_to_crawl)} pages from Serper results...")
+    browser_config = BrowserConfig(
+        headless=True, text_mode=True, light_mode=True, verbose=False,
+        extra_args=["--disable-gpu", "--disable-extensions", "--disable-dev-shm-usage",
+                     "--no-first-run", "--disable-background-networking"],
+    )
+    run_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        wait_until="domcontentloaded",
+        delay_before_return_html=0,
+        mean_delay=0, max_range=0,
+        page_timeout=15000,
+        scan_full_page=False,
+        wait_for_images=False,
+        excluded_tags=["nav", "script", "style", "noscript", "aside"],
+    )
+
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        crawl_results = await crawler.arun_many(
+            urls=urls_to_crawl, config=run_config,
+            dispatcher=SemaphoreDispatcher(max_session_permit=min(concurrency, len(urls_to_crawl))),
+        )
+
+    # Step 3c: Extract contacts from crawled pages
+    found_count = 0
+    for cr in crawl_results:
+        if not cr.success:
+            continue
+        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown') else cr.markdown) or ""
+        if len(md) < 50:
+            continue
+
+        page_emails = EMAIL_RE.findall(md)
+        page_phones = phone_re.findall(md)
+
+        # Match emails to targets that triggered this URL
+        page_targets = url_map.get(cr.url, [])
+        for t in page_targets:
+            if t.found_email:
+                continue
+            # Look for email matching the person's name (require first+last)
+            name_parts = t.full_name.lower().split()
+            first = name_parts[0] if name_parts else ""
+            last = name_parts[-1] if len(name_parts) > 1 else ""
+            hotel_domain = _get_domain(t.hotel_website) if t.hotel_website else ""
+            for e in page_emails:
+                el = e.split('@')[0].lower()
+                email_domain = e.split('@')[1].lower() if '@' in e else ""
+                if not (first and last and (
+                    (first in el and last in el) or
+                    (first[0] in el and last in el and el.index(first[0]) < el.index(last))
+                )):
+                    continue
+                # Domain relevance check
+                is_related = (
+                    (hotel_domain and (email_domain == hotel_domain or email_domain.endswith('.' + hotel_domain)))
+                    or email_domain in PERSONAL_EMAIL_DOMAINS
+                )
+                if not is_related:
+                    continue
+                t.found_email = e
+                t.email_verified = False
+                t.email_source = "serper_crawl"
+                found_count += 1
+                logger.debug(f"  Found email on page: {t.full_name} -> {e}")
+                break
+
+            if not t.found_phone and page_phones:
+                t.found_phone = page_phones[0]
+                t.phone_source = "serper_crawl"
+
+    # Step 3d: LLM extraction for pages that had text but no pattern match
+    # Group remaining targets by crawl URL for LLM batch
+    llm_targets = []
+    for cr in crawl_results:
+        if not cr.success:
+            continue
+        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown') else cr.markdown) or ""
+        if len(md) < 100:
+            continue
+        page_targets = [t for t in url_map.get(cr.url, []) if not t.found_email]
+        if page_targets:
+            llm_targets.append((cr.url, md, page_targets))
+
+    if llm_targets:
+        logger.info(f"LLM extracting contacts from {len(llm_targets)} pages...")
+        sem = asyncio.Semaphore(10)
+
+        async def _llm_extract(url, md, page_targets):
+            names = [t.full_name for t in page_targets]
+            cleaned = _clean_text_for_llm(md)[:20000]
+            contacts = await llm_extract_contacts(cleaned, names)
+            for t in page_targets:
+                if t.found_email:
+                    continue
+                match = contacts.get(t.full_name.lower())
+                if match:
+                    email = match.get('email')
+                    if email and '@' in email:
+                        prefix = email.split('@')[0].lower()
+                        # Reject generic emails (info@, admin@, etc.)
+                        generic = {'info', 'admin', 'contact', 'hello', 'enquiries',
+                                   'bookings', 'reservations', 'reception', 'sales',
+                                   'support', 'help', 'noreply', 'no-reply', 'stay'}
+                        if prefix not in generic:
+                            t.found_email = email
+                            t.email_verified = False
+                            t.email_source = "llm_extract"
+                    phone = match.get('phone')
+                    if phone and phone != 'null' and not t.found_phone:
+                        t.found_phone = phone
+                        t.phone_source = "llm_extract"
+
+        await asyncio.gather(*[_llm_extract(url, md, pts) for url, md, pts in llm_targets])
+
+    total_found = sum(1 for t in needs if t.found_email)
+    return total_found
 
 
 # ── LLM extraction ───────────────────────────────────────────────────────────
@@ -455,658 +541,267 @@ def _get_bedrock():
     return _bedrock_client
 
 
-async def llm_extract_owners(text: str, hotel_name: str) -> list[dict]:
-    prompt = f"""Extract person names mentioned as owner, manager, director, or host for this property: {hotel_name}
+async def llm_extract_contacts(text: str, names: list[str]) -> dict:
+    """Use LLM to extract contact info for specific people from page text.
+
+    Returns dict: {name_lower: {"email": ..., "phone": ...}}
+    """
+    names_str = ", ".join(names)
+    prompt = f"""Find email addresses and phone numbers for these specific people in the text below:
+{names_str}
 
 Text:
-{text[:5000]}
+{text}
 
 Rules:
-- Only include people with BOTH first name AND surname
-- Do NOT include company names, trusts, or business entities
-- Include their email and phone if mentioned near their name
+- Only return contact info you can clearly associate with one of the named people
+- Return email and phone if found
 - Respond with ONLY a JSON array, no explanation
 
-JSON format: [{{"name":"First Last","title":"Role","email":"or null","phone":"or null"}}]
-If none found respond with exactly: []"""
+JSON format: [{{"name":"First Last","email":"or null","phone":"or null"}}]
+If no contact info found for any of them, respond with exactly: []"""
 
-    try:
-        bedrock = _get_bedrock()
-        resp = await asyncio.to_thread(
-            bedrock.converse,
-            modelId=BEDROCK_MODEL_ID,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": 500, "temperature": 0.0},
-        )
-        content = resp["output"]["message"]["content"][0]["text"].strip()
-        logger.debug(f"LLM raw response for {hotel_name}: {content[:300]}")
-        # Extract JSON from response (handle markdown code blocks or chatty preamble)
-        if content.startswith("```"):
-            content = re.sub(r'^```\w*\n?', '', content)
-            content = re.sub(r'\n?```$', '', content)
-        # Find JSON array in response if model added explanation text
-        json_match = re.search(r'\[.*\]', content, re.DOTALL)
-        if json_match:
-            content = json_match.group(0)
-        data = json.loads(content)
-        valid = []
-        for d in (data if isinstance(data, list) else [data]):
-            name = (d.get("name") or "").strip()
-            if not name or " " not in name:
+    for attempt in range(3):
+        try:
+            bedrock = _get_bedrock()
+            resp = await asyncio.to_thread(
+                bedrock.converse,
+                modelId=BEDROCK_MODEL_ID,
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                inferenceConfig={"maxTokens": 500, "temperature": 0.0},
+            )
+            content = resp["output"]["message"]["content"][0]["text"].strip()
+            if content.startswith("```"):
+                content = re.sub(r'^```\w*\n?', '', content)
+                content = re.sub(r'\n?```$', '', content)
+            json_match = re.search(r'\[.*\]', content, re.DOTALL)
+            if json_match:
+                content = json_match.group(0)
+            data = json.loads(content)
+            result = {}
+            for d in (data if isinstance(data, list) else [data]):
+                name = (d.get("name") or "").strip().lower()
+                email = (d.get("email") or "").strip() or None
+                phone = (d.get("phone") or "").strip() or None
+                if email and ('@' not in email or '.' not in email.split('@')[-1]):
+                    email = None
+                if name:
+                    result[name] = {"email": email, "phone": phone}
+            return result
+        except Exception as e:
+            err_str = str(e)
+            if attempt < 2 and ("throttl" in err_str.lower() or "429" in err_str or "Too Many" in err_str):
+                wait = 2 ** (attempt + 1)
+                logger.warning(f"Bedrock throttled, retry in {wait}s...")
+                await asyncio.sleep(wait)
                 continue
-            if re.search(r'(?i)(pty|ltd|trust|holiday|park|resort|caravan|tourism)', name):
-                continue
-            d["name"] = name
-            valid.append(d)
-        return valid
-    except Exception as e:
-        logger.warning(f"LLM error for {hotel_name}: {e}")
-        return []
+            logger.warning(f"LLM error: {e}")
+            return {}
+    return {}
 
 
-# ── 3-pass enrichment ────────────────────────────────────────────────────────
+# ── Batch update ─────────────────────────────────────────────────────────────
 
-async def enrich(args, cfg: dict, all_hotels: bool = False):
-    """Targeted enrichment using 3-pass crawl with link discovery.
-    Pass 1: Crawl homepages, discover internal links.
-    Pass 2: Crawl discovered pages + entity URLs from Serper.
-    Pass 3: Crawl deeper pages discovered from Pass 2.
-    Then LLM extract people and batch insert."""
+async def apply_results(conn, targets: list[DMTarget], dry_run: bool = True) -> None:
+    """Batch update DMs with found contact info."""
+    updates = [t for t in targets if t.found_email or t.found_phone]
+    if not updates:
+        print("No contact info found to update.")
+        return
+
+    dm_ids = [t.dm_id for t in updates]
+    emails = [t.found_email for t in updates]
+    phones = [t.found_phone for t in updates]
+    verified = [t.email_verified for t in updates]
+
+    if dry_run:
+        print(f"\nDRY RUN — would update {len(updates)} DMs. Run with --apply to write.")
+        return
+
+    await conn.execute(
+        "UPDATE sadie_gtm.hotel_decision_makers dm"
+        " SET email = COALESCE(NULLIF(dm.email, ''), v.email),"
+        "     email_verified = CASE WHEN v.email IS NOT NULL AND (dm.email IS NULL OR dm.email = '')"
+        "                       THEN v.verified ELSE dm.email_verified END,"
+        "     phone = COALESCE(NULLIF(dm.phone, ''), v.phone),"
+        "     updated_at = NOW()"
+        " FROM unnest($1::int[], $2::text[], $3::text[], $4::bool[])"
+        "   AS v(id, email, phone, verified)"
+        " WHERE dm.id = v.id",
+        dm_ids, emails, phones, verified,
+    )
+    print(f"\nAPPLIED: Updated {len(updates)} DMs in database.")
+
+
+# ── Main enrichment flow ─────────────────────────────────────────────────────
+
+async def enrich(args, cfg: dict):
+    """Main enrichment pipeline: email discovery → serper search → update."""
     conn = await asyncpg.connect(**DB_CONFIG)
-    dry_run = not args.apply
-    country = cfg.get("country", "AU")
     label = cfg["label"]
 
     # Step 1: Load targets
-    if all_hotels:
-        hotels, entity_map = await load_all_hotels(conn, cfg)
-        logger.info(f"Loaded ALL {len(hotels)} {label} hotels ({len(entity_map)} with entity names)")
-    else:
-        hotels, entity_map = await load_hotels_needing_people(conn, cfg)
-        logger.info(f"Found {len(hotels)} {label} hotels needing real people ({len(entity_map)} with entity names)")
+    targets = await load_dms_needing_contacts(conn, cfg, need="email")
+    logger.info(f"Found {len(targets)} {label} DMs missing email")
 
-    if not hotels:
-        print(f"All {label} hotels have real people!")
+    if not targets:
+        print(f"All {label} DMs have email addresses!")
         await conn.close()
         return
 
-    # Filter to crawlable hotels
-    crawlable = [h for h in hotels if h.website and not _is_bad_website(h.website)]
-    no_website = len(hotels) - len(crawlable)
-    total_crawlable = len(crawlable)
-    logger.info(f"{total_crawlable} with crawlable websites, {no_website} skipped (bad/missing URL)")
+    # Apply offset/limit
+    if args.offset and args.offset < len(targets):
+        targets = targets[args.offset:]
+        logger.info(f"Skipping first {args.offset} DMs (--offset)")
+    if args.limit and args.limit < len(targets):
+        targets = targets[:args.limit]
+        logger.info(f"Limited to {len(targets)} DMs (--limit)")
 
-    # Apply offset for resumability on large batches
-    if args.offset and args.offset < len(crawlable):
-        crawlable = crawlable[args.offset:]
-        logger.info(f"Skipping first {args.offset} hotels (--offset)")
+    # Step 2: Email pattern guessing + verification
+    logger.info(f"Step 1: Email pattern discovery for {len(targets)} people...")
+    email_found = await email_pattern_discovery(targets)
+    logger.info(f"Step 1 done: {email_found}/{len(targets)} found via email patterns")
 
-    if args.limit and args.limit < len(crawlable):
-        crawlable = crawlable[:args.limit]
-        logger.info(f"Limited to {len(crawlable)} hotels (--limit)")
-
-    if not crawlable:
-        print(f"No crawlable {label} hotels!")
-        await conn.close()
-        return
-
-    # Step 2: Browser config — max speed, direct (no proxy)
-    browser_config = BrowserConfig(
-        headless=True,
-        text_mode=True,
-        light_mode=True,
-        verbose=False,
-        extra_args=[
-            "--disable-gpu", "--disable-extensions", "--disable-dev-shm-usage",
-            "--no-first-run", "--disable-background-networking",
-        ],
-    )
-    run_config = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        wait_until="domcontentloaded",
-        delay_before_return_html=0,
-        mean_delay=0, max_range=0,
-        page_timeout=10000,
-        scan_full_page=False,
-        wait_for_images=False,
-        excluded_tags=["nav", "script", "style", "noscript", "aside"],
-    )
-
-    NUM_BROWSERS = 4
-
-    async def _parallel_crawl(urls_to_crawl: list[str]) -> list:
-        """Split URLs across multiple crawler instances for true parallelism."""
-        if not urls_to_crawl:
-            return []
-        if len(urls_to_crawl) <= 50:
-            async with AsyncWebCrawler(config=browser_config) as c:
-                return await c.arun_many(
-                    urls=urls_to_crawl, config=run_config,
-                    dispatcher=SemaphoreDispatcher(max_session_permit=min(args.concurrency, len(urls_to_crawl))),
-                )
-        chunks = [[] for _ in range(NUM_BROWSERS)]
-        for i, url in enumerate(urls_to_crawl):
-            chunks[i % NUM_BROWSERS].append(url)
-
-        async def _crawl_chunk(chunk_urls):
-            async with AsyncWebCrawler(config=browser_config) as c:
-                return await c.arun_many(
-                    urls=chunk_urls, config=run_config,
-                    dispatcher=SemaphoreDispatcher(
-                        max_session_permit=max(1, args.concurrency // NUM_BROWSERS)
-                    ),
-                )
-
-        chunk_results = await asyncio.gather(*[_crawl_chunk(ch) for ch in chunks if ch])
-        all_results = []
-        for cr_list in chunk_results:
-            all_results.extend(cr_list)
-        return all_results
-
-    results_list = [HotelResult(hotel=h) for h in crawlable]
-
-    # Build homepage URL list
-    homepage_urls: list[str] = []
-    url_to_idx: dict[str, int] = {}
-    for i, hotel in enumerate(crawlable):
-        url = _ensure_https(hotel.website)
-        homepage_urls.append(url)
-        url_to_idx[url] = i
-
-    def _process_crawl_result(cr, idx):
-        """Extract text + phones/emails from a crawl result."""
-        r = results_list[idx]
-        if not cr.success:
-            r.errors.append(f"{cr.url}: failed")
-            return
-        r.pages_crawled += 1
-        md = (cr.markdown.raw_markdown if hasattr(cr.markdown, 'raw_markdown') else cr.markdown) or ""
-        if len(md) < 50:
-            return
-        r.page_texts.append(md)
-        extracted = _extract_from_md(md, country)
-        existing_norm = {_norm_phone(p) for p in r.hotel.existing_phones}
-        for p in extracted["phones"]:
-            if _norm_phone(p) not in existing_norm:
-                r.new_phones.append(p)
-        for e in extracted["emails"]:
-            if not r.hotel.existing_email or e.lower() != r.hotel.existing_email.lower():
-                r.new_emails.append(e)
-
-    # ── Pass 1: Crawl homepages, discover internal links ──
-    logger.info(f"Pass 1: {len(homepage_urls)} homepages ({NUM_BROWSERS} browsers, concurrency={args.concurrency})...")
-    hp_results = await _parallel_crawl(homepage_urls)
-
-    discovered_urls: list[str] = []
-    disc_url_to_idx: dict[str, int] = {}
-    seen_urls = set(homepage_urls)
-
-    for cr in hp_results:
-        if cr.url not in url_to_idx:
-            continue
-        idx = url_to_idx[cr.url]
-        _process_crawl_result(cr, idx)
-
-        links = cr.links if isinstance(cr.links, dict) else {}
-        for link in links.get("internal", []):
-            href = (link.get("href") or "").strip()
-            text = (link.get("text") or "").strip()
-            if not href or href in seen_urls or BINARY_EXT_RE.search(href):
-                continue
-            if RELEVANT_RE.search(href) or RELEVANT_RE.search(text):
-                seen_urls.add(href)
-                discovered_urls.append(href)
-                disc_url_to_idx[href] = idx
-
-    hp_ok = sum(1 for r in results_list if r.pages_crawled > 0)
-    logger.info(f"Pass 1 done: {hp_ok}/{len(crawlable)} homepages OK, {len(discovered_urls)} internal pages discovered")
-
-    # ── Entity website search via Serper (run concurrently) ──
-    if entity_map and SERPER_API_KEY:
-        unique_entities: dict[str, dict] = {}
-        for i, hotel in enumerate(crawlable):
-            ename = entity_map.get(hotel.hotel_id)
-            if ename:
-                key = ename.strip().upper()
-                if key not in unique_entities:
-                    unique_entities[key] = {'name': ename, 'indices': []}
-                unique_entities[key]['indices'].append(i)
-
-        logger.info(f"Searching {len(unique_entities)} entity websites via Serper...")
-        async with httpx.AsyncClient() as serper_client:
-            sem = asyncio.Semaphore(50)
-            entity_items = list(unique_entities.values())
-            entity_url_results = await asyncio.gather(*[
-                _serper_search_entity(serper_client, item['name'], sem, cfg)
-                for item in entity_items
-            ])
-
-        entity_urls_added = 0
-        for item, urls in zip(entity_items, entity_url_results):
-            for url in urls:
-                if url not in seen_urls and not BINARY_EXT_RE.search(url):
-                    seen_urls.add(url)
-                    idx = item['indices'][0]
-                    discovered_urls.append(url)
-                    disc_url_to_idx[url] = idx
-                    entity_urls_added += 1
-        logger.info(f"Added {entity_urls_added} entity URLs to crawl list")
-
-    # ── Pass 2: Crawl discovered park pages + entity websites ──
-    deeper_urls: list[str] = []
-    deeper_url_to_idx: dict[str, int] = {}
-    if discovered_urls:
-        logger.info(f"Pass 2: {len(discovered_urls)} pages (internal + entity)...")
-        disc_results = await _parallel_crawl(discovered_urls)
-        for cr in disc_results:
-            if cr.url not in disc_url_to_idx:
-                continue
-            idx = disc_url_to_idx[cr.url]
-            _process_crawl_result(cr, idx)
-            links = cr.links if isinstance(cr.links, dict) else {}
-            for link in links.get("internal", []):
-                href = (link.get("href") or "").strip()
-                text = (link.get("text") or "").strip()
-                if not href or href in seen_urls or BINARY_EXT_RE.search(href):
-                    continue
-                if RELEVANT_RE.search(href) or RELEVANT_RE.search(text):
-                    seen_urls.add(href)
-                    deeper_urls.append(href)
-                    deeper_url_to_idx[href] = idx
-
-    # ── Pass 3: Crawl deeper pages ──
-    if deeper_urls:
-        logger.info(f"Pass 3: {len(deeper_urls)} deeper pages...")
-        deep_results = await _parallel_crawl(deeper_urls)
-        for cr in deep_results:
-            if cr.url not in deeper_url_to_idx:
-                continue
-            _process_crawl_result(cr, deeper_url_to_idx[cr.url])
-
-    # Deduplicate
-    for r in results_list:
-        r.new_phones = list(dict.fromkeys(r.new_phones))
-        r.new_emails = list(dict.fromkeys(r.new_emails))
-
-    total_pages = sum(r.pages_crawled for r in results_list)
-    logger.info(f"Total pages crawled: {total_pages} across {len(crawlable)} hotels")
-
-    # Step 3: LLM extraction
-    parks_with_text = sum(1 for r in results_list if r.page_texts)
-    logger.info(f"Pre-LLM: {parks_with_text}/{len(results_list)} hotels have page text")
-    logger.info("LLM extracting people (Bedrock Nova Micro)...")
-    sem = asyncio.Semaphore(10)  # Bedrock rate limits
-
-    async def _extract_one(r):
-        if not r.page_texts:
-            return
-        combined = "\n---\n".join(r.page_texts)
-        async with sem:
-            r.owner_names = await llm_extract_owners(combined, r.hotel.hotel_name)
-
-    await asyncio.gather(*[_extract_one(r) for r in results_list])
+    # Step 3: Serper search for remaining
+    still_need = sum(1 for t in targets if not t.found_email)
+    if still_need > 0 and SERPER_API_KEY:
+        logger.info(f"Step 2: Serper search for {still_need} remaining people...")
+        serper_found = await serper_search_contacts(targets, cfg, concurrency=args.concurrency)
+        logger.info(f"Step 2 done: {serper_found} additional found via Serper")
+    elif still_need > 0:
+        logger.warning("No SERPER_API_KEY — skipping web search step")
 
     # Results summary
-    total_found = sum(1 for r in results_list if r.owner_names)
-    total_people = sum(len(r.owner_names) for r in results_list)
-    pages_ok = sum(r.pages_crawled for r in results_list)
-    pages_fail = sum(len(r.errors) for r in results_list)
+    total_email = sum(1 for t in targets if t.found_email)
+    total_phone = sum(1 for t in targets if t.found_phone)
+    verified = sum(1 for t in targets if t.email_verified)
 
-    print(f"\n{'='*70}")
-    print(f"{label.upper()} ENRICHMENT RESULTS")
-    print(f"{'='*70}")
-    print(f"Hotels targeted:     {len(hotels)}")
-    print(f"Hotels crawled:      {len(crawlable)}")
-    print(f"Pages OK / failed:   {pages_ok} / {pages_fail}")
-    print(f"Hotels with people:  {total_found}")
-    print(f"Total people found:  {total_people}")
+    print(f"\n{'='*60}")
+    print(f"{label.upper()} CONTACT ENRICHMENT RESULTS")
+    print(f"{'='*60}")
+    print(f"DMs targeted:        {len(targets)}")
+    print(f"Emails found:        {total_email} ({verified} verified)")
+    print(f"Phones found:        {total_phone}")
+    print(f"Still missing email: {len(targets) - total_email}")
 
-    for r in results_list:
-        if r.owner_names:
-            for o in r.owner_names:
-                extras = []
-                if o.get('email'): extras.append(o['email'])
-                if o.get('phone'): extras.append(o['phone'])
-                extra_str = f" ({', '.join(extras)})" if extras else ""
-                print(f"  {r.hotel.hotel_name[:50]:<50} | {o['name']} - {o.get('title','?')}{extra_str}")
-        elif not r.pages_crawled:
-            print(f"  {r.hotel.hotel_name[:50]:<50} | NO PAGES ({len(r.errors)} errors)")
+    # Show by source
+    sources = {}
+    for t in targets:
+        if t.email_source:
+            sources[t.email_source] = sources.get(t.email_source, 0) + 1
+    if sources:
+        print(f"\nEmail sources:")
+        for src, cnt in sorted(sources.items(), key=lambda x: -x[1]):
+            print(f"  {src:<25} {cnt:>5}")
 
-    # Build batch arrays for DM insert
-    dm_ids, dm_names, dm_titles, dm_emails = [], [], [], []
-    dm_phones, dm_sources_json, dm_conf, dm_urls = [], [], [], []
-    dm_verified = []
-    seen = set()
+    # Show found contacts
+    found = [t for t in targets if t.found_email or t.found_phone]
+    if found:
+        print(f"\nFound contacts:")
+        for t in found[:50]:
+            parts = []
+            if t.found_email:
+                v = " (verified)" if t.email_verified else ""
+                parts.append(f"{t.found_email}{v}")
+            if t.found_phone:
+                parts.append(t.found_phone)
+            print(f"  {t.full_name:30s} | {t.hotel_name[:35]:35s} | {', '.join(parts)}")
+        if len(found) > 50:
+            print(f"  ... and {len(found) - 50} more")
 
-    for r in results_list:
-        for owner in r.owner_names:
-            name = owner.get('name', '').strip()
-            title = owner.get('title', 'Owner').strip()
-            if not name or len(name) < 4 or ' ' not in name:
-                continue
-            if BUSINESS_RE.search(name):
-                continue
-            key = (r.hotel.hotel_id, name.lower(), title.lower())
-            if key in seen:
-                continue
-            seen.add(key)
-
-            # Validate email/phone from LLM output
-            raw_email = (owner.get('email') or '').strip() or None
-            raw_phone = (owner.get('phone') or '').strip() or None
-            if raw_email and (
-                '@' not in raw_email
-                or '.' not in raw_email.split('@')[-1]
-                or re.match(r'^[\d\s]+$', raw_email)
-            ):
-                logger.warning(f"Bad email from LLM for {name}: {raw_email!r} — moving to phone")
-                if not raw_phone and re.match(r'^[\d\s\-\+\(\)]+$', raw_email):
-                    raw_phone = raw_email
-                raw_email = None
-            if raw_phone and len(re.sub(r'[^\d]', '', raw_phone)) < 8:
-                logger.warning(f"Bad phone from LLM for {name}: {raw_phone!r} — dropping")
-                raw_phone = None
-
-            dm_ids.append(r.hotel.hotel_id)
-            dm_names.append(name)
-            dm_titles.append(title)
-            dm_emails.append(raw_email)
-            dm_verified.append(False)
-            dm_phones.append(raw_phone)
-            dm_sources_json.append(json.dumps(["website_rescrape"]))
-            dm_conf.append(0.70)
-            dm_urls.append(r.hotel.website or None)
-
-    # Map scraped contact info: always save to hotel record, also enrich DMs if they exist
-    hotel_contact_ids, hotel_contact_emails, hotel_contact_phones = [], [], []
-    entity_contact_ids, entity_contact_emails, entity_contact_phones = [], [], []
-    for r in results_list:
-        best_email = None
-        best_phone = r.new_phones[0] if r.new_phones else None
-        if r.new_emails:
-            for e in r.new_emails:
-                prefix = e.split('@')[0].lower()
-                if prefix not in GENERIC_PREFIXES:
-                    best_email = e
-                    break
-            if not best_email:
-                best_email = r.new_emails[0]
-
-        if not best_email and not best_phone:
-            continue
-
-        # Always save to hotel record
-        hotel_contact_ids.append(r.hotel.hotel_id)
-        hotel_contact_emails.append(best_email)
-        hotel_contact_phones.append(best_phone)
-
-        # Also enrich person DMs in the batch
-        for idx in [i for i, hid in enumerate(dm_ids) if hid == r.hotel.hotel_id]:
-            if not dm_emails[idx] and best_email:
-                dm_emails[idx] = best_email
-            if not dm_phones[idx] and best_phone:
-                dm_phones[idx] = best_phone
-
-        # Also enrich existing entity DMs
-        if r.hotel.hotel_id in entity_map:
-            entity_contact_ids.append(r.hotel.hotel_id)
-            entity_contact_emails.append(best_email)
-            entity_contact_phones.append(best_phone)
-
-    dm_with_email = sum(1 for e in dm_emails if e)
-    dm_with_phone = sum(1 for p in dm_phones if p)
-    print(f"\nNew DMs to insert: {len(dm_ids)} ({dm_with_email} with email, {dm_with_phone} with phone)")
-    print(f"Hotel contact updates: {len(hotel_contact_ids)} (phone/email from website)")
-    if entity_contact_ids:
-        print(f"Entity DM contact updates: {len(entity_contact_ids)}")
-
-    if dry_run:
-        print(f"\nDRY RUN — run with --apply to write to DB")
-    else:
-        if dm_ids:
-            await conn.execute(
-                "INSERT INTO sadie_gtm.hotel_decision_makers"
-                "  (hotel_id, full_name, title, email, email_verified, phone,"
-                "   sources, confidence, raw_source_url)"
-                " SELECT"
-                "  v.hotel_id, v.full_name, v.title, v.email, v.email_verified, v.phone,"
-                "  ARRAY(SELECT jsonb_array_elements_text(v.sources_json)),"
-                "  v.confidence, v.raw_source_url"
-                " FROM unnest("
-                "  $1::int[], $2::text[], $3::text[], $4::text[],"
-                "  $5::bool[], $6::text[], $7::jsonb[], $8::float4[], $9::text[]"
-                " ) AS v(hotel_id, full_name, title, email, email_verified, phone,"
-                "        sources_json, confidence, raw_source_url)"
-                " ON CONFLICT (hotel_id, full_name, title) DO UPDATE"
-                " SET sources = (SELECT array_agg(DISTINCT s) FROM unnest("
-                "     array_cat(sadie_gtm.hotel_decision_makers.sources, EXCLUDED.sources)) s),"
-                "     confidence = GREATEST(EXCLUDED.confidence, sadie_gtm.hotel_decision_makers.confidence),"
-                "     email = COALESCE(EXCLUDED.email, sadie_gtm.hotel_decision_makers.email),"
-                "     phone = COALESCE(EXCLUDED.phone, sadie_gtm.hotel_decision_makers.phone),"
-                "     updated_at = NOW()",
-                dm_ids, dm_names, dm_titles, dm_emails,
-                dm_verified, dm_phones, dm_sources_json, dm_conf, dm_urls,
-            )
-        if entity_contact_ids:
-            await conn.execute(
-                "UPDATE sadie_gtm.hotel_decision_makers dm"
-                " SET email = COALESCE(dm.email, v.email),"
-                "     phone = COALESCE(dm.phone, v.phone),"
-                "     updated_at = NOW()"
-                " FROM unnest($1::int[], $2::text[], $3::text[])"
-                "   AS v(hotel_id, email, phone)"
-                " WHERE dm.hotel_id = v.hotel_id"
-                "   AND dm.full_name ~* $4",
-                entity_contact_ids, entity_contact_emails, entity_contact_phones,
-                ENTITY_RE_STR,
-            )
-        if hotel_contact_ids:
-            await conn.execute(
-                "UPDATE sadie_gtm.hotels h"
-                " SET email = COALESCE(NULLIF(h.email, ''), v.email),"
-                "     phone_website = COALESCE(NULLIF(h.phone_website, ''), v.phone),"
-                "     updated_at = NOW()"
-                " FROM unnest($1::int[], $2::text[], $3::text[])"
-                "   AS v(id, email, phone)"
-                " WHERE h.id = v.id",
-                hotel_contact_ids, hotel_contact_emails, hotel_contact_phones,
-            )
-        print(f"\nAPPLIED to database!")
-
-    await conn.close()
-
-
-# ── Chain fill ───────────────────────────────────────────────────────────────
-
-async def chain_fill(conn, cfg: dict, dry_run: bool = True) -> int:
-    """Fill known chain executives into hotels that have zero real people DMs."""
-    chain_execs = cfg.get("chain_execs", {})
-    if not chain_execs:
-        print("No chain executives configured for this source.")
-        return 0
-
-    jc = cfg.get("join") or ""
-    wc = cfg["where"]
-    dm_ids, dm_names, dm_titles, dm_sources_json, dm_conf = [], [], [], [], []
-
-    for chain_name, chain in chain_execs.items():
-        parks = await conn.fetch(
-            f"SELECT h.id, h.name FROM sadie_gtm.hotels h"
-            f" {jc}"
-            f" WHERE ({wc})"
-            f"  AND ({chain['match']})"
-            f"  AND h.id NOT IN ("
-            f"    SELECT dm2.hotel_id FROM sadie_gtm.hotel_decision_makers dm2"
-            f"    WHERE dm2.full_name !~* $1"
-            f"  ) ORDER BY h.name",
-            r'(PTY|LTD|TRUST|HOLDINGS|GROUP|CORP)',
-        )
-        if not parks:
-            continue
-        logger.info(f"{chain_name}: {len(parks)} hotels need people")
-        for person_name, person_title in chain["people"]:
-            for park in parks:
-                dm_ids.append(park['id'])
-                dm_names.append(person_name)
-                dm_titles.append(person_title)
-                dm_sources_json.append(json.dumps(["chain_mgmt_lookup"]))
-                dm_conf.append(0.60)
-
-    if not dm_ids:
-        print("No chain hotels need filling.")
-        return 0
-
-    for i in range(len(dm_ids)):
-        logger.info(f"  + {dm_names[i]} ({dm_titles[i]}) -> hotel_id={dm_ids[i]}")
-
-    if dry_run:
-        print(f"\nDRY RUN: Would insert {len(dm_ids)} chain DMs")
-        return len(dm_ids)
-
-    await conn.execute(
-        "INSERT INTO sadie_gtm.hotel_decision_makers"
-        "  (hotel_id, full_name, title, sources, confidence)"
-        " SELECT v.hotel_id, v.full_name, v.title,"
-        "  ARRAY(SELECT jsonb_array_elements_text(v.sources_json)),"
-        "  v.confidence"
-        " FROM unnest($1::int[], $2::text[], $3::text[], $4::jsonb[], $5::float4[])"
-        "  AS v(hotel_id, full_name, title, sources_json, confidence)"
-        " ON CONFLICT (hotel_id, full_name, title) DO NOTHING",
-        dm_ids, dm_names, dm_titles, dm_sources_json, dm_conf,
-    )
-    print(f"\nInserted up to {len(dm_ids)} chain DMs")
-    return len(dm_ids)
-
-
-# ── Fix websites ─────────────────────────────────────────────────────────────
-
-async def fix_websites(args, cfg: dict):
-    """Find real websites for hotels with bad/missing URLs via Serper."""
-    conn = await asyncpg.connect(**DB_CONFIG)
-    dry_run = not args.apply
-    jc = cfg.get("join") or ""
-    wc = cfg["where"]
-
-    rows = await conn.fetch(
-        f"SELECT h.id, h.name, h.website FROM sadie_gtm.hotels h"
-        f" {jc} WHERE ({wc}) ORDER BY h.name"
-    )
-    all_hotels = [(r['id'], r['name'], r['website'] or '') for r in rows]
-    bad_hotels = [(hid, name, url) for hid, name, url in all_hotels if _is_bad_website(url)]
-
-    print(f"Total {cfg['label']} hotels: {len(all_hotels)}")
-    print(f"Hotels with bad/missing website: {len(bad_hotels)}")
-
-    updated = 0
-    if bad_hotels:
-        async with httpx.AsyncClient() as client:
-            sem = asyncio.Semaphore(10)
-            found = await asyncio.gather(*[
-                _serper_find_website(client, name, sem, cfg) for _, name, _ in bad_hotels
-            ])
-            for (hid, name, old_url), new_url in zip(bad_hotels, found):
-                if new_url:
-                    logger.info(f"  {name} -> {new_url}")
-                    if not dry_run:
-                        await conn.execute(
-                            "UPDATE sadie_gtm.hotels SET website = $1, updated_at = NOW() WHERE id = $2",
-                            new_url, hid,
-                        )
-                    updated += 1
-                else:
-                    logger.warning(f"  No website found: {name} (was: {old_url or 'blank'})")
-
-    print(f"\n{'DRY RUN' if dry_run else 'APPLIED'}")
-    print(f"Hotel websites fixed: {updated}/{len(bad_hotels)}")
-    if dry_run:
-        print("\nRun with --apply to write to DB")
+    # Apply
+    await apply_results(conn, targets, dry_run=not args.apply)
     await conn.close()
 
 
 # ── Audit ────────────────────────────────────────────────────────────────────
 
 async def audit(args, cfg: dict):
-    """Print enrichment summary stats."""
+    """Print contact coverage stats for DMs in this source."""
     conn = await asyncpg.connect(**DB_CONFIG)
     jc = cfg.get("join") or ""
     wc = cfg["where"]
     label = cfg["label"]
 
-    total = await conn.fetchval(
-        f"SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h {jc} WHERE ({wc})"
-    )
-    with_dm = await conn.fetchval(
-        f"SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h"
-        f" JOIN sadie_gtm.hotel_decision_makers dm ON dm.hotel_id = h.id"
-        f" {jc} WHERE ({wc})"
-    )
-    with_real = await conn.fetchval(
-        f"SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h"
-        f" JOIN sadie_gtm.hotel_decision_makers dm ON dm.hotel_id = h.id"
-        f" {jc} WHERE ({wc}) AND dm.full_name !~* $1",
-        ENTITY_RE_STR,
-    )
     total_dms = await conn.fetchval(
         f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
-        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
-        f" {jc} WHERE ({wc})"
-    )
-    total_people = await conn.fetchval(
-        f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
-        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
-        f" {jc} WHERE ({wc}) AND dm.full_name !~* $1",
-        ENTITY_RE_STR,
-    )
-    blanks = await conn.fetchval(
-        f"SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h {jc}"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
         f" WHERE ({wc})"
-        f"  AND h.id NOT IN (SELECT dm.hotel_id FROM sadie_gtm.hotel_decision_makers dm)"
     )
-    entity_only = await conn.fetchval(
-        f"SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h"
-        f" JOIN sadie_gtm.hotel_decision_makers dm ON dm.hotel_id = h.id"
-        f" {jc} WHERE ({wc})"
-        f"  AND h.id NOT IN ("
-        f"    SELECT dm2.hotel_id FROM sadie_gtm.hotel_decision_makers dm2"
-        f"    WHERE dm2.full_name !~* $1"
-        f"  )",
-        ENTITY_RE_STR,
+    real_people = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc}) AND dm.full_name !~* $1", ENTITY_RE_STR
     )
     with_email = await conn.fetchval(
         f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
-        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
-        f" {jc} WHERE ({wc}) AND dm.email IS NOT NULL AND dm.email != ''"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc}) AND dm.full_name !~* $1"
+        f" AND dm.email IS NOT NULL AND dm.email != ''", ENTITY_RE_STR
+    )
+    with_verified = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc}) AND dm.full_name !~* $1"
+        f" AND dm.email_verified = true", ENTITY_RE_STR
     )
     with_phone = await conn.fetchval(
         f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
-        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
-        f" {jc} WHERE ({wc}) AND dm.phone IS NOT NULL AND dm.phone != ''"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc}) AND dm.full_name !~* $1"
+        f" AND dm.phone IS NOT NULL AND dm.phone != ''", ENTITY_RE_STR
+    )
+    no_email = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc}) AND dm.full_name !~* $1"
+        f" AND (dm.email IS NULL OR dm.email = '')", ENTITY_RE_STR
+    )
+    no_both = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc}) AND dm.full_name !~* $1"
+        f" AND (dm.email IS NULL OR dm.email = '')"
+        f" AND (dm.phone IS NULL OR dm.phone = '')", ENTITY_RE_STR
     )
     sources = await conn.fetch(
         f"SELECT unnest(dm.sources) AS src, COUNT(*) AS cnt"
         f" FROM sadie_gtm.hotel_decision_makers dm"
-        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
-        f" {jc} WHERE ({wc})"
-        f" GROUP BY src ORDER BY cnt DESC"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc}) AND dm.full_name !~* $1"
+        f" GROUP BY src ORDER BY cnt DESC", ENTITY_RE_STR
     )
 
-    pct = lambda n: f"{100*n//total}%" if total else "0%"
+    pct = lambda n, d: f"{100*n//d}%" if d else "0%"
 
     print(f"{'='*60}")
-    print(f"{label.upper()} ENRICHMENT AUDIT")
+    print(f"{label.upper()} CONTACT COVERAGE AUDIT")
     print(f"{'='*60}")
-    print(f"Total hotels:               {total}")
-    print(f"Hotels with any DM:         {with_dm} ({pct(with_dm)})")
-    print(f"Hotels with real people:     {with_real} ({pct(with_real)})")
-    print(f"Hotels entity-only:          {entity_only}")
-    print(f"Hotels with ZERO DMs:        {blanks}")
-    print(f"Total DM rows:               {total_dms}")
-    print(f"  - Real people:             {total_people}")
-    print(f"  - With email:              {with_email}")
-    print(f"  - With phone:              {with_phone}")
+    print(f"Total DM rows:           {total_dms}")
+    print(f"Real people:             {real_people}")
+    print(f"  With email:            {with_email} ({pct(with_email, real_people)})")
+    print(f"  With verified email:   {with_verified} ({pct(with_verified, real_people)})")
+    print(f"  With phone:            {with_phone} ({pct(with_phone, real_people)})")
+    print(f"  Missing email:         {no_email} ({pct(no_email, real_people)})")
+    print(f"  Missing both:          {no_both} ({pct(no_both, real_people)})")
     print(f"\nDM Source Breakdown:")
     for r in sources:
         print(f"  {r['src']:<30} {r['cnt']:>5}")
+
+    # Show sample of people missing email
+    if args.verbose:
+        samples = await conn.fetch(
+            f"SELECT dm.full_name, dm.title, h.name AS hotel_name, h.website"
+            f" FROM sadie_gtm.hotel_decision_makers dm"
+            f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+            f" WHERE ({wc}) AND dm.full_name !~* $1"
+            f" AND (dm.email IS NULL OR dm.email = '')"
+            f" ORDER BY random() LIMIT 20", ENTITY_RE_STR
+        )
+        print(f"\nSample DMs missing email:")
+        for r in samples:
+            web = (r['website'] or 'none')[:40]
+            print(f"  {r['full_name']:30s} | {(r['title'] or ''):20s} | {r['hotel_name'][:35]:35s} | {web}")
 
     await conn.close()
 
@@ -1115,7 +810,7 @@ async def audit(args, cfg: dict):
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Generic contact enrichment — crawl + LLM + Serper",
+        description="Contact enrichment — find email/phone for known decision makers",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Available sources: {', '.join(SOURCE_CONFIGS.keys())}, custom",
     )
@@ -1125,22 +820,16 @@ async def main():
                         help="Custom WHERE clause (required for --source custom)")
 
     # Modes
-    parser.add_argument("--enrich-missing", action="store_true",
-                        help="Enrich hotels without real people")
-    parser.add_argument("--enrich-all", action="store_true",
-                        help="Re-enrich ALL hotels in source")
-    parser.add_argument("--chain-fill", action="store_true",
-                        help="Fill known chain execs into blank hotels")
-    parser.add_argument("--fix-websites", action="store_true",
-                        help="Find real websites via Serper for hotels with bad URLs")
+    parser.add_argument("--enrich", action="store_true", default=True,
+                        help="Enrich DMs missing contacts (default)")
     parser.add_argument("--audit", action="store_true",
-                        help="Print enrichment summary stats")
+                        help="Print contact coverage stats")
 
     # Options
     parser.add_argument("--apply", action="store_true", help="Write to DB (default: dry-run)")
-    parser.add_argument("--limit", type=int, default=None, help="Max hotels to process")
-    parser.add_argument("--offset", type=int, default=0, help="Skip first N hotels (for resumability)")
-    parser.add_argument("--concurrency", type=int, default=300, help="Browser concurrency")
+    parser.add_argument("--limit", type=int, default=None, help="Max DMs to process")
+    parser.add_argument("--offset", type=int, default=0, help="Skip first N DMs (for resumability)")
+    parser.add_argument("--concurrency", type=int, default=10, help="Browser concurrency for crawling")
     parser.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args()
@@ -1158,10 +847,7 @@ async def main():
             "where": args.where,
             "join": None,
             "country": "AU",
-            "serper_gl": "",
-            "entity_search_suffix": "director OR owner OR team",
-            "enable_abn": False,
-            "chain_execs": {},
+            "serper_gl": "au",
         }
     elif args.source in SOURCE_CONFIGS:
         cfg = SOURCE_CONFIGS[args.source]
@@ -1171,22 +857,10 @@ async def main():
 
     logger.info(f"Source: {cfg['label']} | Country: {cfg.get('country', '?')}")
 
-    # Route to mode
     if args.audit:
         await audit(args, cfg)
-    elif args.fix_websites:
-        await fix_websites(args, cfg)
-    elif args.chain_fill:
-        conn = await asyncpg.connect(**DB_CONFIG)
-        await chain_fill(conn, cfg, dry_run=not args.apply)
-        await conn.close()
-    elif args.enrich_missing:
-        await enrich(args, cfg, all_hotels=False)
-    elif args.enrich_all:
-        await enrich(args, cfg, all_hotels=True)
     else:
-        print("ERROR: Specify a mode: --enrich-missing, --enrich-all, --chain-fill, --fix-websites, or --audit")
-        sys.exit(1)
+        await enrich(args, cfg)
 
 
 if __name__ == "__main__":
