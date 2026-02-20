@@ -1863,6 +1863,8 @@ async def batch_persist_results(results: list) -> int:
         seen_dms = set()
         for r in results:
             for dm in (r.decision_makers or []):
+                if not dm.full_name or not dm.full_name.strip():
+                    continue  # skip NULL/empty names — can't dedupe in DB
                 dm_key = (r.hotel_id, dm.full_name, dm.title)
                 if dm_key in seen_dms:
                     continue
