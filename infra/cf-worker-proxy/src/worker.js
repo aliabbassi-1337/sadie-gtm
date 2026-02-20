@@ -8,6 +8,7 @@
  * - Auth via X-Auth-Key header
  * - User-Agent rotation
  * - KV caching (optional, reduces redundant fetches, preserves content type)
+ * - POST /batch — fetch up to 500 URLs in parallel from the edge (huge speedup for AU clients)
  * - Returns X-Worker-Colo header showing which data center handled the request
  * - Supports JSON APIs (RDAP, crt.sh) via X-Forward-Accept header
  *
@@ -27,22 +28,75 @@ function randomUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
+/**
+ * Fetch a single URL with appropriate headers.
+ * Returns { url, status, body, binary, error? }
+ */
+async function fetchOne(req) {
+  const { url, range, accept } = req;
+  try {
+    const headers = new Headers();
+    headers.set('User-Agent', randomUA());
+    headers.set('Accept', accept || 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+    headers.set('Accept-Language', 'en-US,en;q=0.5');
+    headers.set('Accept-Encoding', 'gzip');
+    if (range) {
+      headers.set('Range', range);
+    }
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers,
+      redirect: 'follow',
+    });
+
+    if (range) {
+      // Binary WARC data — base64 encode
+      const buf = await response.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = '';
+      // Process in chunks to avoid stack overflow on large arrays
+      const chunkSize = 8192;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      }
+      return {
+        url,
+        status: response.status,
+        body: btoa(binary),
+        binary: true,
+      };
+    } else {
+      const body = await response.text();
+      return {
+        url,
+        status: response.status,
+        body,
+        binary: false,
+      };
+    }
+  } catch (err) {
+    return {
+      url,
+      status: 0,
+      body: '',
+      binary: false,
+      error: err.message,
+    };
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const colo = request.cf?.colo || 'unknown';
 
     // Health check
     if (url.pathname === '/health') {
       return new Response(JSON.stringify({
         status: 'ok',
-        colo: request.cf?.colo || 'unknown',
+        colo,
       }), { headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // Extract target URL — support both ?url= param and X-Target-URL header
-    const targetUrl = url.searchParams.get('url') || request.headers.get('X-Target-URL');
-    if (!targetUrl) {
-      return new Response('Missing ?url= parameter or X-Target-URL header', { status: 400 });
     }
 
     // Auth check — support both X-Auth-Key and X-Proxy-Key headers
@@ -51,28 +105,56 @@ export default {
       return new Response('Unauthorized', { status: 401 });
     }
 
+    // ── POST /batch — fetch multiple URLs in parallel from the edge ──────
+    if (url.pathname === '/batch' && request.method === 'POST') {
+      const payload = await request.json();
+      const requests = payload.requests || [];  // [{url, range?, accept?}, ...]
+
+      if (requests.length === 0) {
+        return new Response(JSON.stringify({ results: [], colo }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Fetch all in parallel
+      const results = await Promise.all(requests.map(r => fetchOne(r)));
+
+      return new Response(JSON.stringify({ results, colo }), {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Worker-Colo': colo,
+        },
+      });
+    }
+
+    // ── Single URL proxy (legacy GET endpoint) ───────────────────────────
+
+    // Extract target URL — support both ?url= param and X-Target-URL header
+    const targetUrl = url.searchParams.get('url') || request.headers.get('X-Target-URL');
+    if (!targetUrl) {
+      return new Response('Missing ?url= parameter or X-Target-URL header', { status: 400 });
+    }
+
     // Check KV cache if available
     const cacheKey = `page:${targetUrl}`;
     if (env.SCRAPE_CACHE) {
       const cached = await env.SCRAPE_CACHE.get(cacheKey);
       if (cached) {
-        // Cache stores JSON envelope with body + contentType
         try {
           const envelope = JSON.parse(cached);
           return new Response(envelope.body, {
             headers: {
               'Content-Type': envelope.contentType || 'text/html; charset=utf-8',
               'X-Cache': 'HIT',
-              'X-Worker-Colo': request.cf?.colo || 'unknown',
+              'X-Worker-Colo': colo,
             },
           });
         } catch {
-          // Legacy plain-text cache entry
           return new Response(cached, {
             headers: {
               'Content-Type': 'text/html; charset=utf-8',
               'X-Cache': 'HIT',
-              'X-Worker-Colo': request.cf?.colo || 'unknown',
+              'X-Worker-Colo': colo,
             },
           });
         }
@@ -83,7 +165,6 @@ export default {
     const headers = new Headers();
     headers.set('User-Agent', randomUA());
 
-    // Use forwarded Accept header if provided, otherwise default to HTML
     const forwardAccept = request.headers.get('X-Forward-Accept');
     if (forwardAccept) {
       headers.set('Accept', forwardAccept);
@@ -94,10 +175,14 @@ export default {
     headers.set('Accept-Language', 'en-US,en;q=0.5');
     headers.set('Accept-Encoding', 'gzip');
 
-    // Forward custom cookies if provided
     const cookies = request.headers.get('X-Forward-Cookies');
     if (cookies) {
       headers.set('Cookie', cookies);
+    }
+
+    const rangeHeader = request.headers.get('Range');
+    if (rangeHeader) {
+      headers.set('Range', rangeHeader);
     }
 
     try {
@@ -107,10 +192,22 @@ export default {
         redirect: 'follow',
       });
 
+      if (rangeHeader) {
+        const body = await response.arrayBuffer();
+        return new Response(body, {
+          status: response.status,
+          headers: {
+            'Content-Type': response.headers.get('Content-Type') || 'application/octet-stream',
+            'X-Cache': 'MISS',
+            'X-Worker-Colo': colo,
+            'X-Target-Status': String(response.status),
+          },
+        });
+      }
+
       const body = await response.text();
       const contentType = response.headers.get('Content-Type') || 'text/html';
 
-      // Cache successful responses in KV (1 hour TTL)
       if (response.ok && env.SCRAPE_CACHE && body.length > 100) {
         const envelope = JSON.stringify({ body, contentType });
         await env.SCRAPE_CACHE.put(cacheKey, envelope, { expirationTtl: 3600 });
@@ -121,7 +218,7 @@ export default {
         headers: {
           'Content-Type': contentType,
           'X-Cache': 'MISS',
-          'X-Worker-Colo': request.cf?.colo || 'unknown',
+          'X-Worker-Colo': colo,
           'X-Target-Status': String(response.status),
         },
       });

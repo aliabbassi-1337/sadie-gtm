@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import asyncio
+import base64
 import gzip
 import json
 import os
@@ -37,6 +38,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncpg
+import aiohttp
 import httpx
 from html import unescape as html_unescape
 from loguru import logger
@@ -80,11 +82,11 @@ CF_WORKER_AUTH = _ENV.get('CF_WORKER_AUTH_KEY', '')
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-# Common Crawl — search multiple recent indexes for better coverage
+# Common Crawl — search recent indexes for coverage
 CC_INDEXES = [
-    "https://index.commoncrawl.org/CC-MAIN-2024-51-index",  # Dec 2024
-    "https://index.commoncrawl.org/CC-MAIN-2024-42-index",  # Oct 2024
-    "https://index.commoncrawl.org/CC-MAIN-2024-33-index",  # Aug 2024
+    "https://index.commoncrawl.org/CC-MAIN-2026-04-index",  # Jan 2026
+    "https://index.commoncrawl.org/CC-MAIN-2025-51-index",  # Dec 2025
+    "https://index.commoncrawl.org/CC-MAIN-2025-47-index",  # Nov 2025
 ]
 CC_WARC_BASE = "https://data.commoncrawl.org/"
 
@@ -98,14 +100,14 @@ ENTITY_RE_STR = (
 EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 
 # Contact page path keywords (for filtering CC results + building crawl URLs)
+# Keep focused — overly broad keywords (news, investor, media) cause CC to
+# fetch hundreds of irrelevant pages from sites with those in their URL structure.
 CONTACT_PATHS = {
     'about', 'about-us', 'team', 'our-team', 'leadership',
     'leadership-team', 'board', 'board-of-directors',
     'contact', 'contact-us', 'our-story', 'people', 'staff',
     'management', 'executive-team', 'directors', 'our-people',
-    'who-we-are', 'meet-the-team', 'company',
-    'investor', 'investors', 'governance', 'annual-report',
-    'media', 'news', 'press', 'ownership',
+    'who-we-are', 'meet-the-team', 'company', 'ownership',
 }
 
 # httpx crawl paths — derived from CONTACT_PATHS (most productive subset)
@@ -132,15 +134,18 @@ ENTITY_STOP = {
     'discretionary', 'family', 'subsidiary',
 }
 
-# Domains to skip in Serper results
-SEARCH_SKIP_DOMAINS = {
+# Domains to skip everywhere (social media, data scrapers, government, etc.)
+JUNK_DOMAINS = {
     "facebook.com", "instagram.com", "twitter.com", "linkedin.com",
-    "tiktok.com", "youtube.com", "pinterest.com",
+    "tiktok.com", "youtube.com", "pinterest.com", "x.com",
     "abr.business.gov.au", "abr.gov.au", "asic.gov.au",
-    "rocketreach.co", "zoominfo.com", "apollo.io",
+    "rocketreach.co", "zoominfo.com", "apollo.io", "signalhire.com",
     "issuu.com", "scribd.com", "yumpu.com", "calameo.com",
     "researchgate.net", "academia.edu",
+    "wikipedia.org", "reddit.com", "github.com", "medium.com",
+    "news.com.au", "abc.net.au", "smh.com.au", "theaustralian.com.au",
 }
+SEARCH_SKIP_DOMAINS = JUNK_DOMAINS
 
 PERSONAL_EMAIL_DOMAINS = {
     "gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "live.com",
@@ -223,6 +228,48 @@ def _proxy_url(target_url: str) -> str:
         return target_url
     from urllib.parse import quote
     return f"{CF_WORKER_URL.rstrip('/')}/?url={quote(target_url, safe='')}"
+
+
+async def _proxy_batch(session: aiohttp.ClientSession,
+                       requests: list[dict],
+                       chunk_size: int = 200) -> list[dict]:
+    """Batch-fetch URLs via CF Worker /batch endpoint.
+
+    Sends up to chunk_size URLs per call, all fetched in parallel at the edge.
+    Each request: {url: str, range?: str, accept?: str}
+    Returns list of: {url, status, body, binary, error?}
+    """
+    if not CF_WORKER_URL or not requests:
+        return []
+
+    batch_url = f"{CF_WORKER_URL.rstrip('/')}/batch"
+    headers = {'Content-Type': 'application/json'}
+    if CF_WORKER_AUTH:
+        headers['X-Auth-Key'] = CF_WORKER_AUTH
+
+    all_results = []
+    # Split into chunks (CF Workers paid plan: 1000 subrequests per invocation)
+    for i in range(0, len(requests), chunk_size):
+        chunk = requests[i:i + chunk_size]
+        try:
+            async with session.post(
+                batch_url,
+                json={'requests': chunk},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Batch fetch failed: HTTP {resp.status}")
+                    continue
+                data = await resp.json()
+                all_results.extend(data.get('results', []))
+                colo = data.get('colo', '?')
+                ok_count = sum(1 for r in data.get('results', []) if r.get('status') in (200, 206))
+                logger.debug(f"Batch: {ok_count}/{len(chunk)} OK (colo={colo})")
+        except Exception as e:
+            logger.warning(f"Batch fetch error: {type(e).__name__}: {e}")
+
+    return all_results
 
 
 def _get_domain(url: str) -> str:
@@ -350,6 +397,7 @@ async def load_dms_needing_contacts(conn, cfg: dict, need: str = "email") -> lis
     else:
         contact_filter = "AND (dm.email IS NULL OR dm.email = '') AND (dm.phone IS NULL OR dm.phone = '')"
 
+    # Uses partial index idx_dm_people_needing_email (hardcoded regex must match index predicate)
     rows = await conn.fetch(
         f"SELECT dm.id AS dm_id, dm.full_name, dm.title,"
         f"  h.id AS hotel_id, h.name AS hotel_name, h.website"
@@ -357,10 +405,9 @@ async def load_dms_needing_contacts(conn, cfg: dict, need: str = "email") -> lis
         f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id"
         f" {jc}"
         f" WHERE ({wc})"
-        f"  AND dm.full_name !~* $1"
+        f"  AND dm.full_name !~* '{ENTITY_RE_STR}'"
         f"  {contact_filter}"
         f" ORDER BY dm.id",
-        ENTITY_RE_STR,
     )
 
     # Load entity names (DMs matching entity regex on same hotels)
@@ -393,8 +440,14 @@ async def load_dms_needing_contacts(conn, cfg: dict, need: str = "email") -> lis
 # ── Step 2: Domain discovery ─────────────────────────────────────────────────
 
 async def discover_domains(conn, targets: list[DMTarget]) -> None:
-    """Populate all_domains for each target: hotel domain + entity domains + guesses."""
-    entity_groups = defaultdict(list)
+    """Populate all_domains for each target: hotel website + CC-validated entity domains.
+
+    For entities without a hotel website domain, we guess domains from the entity
+    name and validate them against CC Index (if CC has crawled it, it exists).
+    Validated entity domains are persisted to raw_source_url for future runs.
+    """
+    # Step 1: Hotel websites (always reliable)
+    entity_groups: dict[str, list[DMTarget]] = defaultdict(list)
     for t in targets:
         hd = _get_domain(t.hotel_website)
         if hd:
@@ -402,47 +455,116 @@ async def discover_domains(conn, targets: list[DMTarget]) -> None:
         if t.entity_name:
             entity_groups[t.entity_name].append(t)
 
-    for entity_name, entity_ts in entity_groups.items():
-        hotel_ids = list({t.hotel_id for t in entity_ts})
-
-        entity_urls = await conn.fetch(
-            "SELECT DISTINCT raw_source_url FROM sadie_gtm.hotel_decision_makers"
-            " WHERE hotel_id = ANY($1) AND raw_source_url IS NOT NULL"
-            " AND raw_source_url LIKE 'http%'"
-            " AND raw_source_url NOT LIKE '%abr.business%'"
-            " AND raw_source_url NOT LIKE '%abr.gov%'"
-            " AND raw_source_url NOT LIKE '%big4.com.au%'"
-            " AND raw_source_url NOT LIKE '%businessnews%'"
-            " AND raw_source_url NOT LIKE '%hotelconversation%'"
-            " AND raw_source_url NOT LIKE '%californiarevealed%'",
-            hotel_ids,
+    # Step 2: For entities, check if any DM already has a validated domain in raw_source_url
+    if entity_groups:
+        all_hotel_ids = list({t.hotel_id for t in targets if t.entity_name})
+        existing = await conn.fetch(
+            "SELECT dm.hotel_id, dm.raw_source_url"
+            " FROM sadie_gtm.hotel_decision_makers dm"
+            " WHERE dm.hotel_id = ANY($1)"
+            "   AND dm.raw_source_url IS NOT NULL"
+            "   AND dm.raw_source_url LIKE 'https://%'"
+            "   AND dm.raw_source_url NOT LIKE '%abr.business%'"
+            "   AND dm.raw_source_url NOT LIKE '%abr.gov%'",
+            all_hotel_ids,
         )
-        for r in entity_urls:
-            domain = _get_domain(r['raw_source_url'])
-            if domain:
-                for t in entity_ts:
-                    if domain not in t.all_domains:
-                        t.all_domains.append(domain)
+        existing_by_hotel: dict[int, set[str]] = defaultdict(set)
+        for r in existing:
+            d = _get_domain(r['raw_source_url'])
+            if d and not any(d.endswith(j) or d == j for j in JUNK_DOMAINS):
+                existing_by_hotel[r['hotel_id']].add(d)
 
-        hotel_websites = await conn.fetch(
-            "SELECT DISTINCT website FROM sadie_gtm.hotels"
-            " WHERE id = ANY($1) AND website IS NOT NULL AND website != ''",
-            hotel_ids,
-        )
-        for r in hotel_websites:
-            d = _get_domain(r['website'])
-            if d:
-                for t in entity_ts:
+        for entity_name, entity_ts in entity_groups.items():
+            for t in entity_ts:
+                for d in existing_by_hotel.get(t.hotel_id, set()):
                     if d not in t.all_domains:
                         t.all_domains.append(d)
 
-        guesses = _entity_to_domain_guesses(entity_name)
-        for t in entity_ts:
-            for g in guesses:
-                if g not in t.all_domains:
-                    t.all_domains.append(g)
+    # Step 3: For entities still missing a non-hotel domain, search CC by entity name
+    entities_needing_domain = {
+        name: ts for name, ts in entity_groups.items()
+        if all(len(t.all_domains) <= 1 for t in ts)  # only hotel website, no entity domain
+    }
 
-    # Summary
+    if entities_needing_domain:
+        # Extract keywords from entity names, search CC for *.keyword*
+        keyword_map: dict[str, list[str]] = {}  # keyword → [entity_names]
+        for entity_name in entities_needing_domain:
+            words = re.sub(r'[^a-zA-Z0-9\s]', '', entity_name.lower()).split()
+            words = [w for w in words if w not in ENTITY_STOP and len(w) >= 4]
+            for w in words:
+                keyword_map.setdefault(w, []).append(entity_name)
+
+        if keyword_map:
+            logger.info(f"Searching CC for {len(keyword_map)} entity keywords "
+                        f"({len(entities_needing_domain)} entities)...")
+            found: dict[str, str] = {}  # entity_name → domain
+            from urllib.parse import quote
+
+            # Batch all keyword searches into one /batch call
+            kw_list = list(keyword_map.items())
+            batch_reqs = []
+            for kw, _ in kw_list:
+                cc_url = f"{CC_INDEXES[0]}?url={quote(f'*.{kw}*/*', safe='')}&output=json&limit=10"
+                batch_reqs.append({'url': cc_url, 'accept': 'application/json'})
+
+            connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                results = await _proxy_batch(session, batch_reqs, chunk_size=200)
+
+            for idx, r in enumerate(results):
+                if r.get('status') != 200 or not r.get('body'):
+                    continue
+                keyword, entity_names = kw_list[idx]
+                entries = []
+                for line in r['body'].strip().split('\n'):
+                    try:
+                        entries.append(json.loads(line))
+                    except Exception:
+                        pass
+                if not entries:
+                    continue
+                # Extract unique domains where keyword appears in domain name
+                domains = set()
+                for e in entries:
+                    d = _get_domain(e.get('url', ''))
+                    if not d:
+                        continue
+                    if keyword not in d.lower():
+                        continue
+                    if any(d.endswith(j) or d == j for j in JUNK_DOMAINS):
+                        continue
+                    domains.add(d)
+                au_domains = [d for d in domains if d.endswith('.au')]
+                best = au_domains[0] if au_domains else next(iter(domains), None)
+                if best:
+                    for ename in entity_names:
+                        if ename not in found:
+                            found[ename] = best
+
+            # Add found domains to targets + persist to DB
+            if found:
+                logger.info(f"CC found domains for {len(found)}/{len(entities_needing_domain)} entities")
+                dm_ids_to_update: list[tuple[int, str]] = []
+                for entity_name, domain in found.items():
+                    url = f"https://{domain}/"
+                    for t in entities_needing_domain[entity_name]:
+                        if domain not in t.all_domains:
+                            t.all_domains.append(domain)
+                        dm_ids_to_update.append((t.dm_id, url))
+
+                # Persist entity domains to raw_source_url for future runs
+                if dm_ids_to_update:
+                    await conn.executemany(
+                        "UPDATE sadie_gtm.hotel_decision_makers"
+                        " SET raw_source_url = $2, updated_at = NOW()"
+                        " WHERE id = $1"
+                        "   AND (raw_source_url IS NULL OR raw_source_url LIKE '%abr.business%'"
+                        "        OR raw_source_url LIKE '%abr.gov%')",
+                        dm_ids_to_update,
+                    )
+                    logger.info(f"Persisted {len(dm_ids_to_update)} entity website URLs to DB")
+
     total_domains = len({d for t in targets for d in t.all_domains})
     avg = sum(len(t.all_domains) for t in targets) / len(targets) if targets else 0
     logger.info(f"Domain discovery: {total_domains} unique domains, avg {avg:.1f} per target")
@@ -450,74 +572,11 @@ async def discover_domains(conn, targets: list[DMTarget]) -> None:
 
 # ── Step 3: Common Crawl harvest ─────────────────────────────────────────────
 
-async def _cc_query(client: httpx.AsyncClient, index_url: str,
-                    url_pattern: str, limit: int = 200) -> list[dict]:
-    """Query one CC Index API via CF Worker proxy for IP rotation."""
-    try:
-        from urllib.parse import quote
-        cc_url = f"{index_url}?url={quote(url_pattern, safe='')}&output=json&limit={limit}"
-        resp = await client.get(
-            _proxy_url(cc_url),
-            headers=_proxy_headers(),
-            timeout=15.0,
-        )
-        if resp.status_code != 200:
-            return []
-        entries = []
-        for line in resp.text.strip().split('\n'):
-            try:
-                entries.append(json.loads(line))
-            except Exception:
-                pass
-        return entries
-    except Exception as e:
-        logger.debug(f"CC query error for {url_pattern}: {e}")
-        return []
-
-
-async def _cc_fetch_warc(client: httpx.AsyncClient, entry: dict) -> tuple[str, str]:
-    """Fetch one WARC record from CC archive and extract HTML. Returns (url, html)."""
-    url = entry.get('url', '')
-    try:
-        filename = entry['filename']
-        offset = int(entry['offset'])
-        length = int(entry['length'])
-
-        # Skip huge pages (>500KB compressed)
-        if length > 500_000:
-            return url, ''
-
-        resp = await client.get(
-            f"{CC_WARC_BASE}{filename}",
-            headers={'Range': f'bytes={offset}-{offset+length-1}'},
-            timeout=30.0,
-        )
-        if resp.status_code not in (200, 206):
-            return url, ''
-
-        raw = gzip.decompress(resp.content)
-
-        # WARC record: WARC-header \r\n\r\n HTTP-header \r\n\r\n body
-        parts = raw.split(b'\r\n\r\n', 2)
-        if len(parts) < 3:
-            return url, ''
-
-        html_bytes = parts[2]
-        encoding = entry.get('encoding', 'UTF-8') or 'UTF-8'
-        try:
-            return url, html_bytes.decode(encoding)
-        except Exception:
-            return url, html_bytes.decode('utf-8', errors='replace')
-    except Exception as e:
-        logger.debug(f"WARC fetch error for {url}: {e}")
-        return url, ''
-
-
 async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
-    """Common Crawl: search multiple indexes + fetch per domain pipelined.
+    """Common Crawl: batch search indexes + batch fetch WARC records via CF Worker.
 
-    Searches 3 recent CC indexes in parallel for each domain, deduplicates by URL,
-    then fetches WARC records for contact pages.
+    Phase 1: Batch all CC Index queries into one /batch call (all run parallel at edge)
+    Phase 2: Filter to contact pages, batch all WARC fetches into /batch calls
     Returns {url: html} of fetched pages.
     """
     all_domains = {d for t in targets for d in t.all_domains}
@@ -528,52 +587,113 @@ async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
     logger.info(f"CC: searching {len(all_domains)} domains across "
                 f"{len(CC_INDEXES)} indexes ({total_queries} queries)...")
 
-    fetched_pages: dict[str, str] = {}
-    search_sem = asyncio.Semaphore(150)  # CF Worker IP rotation handles distribution
-    fetch_sem = asyncio.Semaphore(200)   # WARC via S3/CloudFront, direct
-    domains_hit = set()
+    from urllib.parse import quote
 
-    async with httpx.AsyncClient(
-        timeout=30.0,
-        limits=httpx.Limits(max_connections=500, max_keepalive_connections=50),
-    ) as client:
+    connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(connector=connector) as session:
 
-        async def _fetch_entry(entry):
-            async with fetch_sem:
-                url, html = await _cc_fetch_warc(client, entry)
-            if html and len(html) >= 100:
-                fetched_pages[url] = html
+        # ── Phase 1: Batch CC Index queries ───────────────────────────────
+        index_requests = []
+        for domain in all_domains:
+            for idx_url in CC_INDEXES:
+                cc_url = f"{idx_url}?url={quote(f'*.{domain}/*', safe='')}&output=json&limit=200"
+                index_requests.append({'url': cc_url, 'accept': 'application/json'})
 
-        async def _search_and_fetch(domain, index_url):
-            async with search_sem:
-                entries = await _cc_query(client, index_url, f'*.{domain}/*', limit=200)
-            if not entries:
-                return
-            entries = [e for e in entries if 'html' in (e.get('mime', '') + e.get('mime-detected', ''))]
-            contact_entries = [e for e in entries
-                              if _is_contact_url(e.get('url', ''))
-                              and e.get('url', '') not in fetched_pages]  # skip already fetched
-            if not contact_entries:
-                return
-            domains_hit.add(domain)
-            await asyncio.gather(*[_fetch_entry(e) for e in contact_entries])
+        results = await _proxy_batch(session, index_requests, chunk_size=200)
 
-        # Search all domains × all indexes concurrently
-        tasks = [_search_and_fetch(d, idx) for d in all_domains for idx in CC_INDEXES]
-        await asyncio.gather(*tasks)
+        # Parse all index results into entries
+        all_entries = []
+        domains_hit = set()
+        for r in results:
+            if r.get('status') != 200 or not r.get('body'):
+                continue
+            for line in r['body'].strip().split('\n'):
+                try:
+                    entry = json.loads(line)
+                    if 'html' in (entry.get('mime', '') + entry.get('mime-detected', '')):
+                        if _is_contact_url(entry.get('url', '')):
+                            all_entries.append(entry)
+                            d = _get_domain(entry.get('url', ''))
+                            if d:
+                                domains_hit.add(d)
+                except Exception:
+                    pass
 
-    logger.info(f"CC: {len(domains_hit)}/{len(all_domains)} domains hit, "
-                f"{len(fetched_pages)} pages fetched")
+        # Deduplicate by URL (keep first = newest index)
+        seen_urls = set()
+        unique_entries = []
+        for e in all_entries:
+            u = e.get('url', '')
+            if u not in seen_urls:
+                seen_urls.add(u)
+                unique_entries.append(e)
+
+        logger.info(f"CC: {len(domains_hit)}/{len(all_domains)} domains hit, "
+                    f"{len(unique_entries)} contact pages to fetch")
+
+        if not unique_entries:
+            return {}
+
+        # ── Phase 2: Batch WARC fetches ───────────────────────────────────
+        warc_requests = []
+        entry_map = {}  # index in warc_requests → entry
+        for entry in unique_entries:
+            length = int(entry.get('length', 0))
+            if length > 500_000:  # skip huge pages
+                continue
+            filename = entry.get('filename', '')
+            offset = int(entry.get('offset', 0))
+            warc_url = f"{CC_WARC_BASE}{filename}"
+            range_header = f"bytes={offset}-{offset+length-1}"
+            entry_map[len(warc_requests)] = entry
+            warc_requests.append({'url': warc_url, 'range': range_header})
+
+        logger.info(f"CC: fetching {len(warc_requests)} WARC records via batch...")
+        warc_results = await _proxy_batch(session, warc_requests, chunk_size=200)
+
+        # ── Phase 3: Decompress WARC records into HTML ────────────────────
+        fetched_pages: dict[str, str] = {}
+        ok_count = sum(1 for r in warc_results if r.get('status') in (200, 206))
+        err_count = sum(1 for r in warc_results if r.get('error'))
+        logger.info(f"CC WARC batch: {ok_count} ok, {err_count} errors, "
+                    f"{len(warc_results) - ok_count - err_count} other")
+        for i, r in enumerate(warc_results):
+            if r.get('status') not in (200, 206) or not r.get('body'):
+                continue
+            entry = entry_map.get(i)
+            if not entry:
+                continue
+            page_url = entry.get('url', '')
+            try:
+                raw_data = base64.b64decode(r['body']) if r.get('binary') else r['body'].encode()
+                raw = gzip.decompress(raw_data)
+                parts = raw.split(b'\r\n\r\n', 2)
+                if len(parts) < 3:
+                    continue
+                html_bytes = parts[2]
+                encoding = entry.get('encoding', 'UTF-8') or 'UTF-8'
+                try:
+                    html = html_bytes.decode(encoding)
+                except Exception:
+                    html = html_bytes.decode('utf-8', errors='replace')
+                if len(html) >= 100:
+                    fetched_pages[page_url] = html
+            except Exception as e:
+                logger.warning(f"WARC decode error for {page_url}: {e}")
+
+        logger.info(f"CC: {len(fetched_pages)} pages extracted from "
+                    f"{len(domains_hit)}/{len(all_domains)} domains")
+
     return fetched_pages
 
 
 # ── Step 3b: httpx page fetch (primary live fetcher) ─────────────────────────
 
 async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
-    """Fetch contact pages via plain httpx for all target domains.
+    """Fetch contact pages via aiohttp for all target domains.
 
+    Uses aiohttp instead of httpx — handles 1000+ concurrent connections natively.
     Returns {url: html} of all successfully fetched pages.
-    Extraction is done separately so this can run concurrently with CC harvest.
     """
     # Collect unique domains from all targets
     domain_targets: dict[str, list[DMTarget]] = defaultdict(list)
@@ -599,31 +719,47 @@ async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict) -> dict[str, str
     if not urls_to_fetch:
         return {}
 
-    logger.info(f"httpx: fetching {len(urls_to_fetch)} pages across {len(domain_targets)} domains...")
+    logger.info(f"aiohttp: fetching {len(urls_to_fetch)} pages across {len(domain_targets)} domains...")
 
     fetched: dict[str, str] = {}
+    dead_domains: set[str] = set()  # Domains that timeout — skip remaining paths
+    timeout = aiohttp.ClientTimeout(total=8, connect=3)
+    connector = aiohttp.TCPConnector(limit=500, ttl_dns_cache=300, enable_cleanup_closed=True)
 
-    async def _fetch_one(client: httpx.AsyncClient, url: str):
+    async def _fetch_one(session: aiohttp.ClientSession, url: str):
+        domain = url_domain_map.get(url, '')
+        if domain in dead_domains:
+            return
         try:
-            resp = await client.get(
-                url, follow_redirects=True, timeout=10.0,
-            )
-            if resp.status_code == 200:
-                ct = resp.headers.get('content-type', '')
-                if 'html' in ct or 'text' in ct:
-                    text = resp.text
-                    if len(text) >= 100:
-                        fetched[url] = text
-        except Exception:
-            pass
+            async with session.get(url, allow_redirects=True, timeout=timeout, ssl=False) as resp:
+                if resp.status == 200:
+                    ct = resp.headers.get('content-type', '')
+                    if 'html' in ct or 'text' in ct:
+                        text = await resp.text(errors='replace')
+                        if len(text) >= 100:
+                            fetched[url] = text
+        except (asyncio.TimeoutError, aiohttp.ClientError):
+            dead_domains.add(domain)
 
-    async with httpx.AsyncClient(
-        timeout=10.0,
-        limits=httpx.Limits(max_connections=1000, max_keepalive_connections=100),
-    ) as client:
-        await asyncio.gather(*[_fetch_one(client, u) for u in urls_to_fetch])
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+    }
+    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
+        # Fetch per domain: homepage first, then paths (skip domain if homepage dead)
+        async def _fetch_domain(domain: str):
+            homepage = f"https://{domain}/"
+            await _fetch_one(session, homepage)
+            if domain in dead_domains:
+                return
+            paths = [u for u in urls_to_fetch if url_domain_map.get(u) == domain and u != homepage]
+            await asyncio.gather(*[_fetch_one(session, u) for u in paths])
 
-    logger.info(f"httpx: fetched {len(fetched)}/{len(urls_to_fetch)} pages with HTML content")
+        await asyncio.gather(*[_fetch_domain(d) for d in domain_targets])
+
+    logger.info(f"aiohttp: fetched {len(fetched)}/{len(urls_to_fetch)} pages "
+                f"({len(dead_domains)} dead domains skipped)")
     return fetched
 
 
@@ -819,7 +955,8 @@ async def email_pattern_discovery(targets: list[DMTarget],
 
     found_count = 0
 
-    async def _verify_domain(domain: str, people: list[DMTarget]):
+    async def _verify_domain(domain: str, people: list[DMTarget],
+                             shared_client: httpx.AsyncClient):
         """Verify all people on a single domain in one batch."""
         nonlocal found_count
         provider = providers.get(domain)
@@ -828,7 +965,7 @@ async def email_pattern_discovery(targets: list[DMTarget],
             try:
                 return t, await discover_emails(
                     domain=domain, full_name=t.full_name,
-                    email_provider=provider)
+                    email_provider=provider, http_session=shared_session)
             except Exception as e:
                 logger.debug(f"  Email discovery error for {t.full_name}@{domain}: {e}")
                 return t, []
@@ -877,8 +1014,13 @@ async def email_pattern_discovery(targets: list[DMTarget],
                 found_count += 1
                 logger.debug(f"  Pattern: {t.full_name} → {t.found_email} (unverified) on {domain}")
 
-    # Run all domains concurrently
-    await asyncio.gather(*[_verify_domain(d, ppl) for d, ppl in domain_people.items()])
+    # Run all domains concurrently with shared aiohttp session
+    connector = aiohttp.TCPConnector(limit=200, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(connector=connector) as shared_session:
+        await asyncio.gather(*[
+            _verify_domain(d, ppl, shared_session)
+            for d, ppl in domain_people.items()
+        ])
     return found_count
 
 

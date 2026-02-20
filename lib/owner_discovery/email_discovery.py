@@ -12,6 +12,7 @@ import smtplib
 import socket
 from typing import Optional
 
+import aiohttp
 import httpx
 from loguru import logger
 
@@ -90,7 +91,7 @@ async def _detect_catch_all(mx_host: str, domain: str) -> bool:
 
 
 async def verify_o365_email(
-    client: httpx.AsyncClient,
+    session: aiohttp.ClientSession,
     email: str,
 ) -> Optional[str]:
     """Verify email exists in Office 365 via GetCredentialType API.
@@ -100,22 +101,22 @@ async def verify_o365_email(
     Returns: "exists", "not_found", or None on error.
     """
     try:
-        resp = await client.post(
+        async with session.post(
             "https://login.microsoftonline.com/common/GetCredentialType",
             json={"Username": email},
-            timeout=10.0,
-        )
-        if resp.status_code != 200:
-            return None
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status != 200:
+                return None
 
-        data = resp.json()
-        # IfExistsResult: 0=exists, 1=doesn't exist, 5=exists (different IdP), 6=exists
-        result = data.get("IfExistsResult")
-        if result in (0, 5, 6):
-            return "exists"
-        elif result == 1:
-            return "not_found"
-        return None
+            data = await resp.json()
+            # IfExistsResult: 0=exists, 1=doesn't exist, 5=exists (different IdP), 6=exists
+            result = data.get("IfExistsResult")
+            if result in (0, 5, 6):
+                return "exists"
+            elif result == 1:
+                return "not_found"
+            return None
     except Exception:
         return None
 
@@ -124,6 +125,7 @@ async def discover_emails(
     domain: str,
     full_name: Optional[str] = None,
     email_provider: Optional[str] = None,
+    http_session: Optional[aiohttp.ClientSession] = None,
 ) -> list[dict]:
     """Discover valid email addresses for a hotel domain.
 
@@ -161,9 +163,13 @@ async def discover_emails(
     if email_provider == "microsoft_365":
         # Use O365 autodiscover (most reliable, unthrottled) — all in parallel
         logger.debug(f"Email {domain}: using O365 GetCredentialType verification")
-        async with httpx.AsyncClient() as client:
+        session = http_session
+        own_session = session is None
+        if own_session:
+            session = aiohttp.ClientSession()
+        try:
             statuses = await asyncio.gather(
-                *[verify_o365_email(client, email) for email in candidates]
+                *[verify_o365_email(session, email) for email in candidates]
             )
             for email, status in zip(candidates, statuses):
                 if status == "exists":
@@ -173,6 +179,9 @@ async def discover_emails(
                     continue
                 else:
                     results.append({"email": email, "verified": False, "method": "o365_unknown"})
+        finally:
+            if own_session:
+                await session.close()
     else:
         # Try SMTP verification
         mx_host = await asyncio.get_event_loop().run_in_executor(
