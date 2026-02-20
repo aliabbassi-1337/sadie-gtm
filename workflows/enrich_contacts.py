@@ -80,8 +80,12 @@ CF_WORKER_AUTH = _ENV.get('CF_WORKER_AUTH_KEY', '')
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-# Common Crawl Index
-CC_INDEX_URL = "https://index.commoncrawl.org/CC-MAIN-2024-51-index"
+# Common Crawl — search multiple recent indexes for better coverage
+CC_INDEXES = [
+    "https://index.commoncrawl.org/CC-MAIN-2024-51-index",  # Dec 2024
+    "https://index.commoncrawl.org/CC-MAIN-2024-42-index",  # Oct 2024
+    "https://index.commoncrawl.org/CC-MAIN-2024-33-index",  # Aug 2024
+]
 CC_WARC_BASE = "https://data.commoncrawl.org/"
 
 ENTITY_RE_STR = (
@@ -100,10 +104,17 @@ CONTACT_PATHS = {
     'contact', 'contact-us', 'our-story', 'people', 'staff',
     'management', 'executive-team', 'directors', 'our-people',
     'who-we-are', 'meet-the-team', 'company',
+    'investor', 'investors', 'governance', 'annual-report',
+    'media', 'news', 'press', 'ownership',
 }
 
-# Crawl paths for live crawl4ai fallback (most productive paths only)
-CRAWL_PATHS = ['/about', '/about-us', '/team', '/our-team', '/contact', '/contact-us']
+# httpx crawl paths — derived from CONTACT_PATHS (most productive subset)
+CRAWL_PATHS = [
+    '/about', '/about-us', '/team', '/our-team', '/contact', '/contact-us',
+    '/leadership', '/leadership-team', '/board', '/people', '/staff',
+    '/management', '/directors', '/our-people', '/our-story',
+    '/who-we-are', '/meet-the-team', '/company',
+]
 
 # Entity name stop words for domain guessing
 ENTITY_STOP = {
@@ -439,11 +450,12 @@ async def discover_domains(conn, targets: list[DMTarget]) -> None:
 
 # ── Step 3: Common Crawl harvest ─────────────────────────────────────────────
 
-async def _cc_query(client: httpx.AsyncClient, url_pattern: str, limit: int = 200) -> list[dict]:
-    """Query CC Index API via CF Worker proxy for IP rotation."""
+async def _cc_query(client: httpx.AsyncClient, index_url: str,
+                    url_pattern: str, limit: int = 200) -> list[dict]:
+    """Query one CC Index API via CF Worker proxy for IP rotation."""
     try:
         from urllib.parse import quote
-        cc_url = f"{CC_INDEX_URL}?url={quote(url_pattern, safe='')}&output=json&limit={limit}"
+        cc_url = f"{index_url}?url={quote(url_pattern, safe='')}&output=json&limit={limit}"
         resp = await client.get(
             _proxy_url(cc_url),
             headers=_proxy_headers(),
@@ -502,20 +514,24 @@ async def _cc_fetch_warc(client: httpx.AsyncClient, entry: dict) -> tuple[str, s
 
 
 async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
-    """Common Crawl: search + fetch per domain pipelined — no waiting between steps.
+    """Common Crawl: search multiple indexes + fetch per domain pipelined.
 
+    Searches 3 recent CC indexes in parallel for each domain, deduplicates by URL,
+    then fetches WARC records for contact pages.
     Returns {url: html} of fetched pages.
     """
     all_domains = {d for t in targets for d in t.all_domains}
     if not all_domains:
         return {}
 
-    logger.info(f"CC: searching+fetching {len(all_domains)} domains...")
+    total_queries = len(all_domains) * len(CC_INDEXES)
+    logger.info(f"CC: searching {len(all_domains)} domains across "
+                f"{len(CC_INDEXES)} indexes ({total_queries} queries)...")
 
     fetched_pages: dict[str, str] = {}
-    search_sem = asyncio.Semaphore(50)   # via CF Worker IP rotation
+    search_sem = asyncio.Semaphore(150)  # CF Worker IP rotation handles distribution
     fetch_sem = asyncio.Semaphore(200)   # WARC via S3/CloudFront, direct
-    domains_hit = 0
+    domains_hit = set()
 
     async with httpx.AsyncClient(
         timeout=30.0,
@@ -528,23 +544,25 @@ async def cc_harvest(targets: list[DMTarget], cfg: dict) -> dict[str, str]:
             if html and len(html) >= 100:
                 fetched_pages[url] = html
 
-        async def _search_and_fetch(domain):
-            nonlocal domains_hit
+        async def _search_and_fetch(domain, index_url):
             async with search_sem:
-                entries = await _cc_query(client, f'*.{domain}/*', limit=200)
+                entries = await _cc_query(client, index_url, f'*.{domain}/*', limit=200)
             if not entries:
                 return
             entries = [e for e in entries if 'html' in (e.get('mime', '') + e.get('mime-detected', ''))]
-            contact_entries = [e for e in entries if _is_contact_url(e.get('url', ''))]
+            contact_entries = [e for e in entries
+                              if _is_contact_url(e.get('url', ''))
+                              and e.get('url', '') not in fetched_pages]  # skip already fetched
             if not contact_entries:
                 return
-            domains_hit += 1
-            # Immediately start fetching WARC records (don't wait for other domains)
+            domains_hit.add(domain)
             await asyncio.gather(*[_fetch_entry(e) for e in contact_entries])
 
-        await asyncio.gather(*[_search_and_fetch(d) for d in all_domains])
+        # Search all domains × all indexes concurrently
+        tasks = [_search_and_fetch(d, idx) for d in all_domains for idx in CC_INDEXES]
+        await asyncio.gather(*tasks)
 
-    logger.info(f"CC: {domains_hit}/{len(all_domains)} domains hit, "
+    logger.info(f"CC: {len(domains_hit)}/{len(all_domains)} domains hit, "
                 f"{len(fetched_pages)} pages fetched")
     return fetched_pages
 
@@ -585,13 +603,10 @@ async def httpx_fetch_pages(targets: list[DMTarget], cfg: dict) -> dict[str, str
 
     fetched: dict[str, str] = {}
 
-    proxy_hdrs = _proxy_headers()
-
     async def _fetch_one(client: httpx.AsyncClient, url: str):
         try:
             resp = await client.get(
-                _proxy_url(url), headers=proxy_hdrs,
-                follow_redirects=True, timeout=10.0,
+                url, follow_redirects=True, timeout=10.0,
             )
             if resp.status_code == 200:
                 ct = resp.headers.get('content-type', '')
@@ -657,6 +672,81 @@ def extract_contacts_from_pages(targets: list[DMTarget], pages: dict[str, str],
                 t.found_phone = page_phones[0]
                 t.phone_source = source_label
 
+    return found_count
+
+
+async def llm_extract_from_pages(targets: list[DMTarget], pages: dict[str, str],
+                                  cfg: dict) -> int:
+    """Run LLM extraction on fetched pages for targets still missing email.
+
+    Only processes pages >500 chars associated with targets that have no email yet.
+    Runs all LLM calls concurrently (Bedrock handles throttling).
+    """
+    needs = [t for t in targets if not t.found_email]
+    if not needs or not pages:
+        return 0
+
+    country = cfg.get('country', 'AU')
+    phone_re = PHONE_PATTERNS.get(country, PHONE_PATTERNS['DEFAULT'])
+
+    # Build domain → needy targets mapping
+    domain_targets: dict[str, list[DMTarget]] = defaultdict(list)
+    for t in needs:
+        for d in t.all_domains:
+            domain_targets[d].append(t)
+
+    # Collect (url, text, targets) for LLM — only pages with enough content
+    llm_jobs: list[tuple[str, str, list[DMTarget]]] = []
+    for url, html in pages.items():
+        if len(html) < 500:
+            continue
+        page_domain = _get_domain(url)
+        page_targets = [t for t in domain_targets.get(page_domain, []) if not t.found_email]
+        if page_targets:
+            llm_jobs.append((url, html, page_targets))
+
+    if not llm_jobs:
+        return 0
+
+    logger.info(f"LLM: extracting contacts from {len(llm_jobs)} pages for "
+                f"{len(needs)} people still needing email...")
+
+    llm_sem = asyncio.Semaphore(20)  # Bedrock throttle
+    found_count = 0
+
+    async def _extract_one(url: str, html: str, page_targets: list[DMTarget]):
+        nonlocal found_count
+        names = [t.full_name for t in page_targets]
+        cleaned = _clean_text_for_llm(html)[:20000]
+        async with llm_sem:
+            contacts = await llm_extract_contacts(cleaned, names)
+        for t in page_targets:
+            if t.found_email:
+                continue
+            match = contacts.get(t.full_name.lower())
+            if not match:
+                continue
+            email = match.get('email')
+            if email and '@' in email:
+                if email.lower() not in {x.lower() for x in t.all_emails}:
+                    t.all_emails.append(email)
+                prefix = email.split('@')[0].lower()
+                if prefix not in GENERIC_EMAIL_PREFIXES:
+                    t.found_email = email
+                    t.email_verified = False
+                    t.email_source = "llm_extract"
+                    found_count += 1
+            phone = match.get('phone')
+            if phone and phone != 'null' and not t.found_phone:
+                cleaned_phone = phone_re.search(phone)
+                if cleaned_phone:
+                    t.found_phone = cleaned_phone.group()
+                    t.phone_source = "llm_extract"
+
+    await asyncio.gather(*[_extract_one(u, h, ts) for u, h, ts in llm_jobs])
+
+    if found_count:
+        logger.info(f"LLM: found {found_count} emails")
     return found_count
 
 
@@ -1196,19 +1286,15 @@ async def apply_results(conn, targets: list[DMTarget], dry_run: bool = True) -> 
             dm_ids, emails, phones, verified,
         )
 
-    # Save all scraped emails to hotels.emails
-    if has_all_emails:
-        hotel_ids = [t.hotel_id for t in has_all_emails]
-        all_emails_arr = [t.all_emails for t in has_all_emails]
+    # Save all scraped emails to hotels.emails (merge with existing)
+    for t in has_all_emails:
         await conn.execute(
-            "UPDATE sadie_gtm.hotels h"
+            "UPDATE sadie_gtm.hotels"
             " SET emails = (SELECT array_agg(DISTINCT e) FROM unnest("
-            "   array_cat(COALESCE(h.emails, ARRAY[]::text[]), v.all_emails)) e),"
+            "   array_cat(COALESCE(emails, ARRAY[]::text[]), $2::text[])) e),"
             "     updated_at = NOW()"
-            " FROM unnest($1::int[], $2::text[][])"
-            "   AS v(id, all_emails)"
-            " WHERE h.id = v.id",
-            hotel_ids, all_emails_arr,
+            " WHERE id = $1",
+            t.hotel_id, t.all_emails,
         )
 
     print(f"\nAPPLIED: Updated {len(updates)} DMs + {len(has_all_emails)} hotel email lists.")
@@ -1264,16 +1350,29 @@ async def enrich(args, cfg: dict):
     cc_task = asyncio.create_task(cc_harvest(targets, cfg))
     patterns_task = asyncio.create_task(_mx_then_email_patterns())
 
-    # httpx finishes first (unconstrained), extract immediately
+    # httpx finishes first (unconstrained, direct fetch), extract + LLM immediately
     httpx_pages = await httpx_task
     httpx_found = extract_contacts_from_pages(targets, httpx_pages, cfg, "httpx_fetch")
     logger.info(f"httpx done: {httpx_found} emails from {len(httpx_pages)} pages")
+
+    # Kick off LLM extraction on httpx pages right away (runs concurrent with CC + patterns)
+    httpx_llm_task = asyncio.create_task(llm_extract_from_pages(targets, httpx_pages, cfg))
 
     # CC and patterns finish on their own schedule
     cc_pages, (providers, pattern_found) = await asyncio.gather(cc_task, patterns_task)
     cc_found = extract_contacts_from_pages(targets, cc_pages, cfg, "cc_harvest")
     logger.info(f"CC: {cc_found} emails ({len(cc_pages)} pages), "
                 f"patterns: {pattern_found} emails")
+
+    # LLM on CC pages (only targets still missing email)
+    cc_llm_task = asyncio.create_task(llm_extract_from_pages(targets, cc_pages, cfg))
+
+    # Wait for both LLM tasks
+    httpx_llm_found = await httpx_llm_task
+    cc_llm_found = await cc_llm_task
+    if httpx_llm_found or cc_llm_found:
+        logger.info(f"LLM extraction: {httpx_llm_found} from httpx pages, "
+                    f"{cc_llm_found} from CC pages")
 
     # ── Serper search (opt-in) ──
     still_need = sum(1 for t in targets if not t.found_email)
