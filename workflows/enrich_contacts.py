@@ -61,11 +61,9 @@ DB_CONFIG = dict(
     password=_ENV['SADIE_DB_PASSWORD'],
     statement_cache_size=0,
 )
-AZURE_KEY = _ENV.get('AZURE_OPENAI_API_KEY', '')
-AZURE_ENDPOINT = _ENV.get('AZURE_OPENAI_ENDPOINT', '').rstrip('/')
-AZURE_VERSION = _ENV.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
-AZURE_DEPLOY = 'gpt-35-turbo'  # actual model: gpt-4.1-mini
 SERPER_API_KEY = _ENV.get('SERPER_API_KEY', '')
+AWS_REGION = _ENV.get('AWS_REGION', 'eu-north-1')
+BEDROCK_MODEL_ID = 'eu.amazon.nova-micro-v1:0'
 
 
 # ── Shared constants ─────────────────────────────────────────────────────────
@@ -447,41 +445,49 @@ async def _serper_search_entity(client, entity_name: str, sem, cfg: dict) -> lis
 
 # ── LLM extraction ───────────────────────────────────────────────────────────
 
-async def llm_extract_owners(
-    client: httpx.AsyncClient, text: str, hotel_name: str,
-) -> list[dict]:
-    if not AZURE_KEY:
-        return []
-    prompt = f"""Extract person names mentioned as owner, manager, director, or host for this property.
-Property: {hotel_name}
+_bedrock_client = None
+
+def _get_bedrock():
+    global _bedrock_client
+    if _bedrock_client is None:
+        import boto3
+        _bedrock_client = boto3.client('bedrock-runtime', region_name=AWS_REGION)
+    return _bedrock_client
+
+
+async def llm_extract_owners(text: str, hotel_name: str) -> list[dict]:
+    prompt = f"""Extract person names mentioned as owner, manager, director, or host for this property: {hotel_name}
 
 Text:
 {text[:5000]}
 
 Rules:
-- Every name MUST include both first name AND surname (e.g. "John Smith", not just "John")
-- If the text only mentions a first name with no surname, do NOT include that person
-- Do NOT include company names, trust names, or business entities
-- Do NOT include town/place names
-- Only include real person names explicitly stated in the text
+- Only include people with BOTH first name AND surname
+- Do NOT include company names, trusts, or business entities
 - Include their email and phone if mentioned near their name
+- Respond with ONLY a JSON array, no explanation
 
-Return JSON array: [{{"name": "First Last", "title": "Role", "email": "if found or null", "phone": "if found or null"}}]
-If no full names found, return: []"""
+JSON format: [{{"name":"First Last","title":"Role","email":"or null","phone":"or null"}}]
+If none found respond with exactly: []"""
 
-    url = f"{AZURE_ENDPOINT}/openai/deployments/{AZURE_DEPLOY}/chat/completions?api-version={AZURE_VERSION}"
     try:
-        resp = await client.post(url,
-            headers={"api-key": AZURE_KEY, "Content-Type": "application/json"},
-            json={"messages": [{"role": "user", "content": prompt}], "max_tokens": 500, "temperature": 0.1},
-            timeout=20.0)
-        if resp.status_code == 429:
-            await asyncio.sleep(3)
-            return []
-        if resp.status_code != 200:
-            return []
-        content = resp.json()["choices"][0]["message"]["content"].strip()
+        bedrock = _get_bedrock()
+        resp = await asyncio.to_thread(
+            bedrock.converse,
+            modelId=BEDROCK_MODEL_ID,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": 500, "temperature": 0.0},
+        )
+        content = resp["output"]["message"]["content"][0]["text"].strip()
         logger.debug(f"LLM raw response for {hotel_name}: {content[:300]}")
+        # Extract JSON from response (handle markdown code blocks or chatty preamble)
+        if content.startswith("```"):
+            content = re.sub(r'^```\w*\n?', '', content)
+            content = re.sub(r'\n?```$', '', content)
+        # Find JSON array in response if model added explanation text
+        json_match = re.search(r'\[.*\]', content, re.DOTALL)
+        if json_match:
+            content = json_match.group(0)
         data = json.loads(content)
         valid = []
         for d in (data if isinstance(data, list) else [data]):
@@ -563,7 +569,7 @@ async def enrich(args, cfg: dict, all_hotels: bool = False):
         page_timeout=10000,
         scan_full_page=False,
         wait_for_images=False,
-        excluded_tags=["nav", "footer", "script", "style", "noscript", "header", "aside"],
+        excluded_tags=["nav", "script", "style", "noscript", "aside"],
     )
 
     NUM_BROWSERS = 4
@@ -728,19 +734,17 @@ async def enrich(args, cfg: dict, all_hotels: bool = False):
     # Step 3: LLM extraction
     parks_with_text = sum(1 for r in results_list if r.page_texts)
     logger.info(f"Pre-LLM: {parks_with_text}/{len(results_list)} hotels have page text")
-    if AZURE_KEY:
-        logger.info("LLM extracting people...")
-        async with httpx.AsyncClient() as llm_client:
-            sem = asyncio.Semaphore(300)
+    logger.info("LLM extracting people (Bedrock Nova Micro)...")
+    sem = asyncio.Semaphore(10)  # Bedrock rate limits
 
-            async def _extract_one(r):
-                if not r.page_texts:
-                    return
-                combined = "\n---\n".join(r.page_texts)
-                async with sem:
-                    r.owner_names = await llm_extract_owners(llm_client, combined, r.hotel.hotel_name)
+    async def _extract_one(r):
+        if not r.page_texts:
+            return
+        combined = "\n---\n".join(r.page_texts)
+        async with sem:
+            r.owner_names = await llm_extract_owners(combined, r.hotel.hotel_name)
 
-            await asyncio.gather(*[_extract_one(r) for r in results_list])
+    await asyncio.gather(*[_extract_one(r) for r in results_list])
 
     # Results summary
     total_found = sum(1 for r in results_list if r.owner_names)
@@ -813,47 +817,48 @@ async def enrich(args, cfg: dict, all_hotels: bool = False):
             dm_conf.append(0.70)
             dm_urls.append(r.hotel.website or None)
 
-    # Map orphan contact info (from page scraping) to person/entity DMs
-    entity_contact_ids, entity_contact_emails, entity_contact_phones = [], [], []
+    # Map scraped contact info: always save to hotel record, also enrich DMs if they exist
     hotel_contact_ids, hotel_contact_emails, hotel_contact_phones = [], [], []
+    entity_contact_ids, entity_contact_emails, entity_contact_phones = [], [], []
     for r in results_list:
-        orphan_email = None
-        orphan_phone = r.new_phones[0] if r.new_phones else None
+        best_email = None
+        best_phone = r.new_phones[0] if r.new_phones else None
         if r.new_emails:
             for e in r.new_emails:
                 prefix = e.split('@')[0].lower()
                 if prefix not in GENERIC_PREFIXES:
-                    orphan_email = e
+                    best_email = e
                     break
-            if not orphan_email:
-                orphan_email = r.new_emails[0]
+            if not best_email:
+                best_email = r.new_emails[0]
 
-        if not orphan_email and not orphan_phone:
+        if not best_email and not best_phone:
             continue
 
-        # Check if this hotel has person DMs in the batch
-        park_dm_indices = [i for i, hid in enumerate(dm_ids) if hid == r.hotel.hotel_id]
-        if park_dm_indices:
-            for idx in park_dm_indices:
-                if not dm_emails[idx] and orphan_email:
-                    dm_emails[idx] = orphan_email
-                if not dm_phones[idx] and orphan_phone:
-                    dm_phones[idx] = orphan_phone
-        elif r.hotel.hotel_id in entity_map:
+        # Always save to hotel record
+        hotel_contact_ids.append(r.hotel.hotel_id)
+        hotel_contact_emails.append(best_email)
+        hotel_contact_phones.append(best_phone)
+
+        # Also enrich person DMs in the batch
+        for idx in [i for i, hid in enumerate(dm_ids) if hid == r.hotel.hotel_id]:
+            if not dm_emails[idx] and best_email:
+                dm_emails[idx] = best_email
+            if not dm_phones[idx] and best_phone:
+                dm_phones[idx] = best_phone
+
+        # Also enrich existing entity DMs
+        if r.hotel.hotel_id in entity_map:
             entity_contact_ids.append(r.hotel.hotel_id)
-            entity_contact_emails.append(orphan_email)
-            entity_contact_phones.append(orphan_phone)
-        else:
-            # No DMs at all — update hotel-level contact info
-            hotel_contact_ids.append(r.hotel.hotel_id)
-            hotel_contact_emails.append(orphan_email)
-            hotel_contact_phones.append(orphan_phone)
+            entity_contact_emails.append(best_email)
+            entity_contact_phones.append(best_phone)
 
     dm_with_email = sum(1 for e in dm_emails if e)
     dm_with_phone = sum(1 for p in dm_phones if p)
     print(f"\nNew DMs to insert: {len(dm_ids)} ({dm_with_email} with email, {dm_with_phone} with phone)")
-    print(f"Entity contact updates: {len(entity_contact_ids)}")
-    print(f"Hotel contact updates: {len(hotel_contact_ids)} (phone/email from website, no owner found)")
+    print(f"Hotel contact updates: {len(hotel_contact_ids)} (phone/email from website)")
+    if entity_contact_ids:
+        print(f"Entity DM contact updates: {len(entity_contact_ids)}")
 
     if dry_run:
         print(f"\nDRY RUN — run with --apply to write to DB")
