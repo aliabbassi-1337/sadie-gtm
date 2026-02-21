@@ -627,3 +627,167 @@ async def extract_owners_from_page(html: str, url: str, hotel_name: str) -> list
     if dms:
         logger.debug(f"LLM: {len(dms)} persons from {url}")
     return dms
+
+
+# ── Pipeline: Incremental persistence + orchestration ────────────────────────
+
+def group_pages_by_domain(pages: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Group fetched pages by domain.
+
+    Returns {domain: {url: html, url2: html2, ...}}
+    """
+    grouped = defaultdict(dict)
+    for url, html in pages.items():
+        domain = _get_domain(url)
+        if domain:
+            grouped[domain][url] = html
+    return dict(grouped)
+
+
+async def discover_owners_cc(args, cfg: dict) -> dict:
+    """Main CC owner discovery pipeline.
+
+    Returns stats dict: {hotels_loaded, domains_queried, pages_fetched,
+                         owners_extracted, owners_saved, hotels_with_owners,
+                         llm_calls, jsonld_hits, regex_hits}
+    """
+    from services.enrichment import repo
+
+    stats = {
+        'hotels_loaded': 0, 'domains_queried': 0,
+        'pages_fetched': 0, 'owners_extracted': 0,
+        'owners_saved': 0, 'hotels_with_owners': 0,
+        'llm_calls': 0, 'jsonld_hits': 0, 'regex_hits': 0,
+    }
+
+    # 1. Load hotels
+    conn = await asyncpg.connect(**DB_CONFIG)
+    try:
+        hotels = await load_hotels_for_cc_sweep(conn, cfg, limit=args.limit)
+    finally:
+        await conn.close()
+
+    stats['hotels_loaded'] = len(hotels)
+    logger.info(f"Loaded {len(hotels)} hotels for CC sweep")
+
+    if not hotels:
+        logger.info("No hotels to process")
+        return stats
+
+    if args.dry_run:
+        # Just show what would be processed
+        all_domains, domain_map = extract_hotel_domains(hotels)
+        print(f"\nDRY RUN:")
+        print(f"  Hotels: {len(hotels)}")
+        print(f"  Unique domains: {len(all_domains)}")
+        print(f"  CC indexes to query: {len(CC_INDEXES)}")
+        print(f"  Total CC queries: {len(all_domains) * len(CC_INDEXES)}")
+        return stats
+
+    # 2. Extract unique domains
+    all_domains, domain_map = extract_hotel_domains(hotels)
+    stats['domains_queried'] = len(all_domains)
+    logger.info(f"Extracted {len(all_domains)} unique domains from {len(hotels)} hotels")
+
+    if not all_domains:
+        logger.warning("No valid domains found")
+        return stats
+
+    # 3. CC Harvest (index query + WARC fetch)
+    pages = await cc_harvest_owner_pages(all_domains)
+    stats['pages_fetched'] = len(pages)
+    logger.info(f"CC harvest: {len(pages)} pages from {len(all_domains)} domains")
+
+    if not pages:
+        logger.warning("No pages fetched from CC")
+        return stats
+
+    # 4. Group pages by domain
+    pages_by_domain = group_pages_by_domain(pages)
+
+    # 5. Extract owners + incremental persistence
+    pending_buffer: list[OwnerEnrichmentResult] = []
+    flush_lock = asyncio.Lock()
+
+    async def _flush():
+        nonlocal pending_buffer
+        async with flush_lock:
+            if not pending_buffer:
+                return 0
+            to_flush = pending_buffer
+            pending_buffer = []
+        if not args.apply:
+            # Not persisting, just count
+            count = sum(len(r.decision_makers) for r in to_flush)
+            return count
+        try:
+            count = await repo.batch_persist_results(to_flush)
+            stats['owners_saved'] += count
+            logger.info(f"Flushed {len(to_flush)} hotels ({count} DMs saved, {stats['owners_saved']} total)")
+            return count
+        except Exception as e:
+            logger.error(f"Flush failed: {e}")
+            async with flush_lock:
+                pending_buffer = to_flush + pending_buffer
+            return 0
+
+    hotels_processed = 0
+    for domain, domain_pages in pages_by_domain.items():
+        hotels_for_domain = domain_map.get(domain, [])
+        if not hotels_for_domain:
+            continue
+
+        # Extract owners from all pages for this domain
+        all_dms_for_domain: list[DecisionMaker] = []
+        for url, html in domain_pages.items():
+            dms = await extract_owners_from_page(html, url, hotels_for_domain[0]['name'])
+            all_dms_for_domain.extend(dms)
+
+            # Track extraction method stats
+            for dm in dms:
+                if 'jsonld' in dm.sources[0]:
+                    stats['jsonld_hits'] += 1
+                elif 'regex' in dm.sources[0]:
+                    stats['regex_hits'] += 1
+                elif 'llm' in dm.sources[0]:
+                    stats['llm_calls'] += 1
+
+        stats['owners_extracted'] += len(all_dms_for_domain)
+
+        # Create result for each hotel on this domain
+        for hotel in hotels_for_domain:
+            result = OwnerEnrichmentResult(
+                hotel_id=hotel['hotel_id'],
+                domain=domain,
+                decision_makers=all_dms_for_domain,
+                layers_completed=LAYER_WEBSITE,
+            )
+            if result.found_any:
+                stats['hotels_with_owners'] += 1
+
+            async with flush_lock:
+                pending_buffer.append(result)
+                should_flush = len(pending_buffer) >= FLUSH_INTERVAL
+
+            if should_flush:
+                await _flush()
+
+            hotels_processed += 1
+
+    # Final flush
+    await _flush()
+
+    # Summary
+    logger.info(
+        f"\nCC Sweep complete:\n"
+        f"  Hotels processed: {hotels_processed}\n"
+        f"  Domains queried: {stats['domains_queried']}\n"
+        f"  Pages fetched: {stats['pages_fetched']}\n"
+        f"  Owners extracted: {stats['owners_extracted']}\n"
+        f"  Hotels with owners: {stats['hotels_with_owners']}\n"
+        f"  Extraction: JSON-LD={stats['jsonld_hits']}, "
+        f"Regex={stats['regex_hits']}, LLM={stats['llm_calls']}\n"
+        f"  Owners saved to DB: {stats['owners_saved']}"
+    )
+
+    return stats
