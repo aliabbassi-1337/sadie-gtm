@@ -1,82 +1,75 @@
 # Requirements: Sadie GTM Owner Enrichment
 
-**Version:** v1
+**Version:** v2 — Batch-First Owner Discovery
 **Last updated:** 2026-02-21
-**Total v1 requirements:** 13
+**Total v2 requirements:** 13
 
 ---
 
-## v1 Requirements
+## v2 Requirements
 
-### Owner/Decision Maker Pipeline
+### CC Bulk Sweep
 
-- [ ] **OWNER-01**: Complete the owner discovery waterfall as a fully automated DAG — hotel URL in, verified owner/DM contact info out, no manual stage-kicking
-- [ ] **OWNER-02**: Contact enrichment pipeline runs end-to-end for existing DMs missing email/phone (CC harvest, email pattern guessing, SMTP/O365 verification)
-- [ ] **OWNER-03**: Multiple data entry points (CC, gov data, direct URLs) all converge to the same enriched hotel record
-- [ ] **OWNER-04**: Pipeline can process 100K+ hotels without manual orchestration between stages
+- [ ] **CC-01**: Query CC index in batch for all hotel domains (reuse CF Worker /batch pattern from contact enrichment), targeting /about, /team, /contact, /management, /staff pages across multiple CC indexes
+- [ ] **CC-02**: Pull WARC HTML from CC for matched URLs via CF Worker /batch endpoint, decompress WARC records, extract clean HTML
+- [ ] **CC-03**: Run Nova Micro LLM extraction on CC HTML to extract owner names, titles, roles, and organizational relationships as structured data
+- [ ] **CC-04**: Search CC for hotel review site pages (TripAdvisor, Google cached pages) to find owner/manager responses that reveal identity
+- [ ] **CC-05**: Search CC for business directory pages (BBB, Yelp, local chambers of commerce) that list hotel owner/operator information
 
-### Common Crawl
+### Live Crawl Gap-Fill
 
-- [ ] **CC-01**: Improved CC Index querying — targeted hotel URL discovery at scale with CC index caching
-- [ ] **CC-02**: HTML extraction from CC WARC data with LLM-based structured data extraction (owner names, contact info, about page content)
-- [ ] **CC-03**: CC as a data source for both hotel discovery (new hotels) and contact page content (enrichment)
+- [ ] **CRAWL-01**: aiohttp concurrent live crawling via CF Worker proxy for hotel domains not found in CC (~20%), targeting /about, /team, /management, /staff pages
+- [ ] **CRAWL-02**: crawl4ai headless browser fallback for JS-heavy hotel sites that aiohttp cannot render, with same page targeting and LLM extraction
+
+### Batch Structured Data
+
+- [ ] **DATA-01**: Batch RDAP queries across all hotel domains simultaneously (not per-hotel sequential), with results cached in domain_whois_cache
+- [ ] **DATA-02**: Batch DNS intelligence (MX, SOA, SPF, DMARC) across all hotel domains simultaneously, with results cached in domain_dns_cache
+- [ ] **DATA-03**: Batch WHOIS (live query + Wayback Machine fallback for pre-GDPR data) across all hotel domains simultaneously
+
+### Pipeline Architecture
+
+- [ ] **PIPE-01**: Batch-level waterfall orchestration — CC sweep first (cheapest, highest coverage), then live crawl gap-fill, then RDAP/WHOIS/DNS, then email verification — each stage processes ALL hotels before the next stage begins
+- [ ] **PIPE-02**: Email pattern guessing + batch MX detection + O365 autodiscover + SMTP verification for all discovered owner names, with source attribution persisted to hotel_decision_makers
+- [ ] **PIPE-03**: Incremental persistence — flush enrichment results to database every N hotels (not all-or-nothing), with CLI entrypoint matching enrich_contacts pattern (--source, --limit, --apply, --audit, --dry-run)
+
+---
+
+## Deferred (v3+)
+
+### DAG Orchestration
+- Automated chaining: owner discovery → contact enrichment → normalization/dedup
+- SQS-based stage triggering without manual orchestration
 
 ### Government Data Expansion
-
-- [ ] **GOV-01**: Expand government record ingestion beyond Florida DBPR to at least 2 additional states (Texas, New York recommended)
-- [ ] **GOV-02**: Normalize government data to match existing hotel schema for entity matching
-- [ ] **GOV-03**: Extract ownership/licensee information from state records as decision maker candidates
+- Texas TDLR, New York DOS, additional state sources
+- Government record normalization and entity matching
 
 ### Pipeline Resilience
+- Circuit breakers for external services
+- SQS Dead Letter Queue for persistent failures
+- layers_failed bitmask for selective retry
 
-- [ ] **RESIL-01**: Circuit breakers for external services — detect service degradation and stop sending requests until recovery
-- [ ] **RESIL-02**: SQS Dead Letter Queue — capture persistent failures after N retries (maxReceiveCount=3), surface failed records for investigation
-- [ ] **RESIL-03**: `layers_failed` bitmask on `hotel_owner_enrichment` — track which enrichment layers failed (not just completed) to enable selective retry
-
----
-
-## v2 Requirements (Deferred)
+### Multi-Source Convergence
+- Cross-source entity resolution (CC + Google Maps + gov records)
+- Deduplication via Splink + PostGIS proximity
 
 ### Data Quality
-- False positive contact filtering (management company/web agency blocklist, WHOIS registrant cross-check)
-- Multi-probe catch-all domain detection for email verification
-- Per-source rate limiters (different limits for RDAP, DNS, WHOIS, website scraping)
-- Bounded concurrency (replace unbounded asyncio.gather for 10K+ batches)
-- Incremental persistence for contact enrichment (flush every N targets)
-
-### Sales-Ready Features
-- Lead quality score (composite 0-100 per hotel)
-- Chain vs independent classification (brand reference list + fuzzy matching)
-- Revenue estimation (room count * market ADR * occupancy benchmarks)
-
-### Data Hygiene
-- Entity resolution / cross-source deduplication (Splink + PostGIS proximity)
-- Stale data detection + automatic re-enrichment scheduling
-- Compliance foundation (suppression table, opt-out tracking, consent basis)
-
-### Tech Detection
-- Better booking engine detection (scrape booking pages directly)
-- Broader tech stack detection (PMS, phone system, channel manager)
-
-### Differentiators
-- Intent signals (job posting monitoring via JobSpy)
-- Google Maps deep enrichment (star rating, review count, owner response rate)
-- Google Maps ingestion at scale
-- Competitive intelligence / vendor displacement queries
+- Management company / web agency blocklist
+- Multi-probe catch-all domain detection
+- Lead quality scoring (0-100 composite)
 
 ---
 
 ## Out of Scope
 
-- Non-hospitality verticals — hotels first, other verticals later
-- Agentic outbound automation — focus on data pipeline
-- AI agent workflows — current focus is batch LLM extraction
-- User-facing UI dashboard — CLI + SQL + exports sufficient
-- Real-time processing — batch is appropriate for this use case
-- LinkedIn scraping — ToS risk, poor ROI
-- OTA data scraping (Booking.com, Expedia) — legal risk, not useful for lead qualification
-- Paid bulk data (ZoomInfo, Apollo, Clearbit) — $15K-60K/yr, poor for hospitality-specific intel
-- Workflow orchestrator adoption (Prefect/Dagster) — defer until scheduling needs arise
+- Non-hospitality verticals — hotels first
+- Agentic outbound — focus on data pipeline
+- User-facing UI — CLI + SQL sufficient
+- Real-time processing — batch is appropriate
+- LinkedIn scraping — ToS risk
+- Paid bulk data (ZoomInfo, Apollo) — budget, poor hospitality coverage
+- Workflow orchestrator (Prefect/Dagster) — defer until scheduling needs arise
 
 ---
 
@@ -84,16 +77,16 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| OWNER-01 | Phase 6: Automated DAG | Pending |
-| OWNER-02 | Phase 1: Contact Enrichment Pipeline | Pending |
-| OWNER-03 | Phase 5: Multi-Source Convergence | Pending |
-| OWNER-04 | Phase 6: Automated DAG | Pending |
-| CC-01 | Phase 4: Common Crawl Pipeline | Pending |
-| CC-02 | Phase 4: Common Crawl Pipeline | Pending |
-| CC-03 | Phase 4: Common Crawl Pipeline | Pending |
-| GOV-01 | Phase 2: Government Data Expansion | Pending |
-| GOV-02 | Phase 2: Government Data Expansion | Pending |
-| GOV-03 | Phase 2: Government Data Expansion | Pending |
-| RESIL-01 | Phase 3: Pipeline Resilience | Pending |
-| RESIL-02 | Phase 3: Pipeline Resilience | Pending |
-| RESIL-03 | Phase 3: Pipeline Resilience | Pending |
+| CC-01 | TBD | Pending |
+| CC-02 | TBD | Pending |
+| CC-03 | TBD | Pending |
+| CC-04 | TBD | Pending |
+| CC-05 | TBD | Pending |
+| CRAWL-01 | TBD | Pending |
+| CRAWL-02 | TBD | Pending |
+| DATA-01 | TBD | Pending |
+| DATA-02 | TBD | Pending |
+| DATA-03 | TBD | Pending |
+| PIPE-01 | TBD | Pending |
+| PIPE-02 | TBD | Pending |
+| PIPE-03 | TBD | Pending |
