@@ -236,3 +236,160 @@ def _is_owner_url(url: str) -> bool:
     if not path:
         return True  # Homepage often has owner info
     return any(p in path for p in OWNER_PATHS)
+
+
+# ── Hotel loading + domain extraction ────────────────────────────────────────
+
+async def load_hotels_for_cc_sweep(conn, cfg: dict, limit: int = None) -> list[dict]:
+    """Load hotels with website domains for CC owner discovery.
+
+    Excludes hotels without websites and aggregator-domain hotels.
+    """
+    jc = cfg.get("join") or ""
+    wc = cfg["where"]
+    rows = await conn.fetch(
+        f"SELECT h.id AS hotel_id, h.name, h.website"
+        f" FROM sadie_gtm.hotels h"
+        f" {jc}"
+        f" WHERE ({wc})"
+        f"  AND h.website IS NOT NULL AND h.website != ''"
+        f" ORDER BY h.id"
+        f" {f'LIMIT {limit}' if limit else ''}",
+    )
+    return [dict(r) for r in rows]
+
+
+def extract_hotel_domains(hotels: list[dict]) -> tuple[set[str], dict[str, list[dict]]]:
+    """Extract unique domains from hotels, mapping domain -> hotels.
+
+    Excludes aggregator/OTA domains.
+    Returns (all_domains, domain_to_hotels_map)
+    """
+    all_domains = set()
+    domain_map = defaultdict(list)  # domain -> [hotel dicts]
+    for h in hotels:
+        domain = _get_domain(h['website'])
+        if domain and not any(domain == s or domain.endswith('.' + s) for s in SKIP_DOMAINS):
+            all_domains.add(domain)
+            domain_map[domain].append(h)
+    return all_domains, domain_map
+
+
+# ── CC Harvest: Index query + WARC fetch + HTML decompress ───────────────────
+
+async def cc_harvest_owner_pages(all_domains: set[str]) -> dict[str, str]:
+    """Batch CC Index query + WARC fetch for owner-relevant pages.
+
+    Phase 1: Query all CC indexes for all domains via CF Worker /batch
+    Phase 2: Filter to owner-relevant URLs (about, team, management, etc.)
+    Phase 3: Fetch WARC records and decompress to HTML
+
+    Returns {page_url: html_content}
+    """
+    if not all_domains:
+        return {}
+
+    total_queries = len(all_domains) * len(CC_INDEXES)
+    logger.info(f"CC: searching {len(all_domains)} domains across "
+                f"{len(CC_INDEXES)} indexes ({total_queries} queries)...")
+
+    connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(connector=connector) as session:
+
+        # ── Phase 1: Batch CC Index queries — one /batch call per index, all concurrent
+        per_index_batches = []
+        for idx_url in CC_INDEXES:
+            batch = []
+            for domain in all_domains:
+                cc_url = f"{idx_url}?url={quote(f'*.{domain}/*', safe='')}&output=json&limit=200"
+                batch.append({'url': cc_url, 'accept': 'application/json'})
+            per_index_batches.append(batch)
+
+        all_index_results = await asyncio.gather(*[
+            _proxy_batch(session, batch) for batch in per_index_batches])
+        results = [r for batch_results in all_index_results for r in batch_results]
+
+        # Parse all index results into entries
+        all_entries = []
+        domains_hit = set()
+        for r in results:
+            if r.get('status') != 200 or not r.get('body'):
+                continue
+            for line in r['body'].strip().split('\n'):
+                try:
+                    entry = json.loads(line)
+                    if 'html' in (entry.get('mime', '') + entry.get('mime-detected', '')):
+                        if _is_owner_url(entry.get('url', '')):
+                            all_entries.append(entry)
+                            d = _get_domain(entry.get('url', ''))
+                            if d:
+                                domains_hit.add(d)
+                except Exception:
+                    pass
+
+        # Deduplicate by URL (keep first = newest index)
+        seen_urls = set()
+        unique_entries = []
+        for e in all_entries:
+            u = e.get('url', '')
+            if u not in seen_urls:
+                seen_urls.add(u)
+                unique_entries.append(e)
+
+        logger.info(f"CC: {len(domains_hit)}/{len(all_domains)} domains hit, "
+                    f"{len(unique_entries)} owner pages to fetch")
+
+        if not unique_entries:
+            return {}
+
+        # ── Phase 2: Batch WARC fetches ───────────────────────────────────
+        warc_requests = []
+        entry_map = {}  # index in warc_requests -> entry
+        for entry in unique_entries:
+            length = int(entry.get('length', 0))
+            if length > 500_000:  # skip huge pages
+                continue
+            filename = entry.get('filename', '')
+            offset = int(entry.get('offset', 0))
+            warc_url = f"{CC_WARC_BASE}{filename}"
+            range_header = f"bytes={offset}-{offset+length-1}"
+            entry_map[len(warc_requests)] = entry
+            warc_requests.append({'url': warc_url, 'range': range_header})
+
+        logger.info(f"CC: fetching {len(warc_requests)} WARC records via batch...")
+        warc_results = await _proxy_batch(session, warc_requests, chunk_size=200)
+
+        # ── Phase 3: Decompress WARC records into HTML ────────────────────
+        fetched_pages: dict[str, str] = {}
+        ok_count = sum(1 for r in warc_results if r.get('status') in (200, 206))
+        err_count = sum(1 for r in warc_results if r.get('error'))
+        logger.info(f"CC WARC batch: {ok_count} ok, {err_count} errors, "
+                    f"{len(warc_results) - ok_count - err_count} other")
+        for i, r in enumerate(warc_results):
+            if r.get('status') not in (200, 206) or not r.get('body'):
+                continue
+            entry = entry_map.get(i)
+            if not entry:
+                continue
+            page_url = entry.get('url', '')
+            try:
+                raw_data = base64.b64decode(r['body']) if r.get('binary') else r['body'].encode()
+                raw = gzip.decompress(raw_data)
+                parts = raw.split(b'\r\n\r\n', 2)
+                if len(parts) < 3:
+                    continue
+                html_bytes = parts[2]
+                encoding = entry.get('encoding', 'UTF-8') or 'UTF-8'
+                try:
+                    html = html_bytes.decode(encoding)
+                except Exception:
+                    html = html_bytes.decode('utf-8', errors='replace')
+                if len(html) >= 100:
+                    fetched_pages[page_url] = html
+            except Exception as e:
+                logger.warning(f"WARC decode error for {page_url}: {e}")
+
+        logger.info(f"CC: {len(fetched_pages)} pages extracted from "
+                    f"{len(domains_hit)}/{len(all_domains)} domains")
+
+    return fetched_pages
