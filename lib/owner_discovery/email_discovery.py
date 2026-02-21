@@ -126,6 +126,7 @@ async def discover_emails(
     full_name: Optional[str] = None,
     email_provider: Optional[str] = None,
     http_session: Optional[aiohttp.ClientSession] = None,
+    skip_smtp: bool = False,
 ) -> list[dict]:
     """Discover valid email addresses for a hotel domain.
 
@@ -182,6 +183,12 @@ async def discover_emails(
         finally:
             if own_session:
                 await session.close()
+    elif skip_smtp:
+        # Skip SMTP — just return best name-based candidates as unverified
+        # (SMTP port 25 is blocked from most cloud environments)
+        personal = [c for c in candidates if not any(c.startswith(r + "@") for r in ROLE_EMAILS)]
+        for email in (personal or candidates)[:3]:
+            results.append({"email": email, "verified": False, "method": "pattern_no_smtp"})
     else:
         # Try SMTP verification
         mx_host = await asyncio.get_event_loop().run_in_executor(

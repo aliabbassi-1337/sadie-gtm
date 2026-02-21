@@ -1001,7 +1001,8 @@ async def email_pattern_discovery(targets: list[DMTarget],
             try:
                 return t, await discover_emails(
                     domain=domain, full_name=t.full_name,
-                    email_provider=provider, http_session=shared_session)
+                    email_provider=provider, http_session=shared_session,
+                    skip_smtp=True)
             except Exception as e:
                 logger.debug(f"  Email discovery error for {t.full_name}@{domain}: {e}")
                 return t, []
