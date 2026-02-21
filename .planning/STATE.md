@@ -8,7 +8,7 @@
 
 **Core value:** Turn raw hotel data into actionable sales leads with verified owner/decision-maker contact info at 100K+ scale.
 
-**Current focus:** Completing the Owner/Decision Makers DAG end-to-end.
+**Current focus:** Rearchitect owner discovery to batch-first CC-driven approach.
 
 **Active branch:** feat/generic-enrich-contacts
 
@@ -16,19 +16,10 @@
 
 ## Current Position
 
-**Milestone:** v1 -- Owner/DM Pipeline Completion
-**Phase:** 1 of 6 -- Contact Enrichment Pipeline
+**Milestone:** v2 -- Batch-First Owner Discovery
+**Phase:** Defining requirements
 **Plan:** Not yet planned
-**Status:** Not Started
-
-```
-Phase 1 [..........] Contact Enrichment Pipeline
-Phase 2 [..........] Government Data Expansion
-Phase 3 [..........] Pipeline Resilience
-Phase 4 [..........] Common Crawl Pipeline
-Phase 5 [..........] Multi-Source Convergence
-Phase 6 [..........] Automated DAG
-```
+**Status:** Initializing
 
 ---
 
@@ -38,8 +29,8 @@ Phase 6 [..........] Automated DAG
 |--------|-------|
 | Plans completed | 0 |
 | Plans total | TBD (not yet planned) |
-| Phases completed | 0 / 6 |
-| Requirements completed | 0 / 13 |
+| Phases completed | 0 / TBD |
+| Requirements completed | 0 / TBD |
 
 ---
 
@@ -49,25 +40,21 @@ Phase 6 [..........] Automated DAG
 
 | Decision | Rationale | Date |
 |----------|-----------|------|
-| 6 phases derived from 13 requirements | Natural clustering by dependency and delivery boundary; depth=comprehensive but requirements don't justify more | 2026-02-21 |
-| Government Data moved to Phase 2 | User priority: get gov data sources in early; no dependencies, can parallelize with Phase 1 and Phase 3 | 2026-02-21 |
-| Phases 1+2+3 all parallelizable | Contact enrichment, gov data, and resilience are fully independent concerns | 2026-02-21 |
-| DAG automation last (Phase 6) | Must have all pipeline stages working before automating their chaining | 2026-02-21 |
-| Defer Prefect adoption | Research synthesis recommends DIY SQS chaining + circuit breakers first; revisit after Phase 3 | 2026-02-21 |
-| AWS Nova Micro for LLM extraction | User-specified; replaces GPT-3.5-turbo references in research | 2026-02-21 |
+| v2 supersedes v1 | v1 scope was too broad (6 phases, 13 reqs); v2 focuses on one thing: batch-first owner discovery | 2026-02-21 |
+| Batch-first over per-hotel waterfall | Contact enrichment proved batch CC sweep + concurrent processing is dramatically faster and cheaper | 2026-02-21 |
+| CC as primary data source (~80%) | CC has most hotel pages cached; free vs Serper per-query costs | 2026-02-21 |
+| Serper becomes optional fallback | CC + direct crawl should handle ~80% of owner discovery without paid API | 2026-02-21 |
+| AWS Nova Micro for LLM extraction | Proven in contact enrichment; cheap, fast, good at structured extraction | 2026-02-21 |
+| Defer Prefect adoption | DIY SQS chaining sufficient; revisit when scheduling needs arise | 2026-02-21 |
+| DAG orchestration deferred to v3 | Build the improved owner discovery first, then wire it into automated DAG | 2026-02-21 |
 
 ### Technical Notes
 
-- Contact enrichment is actively in-progress on `feat/generic-enrich-contacts` branch
-- Existing 9-layer owner discovery waterfall is deployed and working
-- LLM extraction uses AWS Nova Micro (not GPT-3.5-turbo as some docs reference)
-- Florida DBPR government data already ingested
-- CF Worker proxy operational for IP rotation
-- Common Crawl index querying exists but needs improvement
-
-### Todos
-
-- [ ] Plan Phase 1 (Contact Enrichment Pipeline)
+- Contact enrichment is substantially complete (Big4: 649/649 emails, 480/649 phones)
+- Contact enrichment patterns to reuse: CC bulk sweep, CF Worker /batch, Nova Micro extraction, aiohttp concurrent fetch
+- Current owner discovery is per-hotel 9-layer waterfall (slow at scale)
+- CF Worker proxy operational ($5/mo for 10M requests)
+- CC Index querying works across 3 indexes in parallel
 
 ### Blockers
 
@@ -77,13 +64,13 @@ None currently.
 
 ## Session Continuity
 
-**What just happened:** Roadmap revised -- Government Data Expansion moved from Phase 4 to Phase 2 per user priority. Pipeline Resilience becomes Phase 3, Common Crawl becomes Phase 4. Dependencies updated accordingly: Phases 1+2+3 fully parallel, Phase 4 after Phase 3, Phase 5 after Phase 2+4, Phase 6 after Phase 1+3+5.
+**What just happened:** Started v2 milestone — Batch-First Owner Discovery. Archived v1 (partially complete, contact enrichment done). Skipped research (domain well-understood from v1 research + contact enrichment experience).
 
-**What happens next:** Plan Phase 1 (Contact Enrichment Pipeline) -- decompose OWNER-02 into executable plans.
+**What happens next:** Define v2 requirements, then create roadmap.
 
 **Key files:**
-- `.planning/ROADMAP.md` -- phase structure and success criteria
-- `.planning/REQUIREMENTS.md` -- v1 requirements with traceability
-- `.planning/PROJECT.md` -- project context and constraints
-- `.planning/research/SUMMARY.md` -- research synthesis informing phase structure
+- `.planning/PROJECT.md` -- updated with v2 milestone
+- `.planning/MILESTONES.md` -- v1 archived
+- `.planning/REQUIREMENTS.md` -- to be created for v2
+- `.planning/ROADMAP.md` -- to be created for v2
 - `.planning/config.json` -- depth=comprehensive, mode=yolo, parallelization=enabled

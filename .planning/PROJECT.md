@@ -23,7 +23,7 @@ Sadie's sales team needs to know WHO owns/manages each hotel, HOW to reach them,
 - **Infrastructure:** AWS (Fargate, SQS, S3, Lambda), Supabase/PostgreSQL+PostGIS, CF Worker proxy
 - **Stack locked:** Python 3.9+, asyncio+httpx+asyncpg, aiosql (no ORM), Pydantic, uv
 - **Scale target:** 100K+ hotels, batch processing with multi-worker concurrency
-- **LLM usage:** Small/cheap models (GPT-3.5-turbo, Groq) for extraction, not reasoning
+- **LLM usage:** Small/cheap models (AWS Nova Micro, GPT-3.5-turbo) for extraction, not reasoning
 
 ## Requirements
 
@@ -44,19 +44,25 @@ Sadie's sales team needs to know WHO owns/manages each hotel, HOW to reach them,
 - Multi-worker atomic claiming with stale claim recovery — existing
 - CF Worker proxy for IP rotation — existing
 - Common Crawl index querying — existing
-- Contact enrichment for existing decision makers (CC harvest, email pattern guessing, SMTP/O365 verification) — in progress
+- Contact enrichment for existing decision makers (CC harvest, email pattern guessing, SMTP/O365 verification) — complete (649/649 emails, 480/649 phones on Big4 run)
 
-### Active
+### Active — v2: Batch-First Owner Discovery
 
-- [ ] Complete the Owner/Decision Makers DAG end-to-end
-- [ ] Improve data quality (reduce bad emails, wrong owners, stale data)
-- [ ] Improve coverage (find more leads, fill in missing info)
-- [ ] Reduce manual orchestration (pipeline stages should chain automatically)
-- [ ] Harden rate limit handling and anti-blocking resilience
-- [ ] Better leverage Common Crawl for hotel URL discovery and HTML extraction
-- [ ] LLM-at-scale extraction: scrape CC → get HTML → extract structured data with small models
-- [ ] Vendor/booking-engine detection improvement (scrape booking engine pages directly)
-- [ ] Multiple data entry points converging to same enriched record (CC, Google Maps, gov data, direct URLs)
+- [ ] Rearchitect owner discovery from per-hotel waterfall to batch-first CC-driven pipeline
+- [ ] CC bulk sweep: query index for all hotel domains, pull WARC HTML, extract owner names/roles with LLM
+- [ ] Live crawl gap-fill: direct httpx crawling via CF Worker for domains CC missed (~20%)
+- [ ] Batch RDAP/WHOIS/DNS across all domains simultaneously (not per-hotel sequential)
+- [ ] Make Serper obsolete for ~80% of owner discovery (CC + direct crawl replaces paid API)
+- [ ] Email pattern guessing + batch verification for discovered owners
+- [ ] Apply contact enrichment patterns: CF Worker batch endpoint, concurrent processing, Nova Micro extraction
+
+### Deferred (v3+)
+
+- [ ] DAG orchestration chaining owner discovery → contact enrichment → normalization/dedup
+- [ ] Government data expansion (Texas, New York beyond Florida DBPR)
+- [ ] Pipeline resilience (circuit breakers, DLQ, layers_failed bitmask)
+- [ ] Multi-source convergence (CC + Google Maps + gov records → single canonical record)
+- [ ] Vendor/booking-engine detection improvement
 
 ### Out of Scope
 
@@ -72,8 +78,10 @@ Sadie's sales team needs to know WHO owns/manages each hotel, HOW to reach them,
 |----------|-----------|---------|
 | Hotels-first vertical strategy | Sadie is live in hospitality, perfect the pipeline before generalizing | Active |
 | Free data sources preferred | RDAP, DNS, CC, gov records over paid APIs (budget) | Active |
-| LLM extraction over rule-based | Small models (GPT-3.5/Groq) scale better than hand-written parsers | Active |
+| LLM extraction over rule-based | Small models (Nova Micro/GPT-3.5) scale better than hand-written parsers | Active |
 | Batch over real-time | 100K+ records, batch processing is simpler and cheaper | Active |
+| Batch-first over per-hotel waterfall | Contact enrichment proved batch CC sweep + concurrent processing is faster and cheaper than per-hotel sequential | Active |
+| CC as primary data source for owner discovery | CC has ~80% of hotel pages cached; free vs Serper per-query costs | Active |
 | No ORM (aiosql + raw SQL) | Performance at scale, full SQL control, unnest() batch patterns | Locked |
 | CF Worker proxy over paid proxy | $5/mo for 10M requests vs expensive residential proxy | Active |
 
@@ -90,5 +98,11 @@ Workflows (CLI) → Services (business logic) → Repositories (DB) → PostgreS
 
 **59 workflows, 5 service layers, 11 data integrations.**
 
+## Current Milestone: v2 — Batch-First Owner Discovery
+
+**Goal:** Rearchitect owner discovery to use the batch-first CC-driven approach proven in contact enrichment — CC bulk sweep across all hotel domains, LLM extraction with Nova Micro, live crawl gap-fill, making Serper obsolete for ~80% of discovery.
+
+**Key insight:** The contact enrichment pipeline proved that batch processing (CC sweep → concurrent crawling → batch LLM extraction) dramatically outperforms per-hotel sequential waterfall. Owner discovery should work the same way.
+
 ---
-*Last updated: 2026-02-20 after initialization*
+*Last updated: 2026-02-21 after v2 milestone start*
