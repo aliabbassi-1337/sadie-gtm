@@ -1,123 +1,111 @@
 # Roadmap: Sadie GTM Owner Enrichment
 
-**Version:** v1
+**Version:** v2 -- Batch-First Owner Discovery
 **Created:** 2026-02-21
 **Depth:** Comprehensive
-**Phases:** 6
-**Coverage:** 13/13 v1 requirements mapped
+**Phases:** 6 (Phase 7-12, continuing from v1)
+**Coverage:** 13/13 v2 requirements mapped
 
 ---
 
 ## Overview
 
-Complete the Owner/Decision Maker pipeline end-to-end: finish contact enrichment (in-progress), expand government data sources early for maximum data coverage, harden resilience, add Common Crawl at scale, unify multi-source ingestion, then wire it all into a fully automated DAG that processes 100K+ hotels without manual orchestration. Data IN before polishing -- every phase adds either new data or the plumbing to handle it reliably.
+Rebuild owner discovery from per-hotel sequential waterfall to batch-first CC-driven pipeline. CC bulk sweep discovers owner names for ~80% of hotel domains (free, cached HTML). Live crawling fills the ~20% gap. Batch RDAP/WHOIS/DNS adds structured domain intelligence. Email verification turns discovered names into actionable contacts. Waterfall orchestration ties the stages into a single pipeline invocation.
 
 ---
 
-## Phase 1: Contact Enrichment Pipeline
+## Phase 7: CC Hotel Domain Sweep
 
-**Goal:** Existing decision makers missing email/phone get enriched automatically through CC harvest, email pattern guessing, and SMTP/O365 verification.
+**Goal:** Owner names, titles, and roles are extracted from Common Crawl cached HTML for the majority of hotel domains, with results incrementally persisted and accessible via CLI.
 
-**Dependencies:** None (in-progress on feat/generic-enrich-contacts branch)
+**Dependencies:** None (builds on existing CC infrastructure from contact enrichment)
 
-**Requirements:** OWNER-02
+**Requirements:** CC-01, CC-02, CC-03, PIPE-03
 
 **Success Criteria:**
-1. Running `enrich_contacts` on a batch of DMs with missing emails produces verified email addresses via pattern guessing + SMTP/O365 check
-2. CC HTML harvest finds contact pages for hotel domains and extracts email/phone from them
-3. Pipeline runs end-to-end without manual intervention between harvest, pattern guessing, and verification stages
-4. Enrichment results persist to `hotel_decision_makers` with source attribution (which method found each contact)
-
-**Research Flags:** None -- implementation is in-progress.
+1. Running `discover_owners --source cc --limit 100 --apply` queries CC indexes for hotel domains, fetches WARC HTML for matches, extracts owner/manager names via Nova Micro, and persists results to `hotel_decision_makers`
+2. Results flush to the database every N hotels (not all-or-nothing) -- a crash at hotel 900 of 1000 preserves the first 900
+3. CC index queries target /about, /team, /contact, /management, /staff pages across multiple CC indexes in parallel via CF Worker /batch
+4. LLM extraction produces structured output: person name, title/role, organizational relationship (owner vs. GM vs. management company)
+5. CLI supports --dry-run (shows what would be processed), --audit (shows coverage stats), --source (selects data source), --limit (caps batch size)
 
 ---
 
-## Phase 2: Government Data Expansion
+## Phase 8: CC Third-Party Sources
 
-**Goal:** State government hotel/lodging records from at least 2 new states provide verified ownership data that supplements and validates the enrichment waterfall.
+**Goal:** Owner/manager identity is discovered from review site responses and business directory listings cached in Common Crawl, supplementing direct hotel domain extraction.
 
-**Dependencies:** None (independent data source; can parallelize with Phase 1 and Phase 3)
+**Dependencies:** Phase 7 (CC infrastructure, persistence layer, CLI)
 
-**Requirements:** GOV-01, GOV-02, GOV-03
+**Requirements:** CC-04, CC-05
 
 **Success Criteria:**
-1. At least 2 additional state sources (Texas and/or New York recommended) are ingested alongside existing Florida DBPR data
-2. Government records are normalized to the existing hotel schema -- matching against known hotels by name, address, and PostGIS proximity
-3. Licensee/owner names from state records appear as decision maker candidates in `hotel_decision_makers` with `source='gov_[state]'`
-4. Government-sourced ownership data is cross-referenced with waterfall-discovered owners to increase confidence scores
-
-**Research Flags:** Each state has a unique data format and access method. Per-state research needed before implementation. Texas TDLR and New York DOS are the recommended targets.
+1. CC index queries find TripAdvisor and Google cached pages for hotel properties, and LLM extraction identifies owner/manager names from management responses to reviews
+2. CC index queries find BBB, Yelp, and local chamber of commerce pages listing hotel owner/operator information, with extracted names persisted as decision maker candidates
+3. Third-party source results merge with Phase 7 hotel-domain results -- same person discovered from both hotel website and TripAdvisor shows as one record with multiple source attributions, not a duplicate
 
 ---
 
-## Phase 3: Pipeline Resilience
+## Phase 9: Live Crawl Gap-Fill
 
-**Goal:** External service failures are detected, isolated, and recoverable -- the pipeline degrades gracefully instead of failing silently or wasting requests on down services.
+**Goal:** Hotel domains not found in Common Crawl (~20%) are live-crawled to extract the same owner/manager information, ensuring no hotel is skipped due to CC coverage gaps.
 
-**Dependencies:** None (applies to existing infrastructure; can parallelize with Phase 1 and Phase 2)
+**Dependencies:** Phase 7 (CC sweep identifies which domains have gaps)
 
-**Requirements:** RESIL-01, RESIL-02, RESIL-03
+**Requirements:** CRAWL-01, CRAWL-02
 
 **Success Criteria:**
-1. When an external service (RDAP, DNS, website scraping) returns errors for N consecutive requests, the circuit breaker trips and stops sending requests until a probe succeeds
-2. SQS messages that fail processing after 3 attempts land in a Dead Letter Queue where they can be inspected and replayed
-3. `hotel_owner_enrichment.layers_failed` bitmask tracks which enrichment layers failed (not just completed), and a selective retry command re-runs only failed layers for a hotel
-4. `workflows/enrich_owners.py status` shows per-layer health (success rate, failure rate, circuit breaker state)
-
-**Research Flags:** Circuit breaker thresholds (failure count, recovery probe interval) need tuning under real load.
+1. Running `discover_owners --source crawl` fetches /about, /team, /management, /staff pages via CF Worker proxy for all hotel domains that had zero CC hits, with the same LLM extraction and persistence as Phase 7
+2. JS-heavy hotel sites that return empty/minimal content via httpx are automatically retried with crawl4ai headless browser, producing rendered HTML for LLM extraction
+3. After CC sweep (Phase 7) + live crawl gap-fill, at least 90% of hotel domains with active websites have been processed for owner discovery
 
 ---
 
-## Phase 4: Common Crawl Pipeline
+## Phase 10: Batch Structured Data
 
-**Goal:** Common Crawl becomes a production data source that discovers new hotel URLs at scale and extracts structured owner/contact data from cached HTML -- all without hitting live websites.
+**Goal:** Domain registration and DNS records for all hotel domains are queried in batch, providing WHOIS registrant names, DNS infrastructure patterns, and email routing intelligence that supplement web-based owner discovery.
 
-**Dependencies:** Phase 3 (resilience patterns protect CC processing at scale)
+**Dependencies:** None (can run in parallel with Phases 8 and 9)
 
-**Requirements:** CC-01, CC-02, CC-03
+**Requirements:** DATA-01, DATA-02, DATA-03
 
 **Success Criteria:**
-1. CC index queries return hotel URLs for a target geographic region, with results cached locally to avoid redundant index hits
-2. WARC HTML extraction pipeline pulls cached page content from CC for discovered URLs and runs LLM-based structured extraction (owner names, emails, phone numbers, about-page content)
-3. CC-discovered hotels that do not exist in the database are ingested as new hotel records (discovery use case)
-4. CC-extracted contact pages for existing hotels feed into the enrichment pipeline as an additional data source (enrichment use case)
-
-**Research Flags:** CC data staleness (crawl dates vary) -- need confidence weighting by crawl recency. AWS Nova Micro extraction quality on CC HTML needs validation.
+1. Batch RDAP queries across all hotel domains complete in a single pipeline run (not one-at-a-time), with registrant names cached in `domain_whois_cache` and surfaced as decision maker candidates when they differ from known management companies
+2. Batch DNS queries (MX, SOA, SPF, DMARC) across all hotel domains complete in a single run, with results cached in `domain_dns_cache` -- MX records inform email verification strategy (Google Workspace vs. O365 vs. self-hosted vs. catch-all)
+3. WHOIS queries use live query with Wayback Machine fallback for pre-GDPR historical data, extracting registrant/admin contact names that may predate WHOIS privacy adoption
+4. All structured data results integrate with the CLI (--source rdap, --source dns, --source whois) and use the same incremental persistence pattern from Phase 7
 
 ---
 
-## Phase 5: Multi-Source Convergence
+## Phase 11: Email Discovery and Verification
 
-**Goal:** Hotels discovered or enriched from any source (Google Maps, Common Crawl, government records, direct URLs, CSV import) converge to a single canonical hotel record with merged enrichment data.
+**Goal:** Every discovered owner/manager name is paired with a verified email address through pattern guessing, MX-aware verification, and O365/SMTP probing.
 
-**Dependencies:** Phase 2 (government data as data source), Phase 4 (CC as data source)
+**Dependencies:** Phases 7-10 (owner names must be discovered before email can be guessed)
 
-**Requirements:** OWNER-03
+**Requirements:** PIPE-02
 
 **Success Criteria:**
-1. A hotel discovered via CC that already exists from Google Maps is matched and merged (not duplicated) using domain, name+city, or PostGIS proximity matching
-2. A hotel with government ownership data and waterfall-discovered contacts shows both sources on the same record with independent confidence scores
-3. Running the convergence process on the full database produces zero net-new duplicates (verified by a dedup audit query)
-
-**Research Flags:** Entity resolution matching thresholds need empirical tuning. Research recommends SQL-based matching for hotel records and Splink for fuzzy DM dedup.
+1. For each discovered owner name + hotel domain, email pattern candidates are generated (first.last@, f.last@, first@, etc.) and verified against the domain's MX infrastructure
+2. Batch MX detection determines verification strategy per domain: O365 autodiscover for Microsoft-hosted, SMTP RCPT TO for self-hosted, skip for catch-all domains
+3. Verified emails persist to `hotel_decision_makers` with source attribution showing which discovery method found the name and which verification method confirmed the email
+4. Email discovery runs as `discover_owners --source email` and processes all decision makers with names but no verified email
 
 ---
 
-## Phase 6: Automated DAG
+## Phase 12: Waterfall Orchestration
 
-**Goal:** The entire pipeline -- from hotel discovery through owner enrichment through contact verification -- runs as a fully automated DAG where completing one stage triggers the next, processing 100K+ hotels without manual stage-kicking.
+**Goal:** A single command runs the entire batch-first owner discovery pipeline end-to-end: CC sweep, third-party CC, live crawl gap-fill, structured data, email verification -- each stage processing all hotels before the next begins.
 
-**Dependencies:** Phase 1 (contact enrichment), Phase 3 (resilience), Phase 5 (multi-source convergence)
+**Dependencies:** Phases 7-11 (all individual stages must work independently before orchestration)
 
-**Requirements:** OWNER-01, OWNER-04
+**Requirements:** PIPE-01
 
 **Success Criteria:**
-1. A single CLI command (or SQS message) kicks off the full pipeline: hotel discovery -> owner enrichment waterfall -> contact enrichment -> verification, with each stage auto-triggering the next
-2. 100K+ hotels process through the DAG without manual intervention between stages (no "run step A, wait, run step B")
-3. Pipeline progress is observable: a status command shows how many hotels are at each stage, throughput rates, and estimated completion time
-4. Partial failures in one stage do not block the pipeline -- failed hotels are captured (DLQ/failed bitmask) while successful ones flow to the next stage
-
-**Research Flags:** Whether SQS chaining + health checks are sufficient or Prefect adoption is warranted should be evaluated after Phase 3 resilience patterns are in place. Research synthesis recommends deferring Prefect.
+1. Running `discover_owners --source all --apply` executes the full waterfall: CC hotel domains first (cheapest, highest coverage), then CC third-party sources, then live crawl for gaps, then RDAP/WHOIS/DNS, then email verification -- each stage completes for ALL hotels before the next stage starts
+2. Progress is observable: each stage reports hotels processed, owners found, and coverage delta (how many new owners this stage added beyond previous stages)
+3. The pipeline can be resumed from any stage -- if CC sweep completed but crawl failed, re-running skips CC and starts from crawl
+4. Running `discover_owners --audit` after a full pipeline run shows end-to-end coverage: total hotels, hotels with at least one owner name, hotels with verified email, coverage by source (CC vs. crawl vs. RDAP vs. WHOIS)
 
 ---
 
@@ -125,25 +113,26 @@ Complete the Owner/Decision Maker pipeline end-to-end: finish contact enrichment
 
 | Phase | Name | Requirements | Status |
 |-------|------|-------------|--------|
-| 1 | Contact Enrichment Pipeline | OWNER-02 | Not Started |
-| 2 | Government Data Expansion | GOV-01, GOV-02, GOV-03 | Not Started |
-| 3 | Pipeline Resilience | RESIL-01, RESIL-02, RESIL-03 | Not Started |
-| 4 | Common Crawl Pipeline | CC-01, CC-02, CC-03 | Not Started |
-| 5 | Multi-Source Convergence | OWNER-03 | Not Started |
-| 6 | Automated DAG | OWNER-01, OWNER-04 | Not Started |
+| 7 | CC Hotel Domain Sweep | CC-01, CC-02, CC-03, PIPE-03 | Not Started |
+| 8 | CC Third-Party Sources | CC-04, CC-05 | Not Started |
+| 9 | Live Crawl Gap-Fill | CRAWL-01, CRAWL-02 | Not Started |
+| 10 | Batch Structured Data | DATA-01, DATA-02, DATA-03 | Not Started |
+| 11 | Email Discovery and Verification | PIPE-02 | Not Started |
+| 12 | Waterfall Orchestration | PIPE-01 | Not Started |
 
 ---
 
 ## Dependency Graph
 
 ```
-Phase 1 (Contact Enrichment) -----------------------> Phase 6 (Automated DAG)
-Phase 2 (Government Data) -----> Phase 5 (Convergence) ---> Phase 6
-Phase 3 (Pipeline Resilience) -> Phase 4 (Common Crawl) -> Phase 5
-                            \---------------------------> Phase 6
+Phase 7 (CC Hotel Sweep) ----> Phase 8 (CC Third-Party)
+                          \---> Phase 9 (Live Crawl Gap-Fill)
+                          \------------------------------------> Phase 11 (Email Discovery)
+Phase 10 (Batch Structured Data) -----------------------------> Phase 11
+Phase 8 + Phase 9 + Phase 10 + Phase 11 ---------------------> Phase 12 (Waterfall Orchestration)
 ```
 
-**Parallelization:** Phases 1, 2, and 3 can all run in parallel (no dependencies between them). Phase 4 starts after Phase 3. Phase 5 starts after Phase 2 and Phase 4. Phase 6 starts after Phase 1, Phase 3, and Phase 5.
+**Parallelization:** Phase 10 (Batch Structured Data) can run in parallel with Phases 8 and 9. Phase 7 must complete before 8, 9, or 11 can start. Phase 11 needs at least Phases 7+10 complete (owner names + MX data). Phase 12 needs all prior phases working independently before wiring them together.
 
 ---
 
@@ -151,18 +140,18 @@ Phase 3 (Pipeline Resilience) -> Phase 4 (Common Crawl) -> Phase 5
 
 | Requirement | Phase | Verified |
 |-------------|-------|----------|
-| OWNER-01 | Phase 6 | Yes |
-| OWNER-02 | Phase 1 | Yes |
-| OWNER-03 | Phase 5 | Yes |
-| OWNER-04 | Phase 6 | Yes |
-| CC-01 | Phase 4 | Yes |
-| CC-02 | Phase 4 | Yes |
-| CC-03 | Phase 4 | Yes |
-| GOV-01 | Phase 2 | Yes |
-| GOV-02 | Phase 2 | Yes |
-| GOV-03 | Phase 2 | Yes |
-| RESIL-01 | Phase 3 | Yes |
-| RESIL-02 | Phase 3 | Yes |
-| RESIL-03 | Phase 3 | Yes |
+| CC-01 | Phase 7 | Yes |
+| CC-02 | Phase 7 | Yes |
+| CC-03 | Phase 7 | Yes |
+| CC-04 | Phase 8 | Yes |
+| CC-05 | Phase 8 | Yes |
+| CRAWL-01 | Phase 9 | Yes |
+| CRAWL-02 | Phase 9 | Yes |
+| DATA-01 | Phase 10 | Yes |
+| DATA-02 | Phase 10 | Yes |
+| DATA-03 | Phase 10 | Yes |
+| PIPE-01 | Phase 12 | Yes |
+| PIPE-02 | Phase 11 | Yes |
+| PIPE-03 | Phase 7 | Yes |
 
-**Mapped: 13/13** -- all v1 requirements covered, no orphans, no duplicates.
+**Mapped: 13/13** -- all v2 requirements covered, no orphans, no duplicates.

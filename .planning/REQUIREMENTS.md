@@ -1,6 +1,6 @@
 # Requirements: Sadie GTM Owner Enrichment
 
-**Version:** v2 — Batch-First Owner Discovery
+**Version:** v2 -- Batch-First Owner Discovery
 **Last updated:** 2026-02-21
 **Total v2 requirements:** 13
 
@@ -29,16 +29,16 @@
 
 ### Pipeline Architecture
 
-- [ ] **PIPE-01**: Batch-level waterfall orchestration — CC sweep first (cheapest, highest coverage), then live crawl gap-fill, then RDAP/WHOIS/DNS, then email verification — each stage processes ALL hotels before the next stage begins
+- [ ] **PIPE-01**: Batch-level waterfall orchestration -- CC sweep first (cheapest, highest coverage), then live crawl gap-fill, then RDAP/WHOIS/DNS, then email verification -- each stage processes ALL hotels before the next stage begins
 - [ ] **PIPE-02**: Email pattern guessing + batch MX detection + O365 autodiscover + SMTP verification for all discovered owner names, with source attribution persisted to hotel_decision_makers
-- [ ] **PIPE-03**: Incremental persistence — flush enrichment results to database every N hotels (not all-or-nothing), with CLI entrypoint matching enrich_contacts pattern (--source, --limit, --apply, --audit, --dry-run)
+- [ ] **PIPE-03**: Incremental persistence -- flush enrichment results to database every N hotels (not all-or-nothing), with CLI entrypoint matching enrich_contacts pattern (--source, --limit, --apply, --audit, --dry-run)
 
 ---
 
 ## Deferred (v3+)
 
 ### DAG Orchestration
-- Automated chaining: owner discovery → contact enrichment → normalization/dedup
+- Automated chaining: owner discovery -> contact enrichment -> normalization/dedup
 - SQS-based stage triggering without manual orchestration
 
 ### Government Data Expansion
@@ -63,13 +63,13 @@
 
 ## Out of Scope
 
-- Non-hospitality verticals — hotels first
-- Agentic outbound — focus on data pipeline
-- User-facing UI — CLI + SQL sufficient
-- Real-time processing — batch is appropriate
-- LinkedIn scraping — ToS risk
-- Paid bulk data (ZoomInfo, Apollo) — budget, poor hospitality coverage
-- Workflow orchestrator (Prefect/Dagster) — defer until scheduling needs arise
+- Non-hospitality verticals -- hotels first
+- Agentic outbound -- focus on data pipeline
+- User-facing UI -- CLI + SQL sufficient
+- Real-time processing -- batch is appropriate
+- LinkedIn scraping -- ToS risk
+- Paid bulk data (ZoomInfo, Apollo) -- budget, poor hospitality coverage
+- Workflow orchestrator (Prefect/Dagster) -- defer until scheduling needs arise
 
 ---
 
@@ -77,16 +77,16 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| CC-01 | TBD | Pending |
-| CC-02 | TBD | Pending |
-| CC-03 | TBD | Pending |
-| CC-04 | TBD | Pending |
-| CC-05 | TBD | Pending |
-| CRAWL-01 | TBD | Pending |
-| CRAWL-02 | TBD | Pending |
-| DATA-01 | TBD | Pending |
-| DATA-02 | TBD | Pending |
-| DATA-03 | TBD | Pending |
-| PIPE-01 | TBD | Pending |
-| PIPE-02 | TBD | Pending |
-| PIPE-03 | TBD | Pending |
+| CC-01 | Phase 7 | Pending |
+| CC-02 | Phase 7 | Pending |
+| CC-03 | Phase 7 | Pending |
+| CC-04 | Phase 8 | Pending |
+| CC-05 | Phase 8 | Pending |
+| CRAWL-01 | Phase 9 | Pending |
+| CRAWL-02 | Phase 9 | Pending |
+| DATA-01 | Phase 10 | Pending |
+| DATA-02 | Phase 10 | Pending |
+| DATA-03 | Phase 10 | Pending |
+| PIPE-01 | Phase 12 | Pending |
+| PIPE-02 | Phase 11 | Pending |
+| PIPE-03 | Phase 7 | Pending |

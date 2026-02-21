@@ -8,7 +8,7 @@
 
 **Core value:** Turn raw hotel data into actionable sales leads with verified owner/decision-maker contact info at 100K+ scale.
 
-**Current focus:** Rearchitect owner discovery to batch-first CC-driven approach.
+**Current focus:** Build batch-first CC-driven owner discovery pipeline, starting with CC Hotel Domain Sweep.
 
 **Active branch:** feat/generic-enrich-contacts
 
@@ -17,9 +17,13 @@
 ## Current Position
 
 **Milestone:** v2 -- Batch-First Owner Discovery
-**Phase:** Defining requirements
+**Phase:** 7 -- CC Hotel Domain Sweep
 **Plan:** Not yet planned
-**Status:** Initializing
+**Status:** Roadmap complete, awaiting phase planning
+
+```
+[..........] 0% (0/6 phases)
+```
 
 ---
 
@@ -29,8 +33,8 @@
 |--------|-------|
 | Plans completed | 0 |
 | Plans total | TBD (not yet planned) |
-| Phases completed | 0 / TBD |
-| Requirements completed | 0 / TBD |
+| Phases completed | 0 / 6 |
+| Requirements completed | 0 / 13 |
 
 ---
 
@@ -47,6 +51,8 @@
 | AWS Nova Micro for LLM extraction | Proven in contact enrichment; cheap, fast, good at structured extraction | 2026-02-21 |
 | Defer Prefect adoption | DIY SQS chaining sufficient; revisit when scheduling needs arise | 2026-02-21 |
 | DAG orchestration deferred to v3 | Build the improved owner discovery first, then wire it into automated DAG | 2026-02-21 |
+| PIPE-03 bundled with Phase 7 | Incremental persistence and CLI entrypoint are foundational -- CC sweep needs them to be useful | 2026-02-21 |
+| Phase 10 parallelizable | Batch RDAP/DNS/WHOIS has no dependency on CC results; can run alongside Phases 8-9 | 2026-02-21 |
 
 ### Technical Notes
 
@@ -55,6 +61,7 @@
 - Current owner discovery is per-hotel 9-layer waterfall (slow at scale)
 - CF Worker proxy operational ($5/mo for 10M requests)
 - CC Index querying works across 3 indexes in parallel
+- enrich_contacts.py CLI pattern (--source, --limit, --apply, --audit, --dry-run) is the template for discover_owners CLI
 
 ### Blockers
 
@@ -64,13 +71,14 @@ None currently.
 
 ## Session Continuity
 
-**What just happened:** Started v2 milestone — Batch-First Owner Discovery. Archived v1 (partially complete, contact enrichment done). Skipped research (domain well-understood from v1 research + contact enrichment experience).
+**What just happened:** Created v2 roadmap with 6 phases (7-12). CC Hotel Domain Sweep is Phase 7 with CC-01, CC-02, CC-03, PIPE-03 bundled together. All 13 requirements mapped.
 
-**What happens next:** Define v2 requirements, then create roadmap.
+**What happens next:** Plan Phase 7 (CC Hotel Domain Sweep) -- decompose into executable plans covering CC index query, WARC fetch, LLM extraction, incremental persistence, and CLI entrypoint.
 
 **Key files:**
-- `.planning/PROJECT.md` -- updated with v2 milestone
+- `.planning/ROADMAP.md` -- v2 roadmap with 6 phases (7-12)
+- `.planning/REQUIREMENTS.md` -- traceability updated with phase assignments
+- `.planning/STATE.md` -- this file, current position at Phase 7
+- `.planning/PROJECT.md` -- project context
 - `.planning/MILESTONES.md` -- v1 archived
-- `.planning/REQUIREMENTS.md` -- to be created for v2
-- `.planning/ROADMAP.md` -- to be created for v2
 - `.planning/config.json` -- depth=comprehensive, mode=yolo, parallelization=enabled
