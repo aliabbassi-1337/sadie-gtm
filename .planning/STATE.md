@@ -1,6 +1,6 @@
 # State: Sadie GTM Owner Enrichment
 
-**Last updated:** 2026-02-21
+**Last updated:** 2026-02-21 14:05 UTC
 
 ---
 
@@ -18,11 +18,12 @@
 
 **Milestone:** v2 -- Batch-First Owner Discovery
 **Phase:** 7 -- CC Hotel Domain Sweep
-**Plan:** Not yet planned
-**Status:** Roadmap complete, awaiting phase planning
+**Plan:** 07-01 complete (CC Harvest Infrastructure)
+**Status:** In progress
+**Last activity:** 2026-02-21 -- Completed 07-01-PLAN.md (CC harvest infrastructure)
 
 ```
-[..........] 0% (0/6 phases)
+[#.........] 10% (1/? plans in Phase 7)
 ```
 
 ---
@@ -31,8 +32,8 @@
 
 | Metric | Value |
 |--------|-------|
-| Plans completed | 0 |
-| Plans total | TBD (not yet planned) |
+| Plans completed | 1 |
+| Plans total | TBD (Phase 7 in progress) |
 | Phases completed | 0 / 6 |
 | Requirements completed | 0 / 13 |
 
@@ -53,6 +54,8 @@
 | DAG orchestration deferred to v3 | Build the improved owner discovery first, then wire it into automated DAG | 2026-02-21 |
 | PIPE-03 bundled with Phase 7 | Incremental persistence and CLI entrypoint are foundational -- CC sweep needs them to be useful | 2026-02-21 |
 | Phase 10 parallelizable | Batch RDAP/DNS/WHOIS has no dependency on CC results; can run alongside Phases 8-9 | 2026-02-21 |
+| OWNER_PATHS is a 26-keyword superset of CONTACT_PATHS | Owner discovery needs about/team/management plus hotel-specific paths (our-hotel, proprietor) | 2026-02-21 |
+| Homepage returns True from _is_owner_url | Many small hotel homepages contain owner info directly on the main page | 2026-02-21 |
 
 ### Technical Notes
 
@@ -71,14 +74,19 @@ None currently.
 
 ## Session Continuity
 
-**What just happened:** Created v2 roadmap with 6 phases (7-12). CC Hotel Domain Sweep is Phase 7 with CC-01, CC-02, CC-03, PIPE-03 bundled together. All 13 requirements mapped.
+**Last session:** 2026-02-21 14:05 UTC
+**Stopped at:** Completed 07-01-PLAN.md
+**Resume file:** None
 
-**What happens next:** Plan Phase 7 (CC Hotel Domain Sweep) -- decompose into executable plans covering CC index query, WARC fetch, LLM extraction, incremental persistence, and CLI entrypoint.
+**What just happened:** Completed Plan 07-01 (CC Harvest Infrastructure). Created `workflows/discover_owners.py` with all CC harvest infrastructure: environment setup, constants (OWNER_PATHS, SKIP_DOMAINS, CC_INDEXES), utility functions (_proxy_batch, _is_owner_url), and the core `cc_harvest_owner_pages()` function that batch-queries CC Indexes and fetches/decompresses WARC records.
+
+**What happens next:** Execute Plan 07-02 (LLM extraction from CC pages) and Plan 07-03 (incremental persistence + CLI entrypoint).
 
 **Key files:**
+- `workflows/discover_owners.py` -- NEW: CC harvest infrastructure (395 lines)
+- `.planning/phases/07-cc-hotel-domain-sweep/07-01-SUMMARY.md` -- Plan 01 summary
 - `.planning/ROADMAP.md` -- v2 roadmap with 6 phases (7-12)
 - `.planning/REQUIREMENTS.md` -- traceability updated with phase assignments
-- `.planning/STATE.md` -- this file, current position at Phase 7
+- `.planning/STATE.md` -- this file
 - `.planning/PROJECT.md` -- project context
-- `.planning/MILESTONES.md` -- v1 archived
 - `.planning/config.json` -- depth=comprehensive, mode=yolo, parallelization=enabled
