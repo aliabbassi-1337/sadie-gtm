@@ -1,6 +1,6 @@
 # State: Sadie GTM Owner Enrichment
 
-**Last updated:** 2026-02-21 14:10 UTC
+**Last updated:** 2026-02-21 14:14 UTC
 
 ---
 
@@ -18,12 +18,12 @@
 
 **Milestone:** v2 -- Batch-First Owner Discovery
 **Phase:** 7 -- CC Hotel Domain Sweep
-**Plan:** 07-02 complete (LLM Extraction + Pipeline Orchestration)
+**Plan:** 07-03 complete (CLI Entrypoint + Audit)
 **Status:** In progress
-**Last activity:** 2026-02-21 -- Completed 07-02-PLAN.md (extraction + pipeline)
+**Last activity:** 2026-02-21 -- Completed 07-03-PLAN.md (CLI + audit)
 
 ```
-[##........] 20% (2/? plans in Phase 7)
+[###.......] 30% (3/? plans in Phase 7)
 ```
 
 ---
@@ -32,7 +32,7 @@
 
 | Metric | Value |
 |--------|-------|
-| Plans completed | 2 |
+| Plans completed | 3 |
 | Plans total | TBD (Phase 7 in progress) |
 | Phases completed | 0 / 6 |
 | Requirements completed | 0 / 13 |
@@ -59,6 +59,8 @@
 | Three-tier extraction: JSON-LD (0.9) -> regex (0.7) -> LLM (0.65) | Structured data is free and highest confidence; LLM only when needed for cost savings | 2026-02-21 |
 | Bedrock Semaphore(30) for Nova Micro | Bedrock throttles above ~30 concurrent requests; prevents 429 storms | 2026-02-21 |
 | Incremental flush every 20 hotels | Crash at hotel 900 preserves first 880; uses existing batch_persist_results() | 2026-02-21 |
+| Default mode runs pipeline without DB writes | Safe default prevents accidental DB mutations; --apply required to persist | 2026-02-21 |
+| --dry-run skips all network I/O | Distinct from default mode: shows counts only, no CC fetching | 2026-02-21 |
 
 ### Technical Notes
 
@@ -68,8 +70,9 @@
 - CF Worker proxy operational ($5/mo for 10M requests)
 - CC Index querying works across 3 indexes in parallel
 - enrich_contacts.py CLI pattern (--source, --limit, --apply, --audit, --dry-run) is the template for discover_owners CLI
-- discover_owners.py now has full pipeline: harvest -> extract -> persist (793 lines)
+- discover_owners.py is now complete with CLI: harvest -> extract -> persist -> audit (945 lines)
 - Three-tier extraction verified: JSON-LD, regex, LLM with correct confidence scores and source tags
+- CLI verified: --help, --dry-run (307 hotels, 174 domains), --audit (1046 DMs, 835 with email)
 
 ### Blockers
 
@@ -79,16 +82,17 @@ None currently.
 
 ## Session Continuity
 
-**Last session:** 2026-02-21 14:10 UTC
-**Stopped at:** Completed 07-02-PLAN.md
+**Last session:** 2026-02-21 14:14 UTC
+**Stopped at:** Completed 07-03-PLAN.md
 **Resume file:** None
 
-**What just happened:** Completed Plan 07-02 (LLM Extraction + Pipeline Orchestration). Added three-tier owner extraction (JSON-LD -> regex -> LLM via Bedrock Nova Micro) and the main `discover_owners_cc()` pipeline function with incremental persistence every 20 hotels via `repo.batch_persist_results()`. The file is now 793 lines and the pipeline is functionally complete -- just needs a CLI entrypoint.
+**What just happened:** Completed Plan 07-03 (CLI Entrypoint + Audit). Added `audit()` function with full coverage stats and `main()` CLI entrypoint with argparse matching enrich_contacts.py pattern. File grew from 793 to 945 lines. All verification passed: --help, --dry-run (307 hotels, 174 domains, 522 queries), --audit (1046 DMs, 835 with email, 10 source types).
 
-**What happens next:** Execute Plan 07-03 (CLI entrypoint with argparse + audit mode).
+**What happens next:** The CC owner discovery pipeline is now complete and user-callable. Ready for Plan 07-04 (if any) or Phase 8. Next step is likely running the pipeline on Big4 with --apply to discover new owners.
 
 **Key files:**
-- `workflows/discover_owners.py` -- CC harvest + extraction + pipeline (793 lines)
+- `workflows/discover_owners.py` -- Complete CC owner discovery CLI (945 lines)
+- `.planning/phases/07-cc-hotel-domain-sweep/07-03-SUMMARY.md` -- Plan 03 summary
 - `.planning/phases/07-cc-hotel-domain-sweep/07-02-SUMMARY.md` -- Plan 02 summary
 - `.planning/phases/07-cc-hotel-domain-sweep/07-01-SUMMARY.md` -- Plan 01 summary
 - `.planning/ROADMAP.md` -- v2 roadmap with 6 phases (7-12)
