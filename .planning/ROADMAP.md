@@ -22,6 +22,13 @@ Rebuild owner discovery from per-hotel sequential waterfall to batch-first CC-dr
 
 **Requirements:** CC-01, CC-02, CC-03, PIPE-03
 
+**Plans:** 3 plans
+
+Plans:
+- [ ] 07-01-PLAN.md -- CC harvest infrastructure (index query, WARC fetch, URL filtering)
+- [ ] 07-02-PLAN.md -- Owner extraction (JSON-LD + regex + LLM) and incremental persistence
+- [ ] 07-03-PLAN.md -- CLI entrypoint, audit command, and end-to-end verification
+
 **Success Criteria:**
 1. Running `discover_owners --source cc --limit 100 --apply` queries CC indexes for hotel domains, fetches WARC HTML for matches, extracts owner/manager names via Nova Micro, and persists results to `hotel_decision_makers`
 2. Results flush to the database every N hotels (not all-or-nothing) -- a crash at hotel 900 of 1000 preserves the first 900
@@ -113,7 +120,7 @@ Rebuild owner discovery from per-hotel sequential waterfall to batch-first CC-dr
 
 | Phase | Name | Requirements | Status |
 |-------|------|-------------|--------|
-| 7 | CC Hotel Domain Sweep | CC-01, CC-02, CC-03, PIPE-03 | Not Started |
+| 7 | CC Hotel Domain Sweep | CC-01, CC-02, CC-03, PIPE-03 | In Progress |
 | 8 | CC Third-Party Sources | CC-04, CC-05 | Not Started |
 | 9 | Live Crawl Gap-Fill | CRAWL-01, CRAWL-02 | Not Started |
 | 10 | Batch Structured Data | DATA-01, DATA-02, DATA-03 | Not Started |
