@@ -393,3 +393,237 @@ async def cc_harvest_owner_pages(all_domains: set[str]) -> dict[str, str]:
                     f"{len(domains_hit)}/{len(all_domains)} domains")
 
     return fetched_pages
+
+
+# ── Extraction: JSON-LD, Regex, LLM ─────────────────────────────────────────
+
+# Decision maker title keywords (for JSON-LD and regex filtering)
+DECISION_MAKER_TITLES = [
+    "owner", "co-owner", "proprietor", "founder", "co-founder",
+    "general manager", "hotel manager", "managing director",
+    "director of operations", "chief executive", "ceo",
+    "president", "vice president", "innkeeper",
+    "director", "principal",
+]
+
+# Regex patterns for extracting name + title combinations from text
+# Matches patterns like: "John Smith, General Manager" or "General Manager: John Smith"
+NAME_TITLE_PATTERNS = [
+    # "Name, Title" or "Name - Title"
+    r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*[,\-\u2013\u2014]\s*(" + "|".join(DECISION_MAKER_TITLES) + r")",
+    # "Title: Name" or "Title - Name"
+    r"(" + "|".join(DECISION_MAKER_TITLES) + r")\s*[:\-\u2013\u2014]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
+]
+
+
+def extract_json_ld_persons(html: str) -> list[DecisionMaker]:
+    """Extract Person entities from JSON-LD structured data in HTML.
+
+    Adapted from lib/owner_discovery/website_scraper.py.
+    Source tag: cc_website_jsonld (confidence 0.9).
+    """
+    results = []
+    for match in re.finditer(r'<script\s+type="application/ld\+json">(.*?)</script>', html, re.DOTALL):
+        try:
+            data = json.loads(match.group(1))
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                _extract_persons_from_jsonld(item, results)
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return results
+
+
+def _extract_persons_from_jsonld(data: dict, results: list[DecisionMaker]):
+    """Recursively extract Person types from JSON-LD data."""
+    if not isinstance(data, dict):
+        return
+
+    schema_type = data.get("@type", "")
+    types = schema_type if isinstance(schema_type, list) else [schema_type]
+
+    if "Person" in types:
+        name = data.get("name")
+        title = data.get("jobTitle")
+        email = data.get("email")
+        phone = data.get("telephone")
+
+        if name and title:
+            title_lower = title.lower()
+            if any(dt in title_lower for dt in DECISION_MAKER_TITLES):
+                results.append(DecisionMaker(
+                    full_name=name,
+                    title=title,
+                    email=email,
+                    phone=phone,
+                    sources=["cc_website_jsonld"],
+                    confidence=0.9,
+                ))
+
+    # Check nested entities (employees, members, etc.)
+    for key in ("employee", "employees", "member", "members", "founder", "author"):
+        nested = data.get(key)
+        if isinstance(nested, list):
+            for item in nested:
+                _extract_persons_from_jsonld(item, results)
+        elif isinstance(nested, dict):
+            _extract_persons_from_jsonld(nested, results)
+
+
+def extract_name_title_regex(text: str) -> list[DecisionMaker]:
+    """Extract name+title combinations using regex patterns.
+
+    Adapted from lib/owner_discovery/website_scraper.py.
+    Source tag: cc_website_regex (confidence 0.7).
+    """
+    results = []
+    for pattern in NAME_TITLE_PATTERNS:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            groups = match.groups()
+            if len(groups) == 2:
+                g0, g1 = groups
+                if any(t in g0.lower() for t in DECISION_MAKER_TITLES):
+                    title, name = g0, g1
+                else:
+                    name, title = g0, g1
+
+                name = name.strip()
+                title = title.strip().title()
+
+                # Validate name looks like a person name (2-4 words, capitalized)
+                name_parts = name.split()
+                if 2 <= len(name_parts) <= 4 and all(p[0].isupper() for p in name_parts if p):
+                    results.append(DecisionMaker(
+                        full_name=name,
+                        title=title,
+                        sources=["cc_website_regex"],
+                        confidence=0.7,
+                    ))
+    return results
+
+
+# ── LLM extraction via Bedrock Nova Micro ────────────────────────────────────
+
+_bedrock_client = None
+
+
+def _get_bedrock():
+    global _bedrock_client
+    if _bedrock_client is None:
+        import boto3
+        _bedrock_client = boto3.client('bedrock-runtime', region_name=AWS_REGION)
+    return _bedrock_client
+
+
+_llm_sem = asyncio.Semaphore(30)  # Bedrock throttles above ~30 concurrent
+
+
+async def llm_extract_owners(text: str, hotel_name: str) -> list[dict]:
+    """Use Nova Micro to extract owner/GM info from page text.
+
+    Returns list of dicts: [{"name": "First Last", "title": "Title", "role": "owner|general_manager|..."}]
+    """
+    prompt = f"""Extract all hotel owners, general managers, and key decision makers from this text.
+Hotel: {hotel_name}
+
+Text:
+{text}
+
+Rules:
+- Each person MUST have both first name AND surname (e.g. "John Smith", not just "John")
+- Do NOT return company names, trust names, or business entities as person names
+- For each person, identify their role: owner, general_manager, director, manager, or other
+- Only include people clearly associated with this hotel/property
+- Respond with ONLY a JSON array, no explanation
+
+JSON format: [{{"name":"First Last","title":"Their Title","role":"owner|general_manager|director|manager|other"}}]
+If no people found, respond with exactly: []"""
+
+    async with _llm_sem:
+        for attempt in range(3):
+            try:
+                bedrock = _get_bedrock()
+                resp = await asyncio.to_thread(
+                    bedrock.converse,
+                    modelId=BEDROCK_MODEL_ID,
+                    messages=[{"role": "user", "content": [{"text": prompt}]}],
+                    inferenceConfig={"maxTokens": 500, "temperature": 0.0},
+                )
+                content = resp["output"]["message"]["content"][0]["text"].strip()
+                # Parse JSON -- same cleanup as enrich_contacts.py
+                if content.startswith("```"):
+                    content = re.sub(r'^```\w*\n?', '', content)
+                    content = re.sub(r'\n?```$', '', content)
+                json_match = re.search(r'\[.*\]', content, re.DOTALL)
+                if json_match:
+                    content = json_match.group(0)
+                return json.loads(content)
+            except Exception as e:
+                err_str = str(e)
+                if attempt < 2 and ("throttl" in err_str.lower() or "429" in err_str or "Too Many" in err_str):
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(f"Bedrock throttled, retry in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                logger.warning(f"LLM extraction error: {e}")
+                return []
+    return []
+
+
+def llm_results_to_decision_makers(results: list[dict], source_url: str) -> list[DecisionMaker]:
+    """Convert LLM extraction results to DecisionMaker objects."""
+    dms = []
+    for r in results:
+        name = (r.get("name") or "").strip()
+        if not name or " " not in name:
+            continue  # Skip first-name-only
+        # Filter out entity names (companies, trusts, etc.)
+        if re.search(ENTITY_RE_STR, name, re.IGNORECASE):
+            continue
+        title = (r.get("title") or r.get("role") or "").strip()
+        if not title:
+            title = "Unknown Role"
+        dms.append(DecisionMaker(
+            full_name=name,
+            title=title.title(),
+            sources=["cc_website_llm"],
+            confidence=0.65,
+            raw_source_url=source_url,
+        ))
+    return dms
+
+
+async def extract_owners_from_page(html: str, url: str, hotel_name: str) -> list[DecisionMaker]:
+    """Extract owner/manager names from a single page using three-tier strategy.
+
+    1. JSON-LD structured data (free, 0.9 confidence)
+    2. Regex name+title patterns (free, 0.7 confidence)
+    3. LLM extraction (costs money, 0.65 confidence) -- only if 1+2 found nothing
+    """
+    # Tier 1: JSON-LD (structured data in HTML)
+    dms = extract_json_ld_persons(html)
+    if dms:
+        for dm in dms:
+            dm.raw_source_url = url
+        logger.debug(f"JSON-LD: {len(dms)} persons from {url}")
+        return dms
+
+    # Tier 2: Regex patterns on cleaned text
+    cleaned = _clean_text_for_llm(html)
+    dms = extract_name_title_regex(cleaned)
+    if dms:
+        for dm in dms:
+            dm.raw_source_url = url
+            dm.sources = ["cc_website_regex"]
+        logger.debug(f"Regex: {len(dms)} persons from {url}")
+        return dms
+
+    # Tier 3: LLM extraction (only if structured methods found nothing)
+    if len(cleaned) < 50:
+        return []  # Too little text for LLM
+    truncated = cleaned[:20000]  # Nova Micro context limit
+    results = await llm_extract_owners(truncated, hotel_name)
+    dms = llm_results_to_decision_makers(results, url)
+    if dms:
+        logger.debug(f"LLM: {len(dms)} persons from {url}")
+    return dms
