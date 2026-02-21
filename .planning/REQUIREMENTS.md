@@ -77,9 +77,9 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| CC-01 | Phase 7 | Pending |
-| CC-02 | Phase 7 | Pending |
-| CC-03 | Phase 7 | Pending |
+| CC-01 | Phase 7 | Complete |
+| CC-02 | Phase 7 | Complete |
+| CC-03 | Phase 7 | Complete |
 | CC-04 | Phase 8 | Pending |
 | CC-05 | Phase 8 | Pending |
 | CRAWL-01 | Phase 9 | Pending |
@@ -89,4 +89,4 @@
 | DATA-03 | Phase 10 | Pending |
 | PIPE-01 | Phase 12 | Pending |
 | PIPE-02 | Phase 11 | Pending |
-| PIPE-03 | Phase 7 | Pending |
+| PIPE-03 | Phase 7 | Complete |

@@ -120,7 +120,7 @@ Plans:
 
 | Phase | Name | Requirements | Status |
 |-------|------|-------------|--------|
-| 7 | CC Hotel Domain Sweep | CC-01, CC-02, CC-03, PIPE-03 | In Progress |
+| 7 | CC Hotel Domain Sweep | CC-01, CC-02, CC-03, PIPE-03 | Complete |
 | 8 | CC Third-Party Sources | CC-04, CC-05 | Not Started |
 | 9 | Live Crawl Gap-Fill | CRAWL-01, CRAWL-02 | Not Started |
 | 10 | Batch Structured Data | DATA-01, DATA-02, DATA-03 | Not Started |
