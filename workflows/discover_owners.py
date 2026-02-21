@@ -791,3 +791,155 @@ async def discover_owners_cc(args, cfg: dict) -> dict:
     )
 
     return stats
+
+
+# ── Audit ────────────────────────────────────────────────────────────────────
+
+async def audit(args, cfg: dict):
+    """Show coverage stats for owner discovery."""
+    jc = cfg.get("join") or ""
+    wc = cfg["where"]
+
+    conn = await asyncpg.connect(**DB_CONFIG)
+
+    # Total hotels in source
+    total = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotels h {jc} WHERE ({wc})"
+    )
+
+    # Hotels with website
+    with_website = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotels h {jc}"
+        f" WHERE ({wc}) AND h.website IS NOT NULL AND h.website != ''"
+    )
+
+    # Hotels with at least one decision maker
+    with_dm = await conn.fetchval(
+        f"SELECT COUNT(DISTINCT h.id) FROM sadie_gtm.hotels h {jc}"
+        f" JOIN sadie_gtm.hotel_decision_makers dm ON dm.hotel_id = h.id"
+        f" WHERE ({wc})"
+    )
+
+    # Total decision makers
+    total_dms = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc})"
+    )
+
+    # Decision makers by source
+    sources = await conn.fetch(
+        f"SELECT s AS src, COUNT(*) AS cnt"
+        f" FROM sadie_gtm.hotel_decision_makers dm"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc},"
+        f" LATERAL unnest(dm.sources) AS s"
+        f" WHERE ({wc})"
+        f" GROUP BY s ORDER BY cnt DESC"
+    )
+
+    # Hotels with enrichment status (CC sweep attempted)
+    enriched = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotel_owner_enrichment oe"
+        f" JOIN sadie_gtm.hotels h ON h.id = oe.hotel_id {jc}"
+        f" WHERE ({wc})"
+    )
+
+    # DMs with vs without email
+    with_email = await conn.fetchval(
+        f"SELECT COUNT(*) FROM sadie_gtm.hotel_decision_makers dm"
+        f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+        f" WHERE ({wc}) AND dm.email IS NOT NULL AND dm.email != ''"
+    )
+
+    print(f"\n{'='*60}")
+    print(f"Owner Discovery Audit: {cfg['label']}")
+    print(f"{'='*60}")
+    print(f"  Hotels total:          {total:>6}")
+    print(f"  Hotels with website:   {with_website:>6}  ({100*with_website/max(total,1):.0f}%)")
+    print(f"  Hotels enriched (any): {enriched:>6}  ({100*enriched/max(total,1):.0f}%)")
+    print(f"  Hotels with DM found:  {with_dm:>6}  ({100*with_dm/max(total,1):.0f}%)")
+    print(f"")
+    print(f"  Decision makers total: {total_dms:>6}")
+    print(f"  DMs with email:        {with_email:>6}  ({100*with_email/max(total_dms,1):.0f}%)")
+    print(f"  DMs without email:     {total_dms - with_email:>6}")
+    print(f"")
+    print(f"  Sources:")
+    for r in sources:
+        print(f"    {r['src']:<30} {r['cnt']:>5}")
+
+    if args.verbose:
+        # Sample DMs found via CC
+        samples = await conn.fetch(
+            f"SELECT dm.full_name, dm.title, h.name AS hotel_name,"
+            f" dm.sources, dm.confidence"
+            f" FROM sadie_gtm.hotel_decision_makers dm"
+            f" JOIN sadie_gtm.hotels h ON h.id = dm.hotel_id {jc}"
+            f" WHERE ({wc}) AND dm.sources && ARRAY['cc_website_llm', 'cc_website_regex', 'cc_website_jsonld']"
+            f" ORDER BY dm.created_at DESC LIMIT 20"
+        )
+        if samples:
+            print(f"\n  Recent CC-discovered DMs:")
+            for r in samples:
+                src = ', '.join(r['sources']) if r['sources'] else '?'
+                print(f"    {r['full_name']:30s} | {(r['title'] or ''):25s} | {r['hotel_name'][:30]:30s} | {src}")
+
+    await conn.close()
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+async def main():
+    parser = argparse.ArgumentParser(
+        description="Owner discovery via Common Crawl -- find hotel owners, GMs, and decision makers",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"Available sources: {', '.join(SOURCE_CONFIGS.keys())}, custom",
+    )
+    parser.add_argument("--source", required=True,
+                        help=f"Source config: {', '.join(SOURCE_CONFIGS.keys())}, or 'custom'")
+    parser.add_argument("--where", type=str, default=None,
+                        help="Custom WHERE clause (for --source custom)")
+    parser.add_argument("--audit", action="store_true",
+                        help="Print owner discovery coverage stats")
+    parser.add_argument("--apply", action="store_true",
+                        help="Write results to DB (default: dry-run mode)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show what would be processed without fetching")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max hotels to process")
+    parser.add_argument("-v", "--verbose", action="store_true")
+
+    args = parser.parse_args()
+
+    logger.remove()
+    logger.add(sys.stderr, level="DEBUG" if args.verbose else "INFO")
+
+    if args.source == "custom":
+        if not args.where:
+            print("ERROR: --source custom requires --where")
+            sys.exit(1)
+        cfg = {
+            "label": "Custom",
+            "where": args.where,
+            "join": None,
+            "country": "AU",
+        }
+    elif args.source in SOURCE_CONFIGS:
+        cfg = SOURCE_CONFIGS[args.source]
+    else:
+        print(f"ERROR: Unknown source '{args.source}'. "
+              f"Available: {', '.join(SOURCE_CONFIGS.keys())}, custom")
+        sys.exit(1)
+
+    logger.info(f"Source: {cfg['label']}")
+
+    if args.audit:
+        await audit(args, cfg)
+    else:
+        stats = await discover_owners_cc(args, cfg)
+        if not args.dry_run and not args.apply:
+            print(f"\nDry-run complete. {stats.get('owners_extracted', 0)} owners found. "
+                  f"Run with --apply to write to DB.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
