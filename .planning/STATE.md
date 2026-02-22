@@ -8,7 +8,7 @@
 
 **Core value:** Turn raw hotel data into actionable sales leads with verified owner/decision-maker contact info at 100K+ scale.
 
-**Current focus:** Completing the Owner/Decision Makers DAG end-to-end.
+**Current focus:** Batch-first CC-driven owner discovery.
 
 **Active branch:** feat/generic-enrich-contacts
 
@@ -16,18 +16,18 @@
 
 ## Current Position
 
-**Milestone:** v1 -- Owner/DM Pipeline Completion
-**Phase:** 1 of 6 -- Contact Enrichment Pipeline
-**Plan:** Not yet planned
-**Status:** Not Started
+**Milestone:** v2 -- Batch-First Owner Discovery
+**Phase:** 7 of 12 -- CC Hotel Domain Sweep (Complete)
+**Plan:** All 3 plans complete
+**Status:** Phase 7 verified ✓
 
 ```
-Phase 1 [..........] Contact Enrichment Pipeline
-Phase 2 [..........] Government Data Expansion
-Phase 3 [..........] Pipeline Resilience
-Phase 4 [..........] Common Crawl Pipeline
-Phase 5 [..........] Multi-Source Convergence
-Phase 6 [..........] Automated DAG
+Phase 7  [##########] CC Hotel Domain Sweep ✓
+Phase 8  [..........] CC Third-Party Sources
+Phase 9  [..........] Live Crawl Gap-Fill
+Phase 10 [..........] Batch Structured Data
+Phase 11 [..........] Email Discovery and Verification
+Phase 12 [..........] Waterfall Orchestration
 ```
 
 ---
@@ -36,10 +36,10 @@ Phase 6 [..........] Automated DAG
 
 | Metric | Value |
 |--------|-------|
-| Plans completed | 0 |
-| Plans total | TBD (not yet planned) |
-| Phases completed | 0 / 6 |
-| Requirements completed | 0 / 13 |
+| Plans completed | 3 |
+| Plans total | 3 (phase 7) |
+| Phases completed | 1 / 6 |
+| Requirements completed | 4 / 13 |
 
 ---
 
@@ -49,25 +49,25 @@ Phase 6 [..........] Automated DAG
 
 | Decision | Rationale | Date |
 |----------|-----------|------|
-| 6 phases derived from 13 requirements | Natural clustering by dependency and delivery boundary; depth=comprehensive but requirements don't justify more | 2026-02-21 |
-| Government Data moved to Phase 2 | User priority: get gov data sources in early; no dependencies, can parallelize with Phase 1 and Phase 3 | 2026-02-21 |
-| Phases 1+2+3 all parallelizable | Contact enrichment, gov data, and resilience are fully independent concerns | 2026-02-21 |
-| DAG automation last (Phase 6) | Must have all pipeline stages working before automating their chaining | 2026-02-21 |
-| Defer Prefect adoption | Research synthesis recommends DIY SQS chaining + circuit breakers first; revisit after Phase 3 | 2026-02-21 |
-| AWS Nova Micro for LLM extraction | User-specified; replaces GPT-3.5-turbo references in research | 2026-02-21 |
+| v2 supersedes v1 | v1 scope was too broad; v2 focuses on batch-first owner discovery | 2026-02-21 |
+| Batch-first over per-hotel waterfall | Contact enrichment proved batch CC sweep is dramatically faster and cheaper | 2026-02-21 |
+| CC as primary data source (~80%) | CC has most hotel pages cached; free vs Serper per-query costs | 2026-02-21 |
+| Three-tier extraction (JSON-LD → regex → LLM) | Minimize LLM costs; structured methods are free and higher confidence | 2026-02-21 |
+| AWS Nova Micro for LLM extraction | Proven in contact enrichment; cheap, fast, good at structured extraction | 2026-02-21 |
+| aiohttp not httpx for live crawling | User specified; handles 1000+ concurrent connections | 2026-02-21 |
+| Single-file workflow pattern | discover_owners.py (945 lines) matches enrich_contacts.py pattern | 2026-02-21 |
+| PIPE-03 bundled with Phase 7 | Incremental persistence and CLI are foundational -- CC sweep needs them | 2026-02-21 |
+| Phase 10 parallelizable | Batch RDAP/DNS/WHOIS has no dependency on CC results | 2026-02-21 |
 
 ### Technical Notes
 
-- Contact enrichment is actively in-progress on `feat/generic-enrich-contacts` branch
-- Existing 9-layer owner discovery waterfall is deployed and working
-- LLM extraction uses AWS Nova Micro (not GPT-3.5-turbo as some docs reference)
-- Florida DBPR government data already ingested
-- CF Worker proxy operational for IP rotation
-- Common Crawl index querying exists but needs improvement
-
-### Todos
-
-- [ ] Plan Phase 1 (Contact Enrichment Pipeline)
+- Phase 7 delivered: workflows/discover_owners.py (945 lines)
+- CC harvest reuses exact patterns from enrich_contacts.py (CF Worker /batch, WARC fetch, gzip decompress)
+- Three-tier extraction: JSON-LD (0.9 confidence) → regex (0.7) → LLM (0.65)
+- Incremental flush every 20 hotels via repo.batch_persist_results()
+- CLI: --source, --limit, --apply, --audit, --dry-run, -v
+- Dry-run showed: 307 hotels, 174 unique domains, 522 CC queries
+- Audit showed: 304/307 hotels already have DMs (99%), 1046 total DMs
 
 ### Blockers
 
@@ -77,13 +77,11 @@ None currently.
 
 ## Session Continuity
 
-**What just happened:** Roadmap revised -- Government Data Expansion moved from Phase 4 to Phase 2 per user priority. Pipeline Resilience becomes Phase 3, Common Crawl becomes Phase 4. Dependencies updated accordingly: Phases 1+2+3 fully parallel, Phase 4 after Phase 3, Phase 5 after Phase 2+4, Phase 6 after Phase 1+3+5.
+**What just happened:** Phase 7 (CC Hotel Domain Sweep) executed and verified. 3 plans in 3 waves, all passed. workflows/discover_owners.py created with 945 lines.
 
-**What happens next:** Plan Phase 1 (Contact Enrichment Pipeline) -- decompose OWNER-02 into executable plans.
+**What happens next:** Phase 8 (CC Third-Party Sources) or Phases 8+9+10 in parallel (8 and 9 depend on 7, 10 is independent).
 
 **Key files:**
-- `.planning/ROADMAP.md` -- phase structure and success criteria
-- `.planning/REQUIREMENTS.md` -- v1 requirements with traceability
-- `.planning/PROJECT.md` -- project context and constraints
-- `.planning/research/SUMMARY.md` -- research synthesis informing phase structure
-- `.planning/config.json` -- depth=comprehensive, mode=yolo, parallelization=enabled
+- `workflows/discover_owners.py` -- new CC owner discovery pipeline (945 lines)
+- `.planning/phases/07-cc-hotel-domain-sweep/07-VERIFICATION.md` -- phase verification report
+- `.planning/ROADMAP.md` -- phase 7 marked complete
